@@ -19,6 +19,16 @@ const sessions = {};
 const manualMode = {};
 const lastActiveClient = {};
 
+// Функция для отправки критических ошибок администратору
+async function sendAdminAlert(text) {
+    if (!ADMIN_CHAT_ID) return;
+    try {
+        await bot.telegram.sendMessage(ADMIN_CHAT_ID, `🚨 Бот MLK: ${text}`);
+    } catch (err) {
+        console.error('Не удалось отправить alert админу:', err.message);
+    }
+}
+
 async function askDeepSeek(userMessage, chatId) {
     if (!sessions[chatId]) {
         sessions[chatId] = [{ role: 'system', content: SYSTEM_PROMPT }];
@@ -123,9 +133,19 @@ http.createServer((req, res) => {
     res.end('OK');
 }).listen(process.env.PORT || 10000);
 
-// Глобальный обработчик необработанных ошибок, чтобы бот не падал
+// Глобальный обработчик необработанных ошибок
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Необработанная ошибка:', reason);
+    const errMsg = reason instanceof Error ? reason.message : String(reason);
+    console.error('Необработанная ошибка:', errMsg);
+    sendAdminAlert(`Необработанная ошибка: ${errMsg}`);
+});
+
+// Перехват фатальных ошибок (когда процесс собирается упасть)
+process.on('uncaughtException', (err) => {
+    console.error('Фатальная ошибка:', err.message);
+    sendAdminAlert(`Фатальная ошибка, бот упал: ${err.message}`);
+    // Даём время отправить сообщение, затем выходим (Render перезапустит)
+    setTimeout(() => process.exit(1), 1000);
 });
 
 // Запуск бота с повторными попытками при обрыве соединения
@@ -134,9 +154,11 @@ async function launchBot() {
         try {
             await bot.launch();
             console.log('Бот MLK запущен');
-            break; // если запуск успешен, выходим из цикла
+            sendAdminAlert('✅ Бот запущен и работает');
+            break;
         } catch (err) {
             console.error('Ошибка запуска, повтор через 5 секунд:', err.message);
+            sendAdminAlert(`Ошибка запуска: ${err.message}. Повтор через 5 сек.`);
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
