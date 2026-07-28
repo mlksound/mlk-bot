@@ -23,9 +23,11 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
+// Загрузка сессий при старте с логированием
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
+    let loadedCount = 0;
     for (const file of files) {
         if (!file.endsWith('.json')) continue;
         const filePath = path.join(SESSIONS_DIR, file);
@@ -37,13 +39,34 @@ function loadSessions() {
         try {
             const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
             sessions[path.basename(file, '.json')] = data;
-        } catch (e) { console.error('Ошибка чтения сессии:', e.message); }
+            loadedCount++;
+        } catch (e) {
+            console.error('Ошибка чтения сессии:', e.message);
+        }
     }
+    console.log(`Загружено сессий: ${loadedCount}`);
 }
 
+// Сохранение сессии в файл
 function saveSession(chatId, messages) {
     const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
     fs.writeFileSync(filePath, JSON.stringify(messages));
+}
+
+// Подгрузка сессии из файла, если она не в памяти (на случай, если стартовая загрузка не сработала)
+function ensureSession(chatId) {
+    if (!sessions[chatId]) {
+        const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
+        if (fs.existsSync(filePath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                sessions[chatId] = data;
+                console.log(`Сессия для ${chatId} подгружена из файла`);
+            } catch (e) {
+                console.error('Ошибка подгрузки сессии:', e.message);
+            }
+        }
+    }
 }
 
 const manualMode = {};
@@ -51,6 +74,7 @@ const lastActiveClient = {};
 const greetedUsers = {};
 
 async function askDeepSeek(userMessage, chatId, userFirstName) {
+    ensureSession(chatId); // подгружаем сессию, если её нет в памяти
     if (!sessions[chatId]) {
         sessions[chatId] = [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -214,6 +238,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
+// Обработка callback-запросов (календари, кнопки)
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
@@ -280,8 +305,17 @@ bot.on('callback_query', async (ctx) => {
         if (data === 'equip_done') {
             await ctx.answerCbQuery();
             await ctx.editMessageReplyMarkup(undefined);
+            // Получаем выбранные опции
+            const selected = ctx.callbackQuery.message.reply_markup.inline_keyboard
+                .flat()
+                .filter(btn => btn.callback_data.startsWith('equip_') && btn.callback_data !== 'equip_done')
+                .map(btn => btn.text);
+            const messageText = selected.length > 0 
+                ? `Выбрано оборудование: ${selected.join(', ')}` 
+                : 'Оборудование не выбрано';
+            await ctx.reply(messageText);
             const user = ctx.from;
-            const reply = await askDeepSeek('Оборудование выбрано, можно продолжать', chatId, user.first_name);
+            const reply = await askDeepSeek(messageText, chatId, user.first_name);
             await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
         } else {
             await ctx.answerCbQuery('Добавлено');
