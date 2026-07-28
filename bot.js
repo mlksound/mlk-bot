@@ -87,7 +87,6 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// Функция построения календаря (как раньше)
 function buildCalendar(year, month, prefix) {
     const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
@@ -123,7 +122,6 @@ function buildCalendar(year, month, prefix) {
     return { buttons, header };
 }
 
-// Функция отправки сообщения с интерактивным элементом
 async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
     if (keyboardType === 'calendar') {
         const now = new Date();
@@ -162,7 +160,6 @@ async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
     }
 }
 
-// Словарь тегов и соответствующих клавиатур
 const tagToKeyboard = {
     '[ask_date_start]': { type: 'calendar', prefix: 'date_start', text: '📅 Выберите дату начала мероприятия:' },
     '[ask_date_end]': { type: 'calendar', prefix: 'date_end', text: '📅 Выберите дату окончания:' },
@@ -173,7 +170,6 @@ const tagToKeyboard = {
     '[ask_mount]': { type: 'mount', prefix: 'mount', text: '⏱ Время монтажа:' }
 };
 
-// Обработка текстовых сообщений
 bot.on('text', async (ctx) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
@@ -191,26 +187,22 @@ bot.on('text', async (ctx) => {
     ctx.sendChatAction('typing');
     try {
         const reply = await askDeepSeek(userMessage, chatId, user.first_name);
-        // Проверяем, есть ли в ответе теги для интерактивных клавиатур
         let finalText = reply;
         let keyboardInfo = null;
         for (const [tag, info] of Object.entries(tagToKeyboard)) {
             if (reply.includes(tag)) {
                 finalText = finalText.replace(tag, '').trim();
                 keyboardInfo = info;
-                break; // поддерживаем только один тег за раз
+                break;
             }
         }
 
         if (keyboardInfo) {
-            // Отправляем сообщение с клавиатурой
-            await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
-            // Если остался непустой текст, отправляем его отдельным сообщением перед клавиатурой
             if (finalText.length > 0) {
                 await ctx.reply(finalText);
             }
+            await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
         } else {
-            // Обычный ответ с кнопкой "Связаться с менеджером"
             await ctx.reply(finalText, Markup.inlineKeyboard([
                 Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')
             ]));
@@ -222,13 +214,11 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// Обработка callback-запросов (календари, кнопки)
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
     if (data === 'ignore') return ctx.answerCbQuery();
 
-    // Обработка календарей
     const calendarPrefixes = ['date_start', 'date_end', 'ready_date'];
     for (const prefix of calendarPrefixes) {
         if (data.startsWith(prefix)) {
@@ -244,18 +234,13 @@ bot.on('callback_query', async (ctx) => {
             } else if (parts[2] === 'set') {
                 const dateStr = parts[3];
                 await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
-                // Удаляем клавиатуру и отправляем сообщение в чат
                 await ctx.editMessageReplyMarkup(undefined);
                 const humanDate = dateStr.split('-').reverse().join('.');
                 const messageText = `Дата${prefix === 'date_start' ? ' начала' : prefix === 'date_end' ? ' окончания' : ' готовности'}: ${humanDate}`;
                 await ctx.reply(messageText);
-                // Отправляем это же сообщение как входящее для ИИ, чтобы он продолжил диалог
                 const user = ctx.from;
                 const reply = await askDeepSeek(messageText, chatId, user.first_name);
-                await ctx.reply(reply, Markup.inlineKeyboard([
-                    Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')
-                ]));
-                notifyAdmin(`🤖 Ответ ИИ клиенту ${user.first_name}:\n\n${reply}`);
+                await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
             } else if (parts[2] === 'skip') {
                 await ctx.answerCbQuery('Пропущено');
                 await ctx.editMessageReplyMarkup(undefined);
@@ -263,20 +248,16 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.reply(skipMsg);
                 const user = ctx.from;
                 const reply = await askDeepSeek(skipMsg, chatId, user.first_name);
-                await ctx.reply(reply, Markup.inlineKeyboard([
-                    Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')
-                ]));
+                await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
             }
             return;
         }
     }
 
-    // Обработка выбора формата
     if (data.startsWith('format_')) {
-        const value = data.replace('format_', '');
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = value === 'skip' ? 'Формат не указан' : `Формат: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = data === 'format_skip' ? 'Формат не указан' : `Формат: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -284,12 +265,10 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Обработка выбора места
     if (data.startsWith('place_')) {
-        const value = data.replace('place_', '');
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = value === 'skip' ? 'Место не указано' : `Место: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = data === 'place_skip' ? 'Место не указано' : `Место: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -297,28 +276,23 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Обработка выбора оборудования (можно несколько)
     if (data.startsWith('equip_')) {
-        const value = data.replace('equip_', '');
-        if (value === 'done') {
+        if (data === 'equip_done') {
             await ctx.answerCbQuery();
             await ctx.editMessageReplyMarkup(undefined);
             const user = ctx.from;
             const reply = await askDeepSeek('Оборудование выбрано, можно продолжать', chatId, user.first_name);
             await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
         } else {
-            // Просто переключаем галочку (без сохранения состояния, просто для красоты)
             await ctx.answerCbQuery('Добавлено');
         }
         return;
     }
 
-    // Обработка выбора времени монтажа
     if (data.startsWith('mount_')) {
-        const value = data.replace('mount_', '');
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = value === 'skip' ? 'Время монтажа не указано' : `Монтаж: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = data === 'mount_skip' ? 'Время монтажа не указано' : `Монтаж: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -326,12 +300,10 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Обработка кнопок "Ответить" и "Связаться с менеджером"
     if (data.startsWith('reply_to_')) {
-        const targetId = data.replace('reply_to_', '');
-        lastActiveClient[ADMIN_CHAT_ID] = targetId;
+        lastActiveClient[ADMIN_CHAT_ID] = data.replace('reply_to_', '');
         await ctx.answerCbQuery('Теперь просто напишите /reply текст');
-        await ctx.reply(`Активный клиент: ${targetId}. Используйте /reply текст.`);
+        await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
         return;
     }
     if (data === 'contact_manager') {
@@ -344,13 +316,12 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// Остальные обработчики (start, reply, resume, document, photo, message)
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
     if (greetedUsers[chatId]) {
         ctx.reply('С возвращением! Продолжим с того места, где остановились.');
     } else {
-        ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Рад помочь вам с техническим оснащением мероприятия. Просто опишите задачу, и я помогу подобрать оборудование и ответить на вопросы.');
+        ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Рад помочь с техническим оснащением. Просто опишите вашу задачу — я помогу подобрать оборудование и отвечу на вопросы.');
         greetedUsers[chatId] = true;
     }
     lastActiveClient[ADMIN_CHAT_ID] = chatId;
@@ -372,6 +343,10 @@ bot.command('resume', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
     Object.keys(manualMode).forEach(key => delete manualMode[key]);
     ctx.reply('Автоответы возобновлены.');
+});
+
+bot.command('menu', (ctx) => {
+    ctx.reply('Вы можете заполнить данные в любое время прямо в чате. Просто расскажите о мероприятии, а я буду задавать уточняющие вопросы и предлагать удобные формы для ввода.');
 });
 
 bot.on('document', async (ctx) => {
@@ -420,7 +395,6 @@ bot.on('message', async (ctx, next) => {
     return next();
 });
 
-// Мини-сервер для health check
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('OK');
@@ -444,8 +418,8 @@ async function launchBot() {
     while (true) {
         try {
             await bot.launch();
-            console.log('Бот MLK запущен (с гибким меню)');
-            notifyAdmin('✅ Бот запущен и работает (с гибким меню)');
+            console.log('Бот MLK запущен');
+            notifyAdmin('✅ Бот запущен и работает');
             break;
         } catch (err) {
             console.error('Ошибка запуска, повтор через 5 сек:', err.message);
