@@ -1,14 +1,14 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
-const http = require('http'); // <-- добавили
+const http = require('http');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 
 if (!BOT_TOKEN || !DEEPSEEK_API_KEY) {
-    console.error('Ошибка: не заданы BOT_TOKEN или DEEPSEEK_API_KEY в .env');
+    console.error('Ошибка: не заданы BOT_TOKEN или DEEPSEEK_API_KEY');
     process.exit(1);
 }
 
@@ -21,9 +21,7 @@ const lastActiveClient = {};
 
 async function askDeepSeek(userMessage, chatId) {
     if (!sessions[chatId]) {
-        sessions[chatId] = [
-            { role: 'system', content: SYSTEM_PROMPT }
-        ];
+        sessions[chatId] = [{ role: 'system', content: SYSTEM_PROMPT }];
     }
     const messages = sessions[chatId];
     messages.push({ role: 'user', content: userMessage });
@@ -34,16 +32,12 @@ async function askDeepSeek(userMessage, chatId) {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
         },
-        body: JSON.stringify({
-            model: 'deepseek-chat',
-            messages: messages,
-            temperature: 0.7
-        })
+        body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.7 })
     });
 
     const data = await response.json();
-    if (data.error) throw new Error('Ошибка API: ' + data.error.message);
-    if (!data.choices?.[0]?.message) throw new Error('Некорректный ответ');
+    if (data.error) throw new Error('DeepSeek API error: ' + data.error.message);
+    if (!data.choices?.[0]?.message) throw new Error('Invalid DeepSeek response');
     const reply = data.choices[0].message.content;
 
     messages.push({ role: 'assistant', content: reply });
@@ -53,14 +47,18 @@ async function askDeepSeek(userMessage, chatId) {
 
 async function notifyAdmin(text, extra = {}) {
     if (!ADMIN_CHAT_ID) return;
-    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
+    try {
+        await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra);
+    } catch (err) {
+        console.error('Ошибка уведомления:', err.message);
+    }
 }
 
 bot.start((ctx) => {
-    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Рад помочь вам с техническим оснащением мероприятия. Расскажите, пожалуйста, о вашем проекте.');
+    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK...');
     const user = ctx.from;
     lastActiveClient[ADMIN_CHAT_ID] = user.id;
-    notifyAdmin(`🔔 Новый диалог: ${user.first_name} ${user.last_name || ''} (@${user.username || 'нет'}, ID: ${user.id})`);
+    notifyAdmin(`🔔 Новый диалог: ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})`);
 });
 
 bot.command('reply', (ctx) => {
@@ -104,14 +102,14 @@ bot.on('text', async (ctx) => {
     if (String(user.id) === String(ADMIN_CHAT_ID)) return;
     lastActiveClient[ADMIN_CHAT_ID] = user.id;
     notifyAdmin(
-        `📩 Сообщение от ${user.first_name} ${user.last_name || ''} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`,
-        Markup.inlineKeyboard([ Markup.button.callback('✉️ Ответить', `reply_to_${user.id}`) ])
+        `📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`,
+        Markup.inlineKeyboard([Markup.button.callback('✉️ Ответить', `reply_to_${user.id}`)])
     );
     if (manualMode[chatId]) return;
     ctx.sendChatAction('typing');
     try {
         const reply = await askDeepSeek(userMessage, chatId);
-        await ctx.reply(reply, Markup.inlineKeyboard([ Markup.button.callback('📞 Связаться с менеджером', 'contact_manager') ]));
+        await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
         notifyAdmin(`🤖 Ответ ИИ клиенту ${user.first_name}:\n\n${reply}`);
     } catch (err) {
         console.error('Ошибка DeepSeek:', err.message);
@@ -119,10 +117,29 @@ bot.on('text', async (ctx) => {
     }
 });
 
-bot.launch().then(() => console.log('Бот MLK запущен'));
-
-// Мини-сервер для health check Render
+// Мини-сервер для проверки здоровья Render
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('OK');
 }).listen(process.env.PORT || 10000);
+
+// Глобальный обработчик необработанных ошибок, чтобы бот не падал
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Необработанная ошибка:', reason);
+});
+
+// Запуск бота с повторными попытками при обрыве соединения
+async function launchBot() {
+    while (true) {
+        try {
+            await bot.launch();
+            console.log('Бот MLK запущен');
+            break; // если запуск успешен, выходим из цикла
+        } catch (err) {
+            console.error('Ошибка запуска, повтор через 5 секунд:', err.message);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+    }
+}
+
+launchBot();
