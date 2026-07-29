@@ -15,6 +15,10 @@ if (!BOT_TOKEN || !DEEPSEEK_API_KEY) {
 
 const bot = new Telegraf(BOT_TOKEN);
 const SYSTEM_PROMPT = fs.readFileSync('./promt.txt', 'utf8');
+const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
+
+// Ключевые слова, при которых добавляем портфолио
+const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект'];
 
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -73,11 +77,16 @@ const manualMode = {};
 const lastActiveClient = {};
 const greetedUsers = {};
 
-async function askDeepSeek(userMessage, chatId, userFirstName) {
-    ensureSession(chatId); // подгружаем сессию, если её нет в памяти
+async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
+    ensureSession(chatId);
+    let systemPrompt = SYSTEM_PROMPT;
+    if (addPortfolio) {
+        systemPrompt += '\n\n**Дополнительная информация (портфолио):**\n' + PORTFOLIO_TEXT;
+    }
+    
     if (!sessions[chatId]) {
         sessions[chatId] = [
-            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'system', content: systemPrompt },
             { role: 'system', content: `Имя клиента: ${userFirstName}` }
         ];
     }
@@ -208,13 +217,19 @@ bot.on('text', async (ctx) => {
 
     if (manualMode[chatId]) return;
 
+    // Проверяем, нужно ли добавить портфолио
+    const lowerMessage = userMessage.toLowerCase();
+    const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
+
     ctx.sendChatAction('typing');
     try {
-        const reply = await askDeepSeek(userMessage, chatId, user.first_name);
+        const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
+        console.log('Ответ ИИ:', reply);
         let finalText = reply;
         let keyboardInfo = null;
         for (const [tag, info] of Object.entries(tagToKeyboard)) {
             if (reply.includes(tag)) {
+                console.log(`Найден тег: ${tag}`);
                 finalText = finalText.replace(tag, '').trim();
                 keyboardInfo = info;
                 break;
@@ -222,10 +237,23 @@ bot.on('text', async (ctx) => {
         }
 
         if (keyboardInfo) {
+            console.log(`Показываю клавиатуру типа: ${keyboardInfo.type}`);
             if (finalText.length > 0) {
                 await ctx.reply(finalText);
             }
-            await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
+            try {
+                await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
+            } catch (e) {
+                console.error('Ошибка отправки клавиатуры:', e.message);
+                // Fallback: текстовый список вариантов
+                let fallbackText = keyboardInfo.text + '\n';
+                if (keyboardInfo.type === 'equipment') {
+                    fallbackText += '1. Звуковое оборудование\n2. Светодиодные экраны\n3. Световое оборудование\n4. Сценические конструкции\nНапишите номера через запятую.';
+                } else if (keyboardInfo.type === 'format') {
+                    fallbackText += '1. Концерты & Фестивали\n2. Конференции & Презентации & TV-проекты\n3. Корпоративы & Торжества\n4. Выставки\n5. Спортивные мероприятия';
+                }
+                await ctx.reply(fallbackText || 'Пожалуйста, выберите вариант:');
+            }
         } else {
             await ctx.reply(finalText, Markup.inlineKeyboard([
                 Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')
@@ -383,6 +411,10 @@ bot.command('menu', (ctx) => {
     ctx.reply('Вы можете заполнить данные в любое время прямо в чате. Просто расскажите о мероприятии, а я буду задавать уточняющие вопросы и предлагать удобные формы для ввода.');
 });
 
+bot.command('portfolio', (ctx) => {
+    ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
+});
+
 bot.on('document', async (ctx) => {
     const user = ctx.from;
     const doc = ctx.message.document;
@@ -430,6 +462,7 @@ bot.on('message', async (ctx, next) => {
 });
 
 http.createServer((req, res) => {
+    console.log(`Получен HTTP-запрос: ${req.method} ${req.url} от ${req.socket.remoteAddress}`);
     res.writeHead(200);
     res.end('OK');
 }).listen(process.env.PORT || 10000);
@@ -449,6 +482,8 @@ process.on('uncaughtException', (err) => {
 
 async function launchBot() {
     loadSessions();
+    await bot.stop();
+    await new Promise(resolve => setTimeout(resolve, 1000));
     while (true) {
         try {
             await bot.launch();
