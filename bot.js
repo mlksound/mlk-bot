@@ -482,8 +482,7 @@ process.on('uncaughtException', (err) => {
 
 async function launchBot() {
     loadSessions();
-    await bot.stop();
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Убрали bot.stop(), который вызывал ошибку при первом запуске
     while (true) {
         try {
             await bot.launch();
