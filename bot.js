@@ -20,6 +20,9 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 // Ключевые слова, при которых добавляем портфолио
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект'];
 
+// Инструкция для модели, чтобы она НЕ ВЫДУМЫВАЛА проекты
+const PORTFOLIO_INSTRUCTION = '\n\n**ВАЖНО: Сейчас ты должен использовать ТОЛЬКО проекты из списка ниже. Не придумывай других мероприятий, городов или названий. Если подходящего проекта нет, скажи, что точный пример найдёт менеджер.**\n';
+
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) {
     fs.mkdirSync(SESSIONS_DIR);
@@ -27,7 +30,6 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
-// Загрузка сессий при старте с логированием
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
@@ -51,13 +53,11 @@ function loadSessions() {
     console.log(`Загружено сессий: ${loadedCount}`);
 }
 
-// Сохранение сессии в файл
 function saveSession(chatId, messages) {
     const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
     fs.writeFileSync(filePath, JSON.stringify(messages));
 }
 
-// Подгрузка сессии из файла, если она не в памяти (на случай, если стартовая загрузка не сработала)
 function ensureSession(chatId) {
     if (!sessions[chatId]) {
         const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
@@ -81,7 +81,8 @@ async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = fa
     ensureSession(chatId);
     let systemPrompt = SYSTEM_PROMPT;
     if (addPortfolio) {
-        systemPrompt += '\n\n**Дополнительная информация (портфолио):**\n' + PORTFOLIO_TEXT;
+        // Добавляем строгую инструкцию и только потом портфолио
+        systemPrompt += PORTFOLIO_INSTRUCTION + PORTFOLIO_TEXT;
     }
     
     if (!sessions[chatId]) {
@@ -482,7 +483,6 @@ process.on('uncaughtException', (err) => {
 
 async function launchBot() {
     loadSessions();
-    // Убрали bot.stop(), который вызывал ошибку при первом запуске
     while (true) {
         try {
             await bot.launch();
