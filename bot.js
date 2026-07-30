@@ -17,8 +17,8 @@ const bot = new Telegraf(BOT_TOKEN);
 const SYSTEM_PROMPT = fs.readFileSync('./promt.txt', 'utf8');
 const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
-// Ключевые слова, при которых добавляем портфолио
-const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект'];
+// Расширенный список ключевых слов для портфолио
+const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) {
@@ -27,7 +27,6 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
-// Загрузка сессий при старте
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
@@ -51,13 +50,11 @@ function loadSessions() {
     console.log(`Загружено сессий: ${loadedCount}`);
 }
 
-// Сохранение сессии в файл
 function saveSession(chatId, messages) {
     const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
     fs.writeFileSync(filePath, JSON.stringify(messages));
 }
 
-// Подгрузка сессии из файла, если она не в памяти
 function ensureSession(chatId) {
     if (!sessions[chatId]) {
         const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
@@ -81,7 +78,6 @@ async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = fa
     ensureSession(chatId);
     let finalMessage = userMessage;
     if (addPortfolio && PORTFOLIO_TEXT) {
-        // Вставляем портфолио прямо в сообщение пользователя с жёстким приказом
         finalMessage = `Отвечай, используя ТОЛЬКО проекты из списка ниже. Не выдумывай других. Вот список:\n${PORTFOLIO_TEXT}\n\nВопрос клиента: ${userMessage}`;
     }
 
@@ -108,7 +104,6 @@ async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = fa
     if (!data.choices?.[0]?.message) throw new Error('Invalid DeepSeek response');
     const reply = data.choices[0].message.content;
 
-    // Возвращаем исходное сообщение в историю, чтобы не хранить портфолио
     messages[messages.length - 1] = { role: 'user', content: userMessage };
     messages.push({ role: 'assistant', content: reply });
     if (messages.length > 30) {
