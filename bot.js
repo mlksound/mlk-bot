@@ -58,11 +58,57 @@ function ensureSession(chatId) {
     }
 }
 
-// Хранилище состояний диалога и выбора оборудования
-const userState = new Map(); // chatId -> { step, data }
-// Шаги: 'format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount', 'confirm', null
+const manualMode = {};
+const lastActiveClient = {};
+const greetedUsers = {};
 
-// Вспомогательные функции для отправки клавиатур
+async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
+    ensureSession(chatId);
+    let finalMessage = userMessage;
+    if (addPortfolio && PORTFOLIO_TEXT) {
+        finalMessage = `Отвечай, используя ТОЛЬКО проекты из списка ниже. Не выдумывай других. Вот список:\n${PORTFOLIO_TEXT}\n\nВопрос клиента: ${userMessage}`;
+    }
+
+    if (!sessions[chatId]) {
+        sessions[chatId] = [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'system', content: `Имя клиента: ${userFirstName}` }
+        ];
+    }
+    const messages = sessions[chatId];
+    messages.push({ role: 'user', content: finalMessage });
+
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.7 })
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error('DeepSeek API error: ' + data.error.message);
+    if (!data.choices?.[0]?.message) throw new Error('Invalid DeepSeek response');
+    const reply = data.choices[0].message.content;
+
+    messages[messages.length - 1] = { role: 'user', content: userMessage };
+    messages.push({ role: 'assistant', content: reply });
+    if (messages.length > 30) {
+        sessions[chatId] = [messages[0], ...messages.slice(-30)];
+    }
+    saveSession(chatId, sessions[chatId]);
+    return reply;
+}
+
+async function notifyAdmin(text, extra = {}) {
+    if (!ADMIN_CHAT_ID) return;
+    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
+}
+
+// Хранилище состояний диалога и выбора оборудования
+const userState = new Map(); // chatId -> { step, data, equipment: Set }
+
 function getFormatKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Концерты & Фестивали', 'format_concerts')],
@@ -139,9 +185,8 @@ function getCalendar(year, month, prefix) {
     return Markup.inlineKeyboard(buttons);
 }
 
-// Переход к следующему шагу
 async function showNextStep(ctx, chatId) {
-    const state = userState.get(chatId) || { step: 'format', data: {} };
+    const state = userState.get(chatId) || { step: 'format', data: {}, equipment: new Set() };
     const now = new Date();
     switch (state.step) {
         case 'format':
@@ -160,7 +205,6 @@ async function showNextStep(ctx, chatId) {
             await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
             break;
         case 'equipment':
-            // При первом входе на шаг сбрасываем выбор
             if (!state.equipment) state.equipment = new Set();
             userState.set(chatId, state);
             await ctx.reply('🔧 Какое оборудование необходимо? (можно выбрать несколько)', getEquipmentKeyboard(chatId));
@@ -168,34 +212,35 @@ async function showNextStep(ctx, chatId) {
         case 'mount':
             await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
             break;
-        case 'confirm':
-            // Собираем итоговую сводку и отправляем ИИ
+        case 'confirm': {
             const summary = Object.entries(state.data)
                 .map(([k, v]) => `${k}: ${v}`)
                 .join('\n');
-            // Отправляем ИИ сообщение-сводку для генерации финального ответа
-            const reply = await askDeepSeek(`Сводка: ${summary}`, chatId, '', false);
-            await ctx.reply(reply || 'Данные собраны. Менеджер свяжется с вами.');
-            // Сбрасываем состояние
+            try {
+                const reply = await askDeepSeek(`Сводка: ${summary}`, chatId, '', false);
+                await ctx.reply(reply || 'Данные собраны. Менеджер свяжется с вами.');
+            } catch (e) {
+                await ctx.reply('Данные собраны. Менеджер свяжется с вами.');
+            }
             userState.delete(chatId);
             break;
+        }
         default:
             break;
     }
 }
 
-// Обработка callback-запросов (календари, кнопки)
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
     if (data === 'ignore') return ctx.answerCbQuery();
 
-    const state = userState.get(chatId) || { step: 'format', data: {} };
+    const state = userState.get(chatId) || { step: 'format', data: {}, equipment: new Set() };
 
     // Календари
     if (data.startsWith('date_start') || data.startsWith('date_end') || data.startsWith('ready_date')) {
         const parts = data.split('_');
-        const prefix = parts[0] + '_' + parts[1]; // date_start, date_end, ready_date
+        const prefix = parts[0] + '_' + parts[1];
         if (parts[2] === 'prev' || parts[2] === 'next') {
             const year = parseInt(parts[3]);
             const month = parseInt(parts[4]);
@@ -208,20 +253,12 @@ bot.on('callback_query', async (ctx) => {
             await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
             await ctx.editMessageReplyMarkup(undefined);
             const humanDate = dateStr.split('-').reverse().join('.');
-            const labelMap = {
-                date_start: 'Дата начала',
-                date_end: 'Дата окончания',
-                ready_date: 'Дата готовности'
-            };
+            const labelMap = { date_start: 'Дата начала', date_end: 'Дата окончания', ready_date: 'Дата готовности' };
             state.data[prefix] = humanDate;
-            // Переход к следующему шагу
             const stepOrder = ['date_start', 'date_end', 'ready_date'];
             const idx = stepOrder.indexOf(prefix);
-            if (idx < stepOrder.length - 1) {
-                state.step = stepOrder[idx + 1];
-            } else {
-                state.step = 'place';
-            }
+            if (idx < stepOrder.length - 1) state.step = stepOrder[idx + 1];
+            else state.step = 'place';
             userState.set(chatId, state);
             await ctx.reply(`${labelMap[prefix]}: ${humanDate}`);
             await showNextStep(ctx, chatId);
@@ -230,11 +267,8 @@ bot.on('callback_query', async (ctx) => {
             await ctx.editMessageReplyMarkup(undefined);
             const stepOrder = ['date_start', 'date_end', 'ready_date'];
             const idx = stepOrder.indexOf(prefix);
-            if (idx < stepOrder.length - 1) {
-                state.step = stepOrder[idx + 1];
-            } else {
-                state.step = 'place';
-            }
+            if (idx < stepOrder.length - 1) state.step = stepOrder[idx + 1];
+            else state.step = 'place';
             userState.set(chatId, state);
             await ctx.reply('Пропущено');
             await showNextStep(ctx, chatId);
@@ -345,7 +379,6 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-// Обработка текстовых сообщений (для ручного ввода дат, адреса, оборудования и т.д.)
 bot.on('text', async (ctx, next) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
@@ -359,41 +392,32 @@ bot.on('text', async (ctx, next) => {
 
     const state = userState.get(chatId);
     if (!state) {
-        // Начинаем новый диалог
-        userState.set(chatId, { step: 'format', data: {} });
+        userState.set(chatId, { step: 'format', data: {}, equipment: new Set() });
         await ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Давайте подберём оборудование для вашего мероприятия.');
         await showNextStep(ctx, chatId);
         return;
     }
 
-    // Если пользователь ввёл текст вместо кнопки, пытаемся интерпретировать
-    // Для простоты просто переходим к следующему шагу, сохраняя текст как данные
-    const stepMap = {
-        'format': 'format',
-        'date_start': 'date_start',
-        'date_end': 'date_end',
-        'ready_date': 'ready_date',
-        'place': 'place',
-        'equipment': 'equipment',
-        'mount': 'mount'
-    };
-    state.data[state.step] = userMessage;
-    const stepOrder = ['format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount'];
-    const idx = stepOrder.indexOf(state.step);
-    if (idx < stepOrder.length - 1) {
-        state.step = stepOrder[idx + 1];
-    } else {
-        state.step = 'confirm';
+    // Ручной ввод — сохраняем и переходим
+    const step = state.step;
+    if (step && step !== 'confirm') {
+        state.data[step] = userMessage;
+        const order = ['format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount'];
+        const idx = order.indexOf(step);
+        if (idx >= 0 && idx < order.length - 1) {
+            state.step = order[idx + 1];
+        } else {
+            state.step = 'confirm';
+        }
+        userState.set(chatId, state);
+        await showNextStep(ctx, chatId);
     }
-    userState.set(chatId, state);
-    await showNextStep(ctx, chatId);
 });
 
-// Команды и остальное (без изменений)
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
     userState.delete(chatId);
-    userState.set(chatId, { step: 'format', data: {} });
+    userState.set(chatId, { step: 'format', data: {}, equipment: new Set() });
     ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Давайте подберём оборудование для вашего мероприятия.');
     showNextStep(ctx, chatId);
 });
@@ -419,5 +443,84 @@ bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
 });
 
-// ... (остальной код: document, photo, message forwarding, http сервер, запуск)
-// Ниже вставьте уже существующие обработчики document, photo, message, http сервер, launchBot, они без изменений.
+bot.on('document', async (ctx) => {
+    const user = ctx.from;
+    const doc = ctx.message.document;
+    if (!doc) return;
+    await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
+    try {
+        await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
+            caption: `📎 Документ от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
+        });
+    } catch (err) { console.error('Ошибка пересылки документа:', err.message); }
+});
+
+bot.on('photo', async (ctx) => {
+    const user = ctx.from;
+    const photos = ctx.message.photo;
+    if (!photos || photos.length === 0) return;
+    const largest = photos[photos.length - 1];
+    await ctx.reply('Спасибо! Я передал ваше фото менеджеру.');
+    try {
+        await ctx.telegram.sendPhoto(ADMIN_CHAT_ID, largest.file_id, {
+            caption: `📷 Фото от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})`
+        });
+    } catch (err) { console.error('Ошибка пересылки фото:', err.message); }
+});
+
+bot.on('message', async (ctx, next) => {
+    const user = ctx.from;
+    if (String(user.id) !== String(ADMIN_CHAT_ID)) return next();
+    const targetId = lastActiveClient[ADMIN_CHAT_ID];
+    if (!targetId) return next();
+    const msg = ctx.message;
+    if (msg.document) {
+        try {
+            await ctx.telegram.sendDocument(targetId, msg.document.file_id, { caption: msg.caption || '' });
+            ctx.reply('✅ Документ отправлен клиенту.');
+        } catch (err) { ctx.reply('❌ Ошибка отправки.'); }
+    } else if (msg.photo) {
+        const largest = msg.photo[msg.photo.length - 1];
+        try {
+            await ctx.telegram.sendPhoto(targetId, largest.file_id, { caption: msg.caption || '' });
+            ctx.reply('✅ Фото отправлено клиенту.');
+        } catch (err) { ctx.reply('❌ Ошибка отправки.'); }
+    }
+    return next();
+});
+
+http.createServer((req, res) => {
+    console.log(`Получен HTTP-запрос: ${req.method} ${req.url} от ${req.socket.remoteAddress}`);
+    res.writeHead(200);
+    res.end('OK');
+}).listen(process.env.PORT || 10000);
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+process.on('unhandledRejection', (reason) => {
+    console.error('Необработанная ошибка:', reason);
+    notifyAdmin(`🚨 Необработанная ошибка: ${reason}`);
+});
+process.on('uncaughtException', (err) => {
+    console.error('Фатальная ошибка:', err.message);
+    notifyAdmin(`🚨 Фатальная ошибка: ${err.message}`);
+    setTimeout(() => process.exit(1), 1000);
+});
+
+async function launchBot() {
+    loadSessions();
+    while (true) {
+        try {
+            await bot.launch();
+            console.log('Бот MLK запущен');
+            notifyAdmin('✅ Бот запущен и работает');
+            break;
+        } catch (err) {
+            console.error('Ошибка запуска, повтор через 5 сек:', err.message);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+    }
+}
+
+launchBot();
