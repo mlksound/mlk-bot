@@ -75,9 +75,9 @@ function getFormatKeyboard() {
 
 function getLevelKeyboard() {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('Стандартный', 'level_standard')],
-        [Markup.button.callback('Высокие требования', 'level_high')],
-        [Markup.button.callback('Высший уровень', 'level_top')]
+        [Markup.button.callback('Стандартный (обычные требования)', 'level_standard')],
+        [Markup.button.callback('Высокие требования (повышенные требования, ТВ-трансляции)', 'level_high')],
+        [Markup.button.callback('Высший уровень (высшие должностные лица, международные)', 'level_top')]
     ]);
 }
 
@@ -212,7 +212,7 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработка ответа ИИ (теги -> клавиатуры) ----------
+// ---------- Обработка ответа ИИ ----------
 async function handleAIReply(ctx, text, chatId) {
     const tagRegex = /\[(ask_\w+)\]/;
     const match = text.match(tagRegex);
@@ -461,7 +461,7 @@ bot.on('callback_query', async (ctx) => {
     if (data === 'send_tz') {
         await ctx.answerCbQuery();
         await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
-        // Устанавливаем флаг ожидания файлов (можно хранить в сессии)
+        // Устанавливаем флаг ожидания файлов
         if (!sessions[chatId]) sessions[chatId] = [];
         sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
         return;
@@ -525,7 +525,6 @@ bot.command('portfolio', (ctx) => {
 // ---------- Пересылка файлов ----------
 bot.on('document', async (ctx) => {
     const chatId = ctx.chat.id;
-    // Проверяем, ожидает ли бот файлы ТЗ
     if (sessions[chatId] && sessions[chatId].some(m => m.content === 'Клиент хочет отправить файлы.')) {
         const user = ctx.from;
         const doc = ctx.message.document;
@@ -535,11 +534,9 @@ bot.on('document', async (ctx) => {
                 caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
             });
         } catch (err) { console.error('Ошибка пересылки:', err.message); }
-        // Убираем флаг
         sessions[chatId] = sessions[chatId].filter(m => m.content !== 'Клиент хочет отправить файлы.');
         return;
     }
-    // Обычная пересылка
     const user = ctx.from;
     const doc = ctx.message.document;
     await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
@@ -563,7 +560,7 @@ bot.on('photo', async (ctx) => {
     } catch (err) { console.error('Ошибка пересылки:', err.message); }
 });
 
-// ---------- HTTP сервер для Render ----------
+// ---------- HTTP сервер ----------
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('OK');
@@ -581,7 +578,6 @@ process.on('uncaughtException', (err) => {
     setTimeout(() => process.exit(1), 1000);
 });
 
-// ---------- Запуск ----------
 async function launchBot() {
     loadSessions();
     while (true) {
