@@ -19,96 +19,11 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
-const SESSIONS_DIR = path.join(__dirname, 'sessions');
-if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR);
-const sessions = {};
-const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
-
-function loadSessions() {
-    const files = fs.readdirSync(SESSIONS_DIR);
-    const now = Date.now();
-    let loadedCount = 0;
-    for (const file of files) {
-        if (!file.endsWith('.json')) continue;
-        const filePath = path.join(SESSIONS_DIR, file);
-        const stats = fs.statSync(filePath);
-        if (now - stats.mtimeMs > SESSION_TTL) {
-            fs.unlinkSync(filePath);
-            continue;
-        }
-        try {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-            sessions[path.basename(file, '.json')] = data;
-            loadedCount++;
-        } catch (e) { console.error('Ошибка чтения сессии:', e.message); }
-    }
-    console.log(`Загружено сессий: ${loadedCount}`);
-}
-
-function saveSession(chatId, messages) {
-    fs.writeFileSync(path.join(SESSIONS_DIR, `${chatId}.json`), JSON.stringify(messages));
-}
-
-function ensureSession(chatId) {
-    if (!sessions[chatId]) {
-        const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
-        if (fs.existsSync(filePath)) {
-            try { sessions[chatId] = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) {}
-        }
-    }
-}
-
 const manualMode = {};
 const lastActiveClient = {};
-const greetedUsers = {};
-
-async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
-    ensureSession(chatId);
-    let finalMessage = userMessage;
-    if (addPortfolio && PORTFOLIO_TEXT) {
-        finalMessage = `Отвечай, используя ТОЛЬКО проекты из списка ниже. Не выдумывай других. Вот список:\n${PORTFOLIO_TEXT}\n\nВопрос клиента: ${userMessage}`;
-    }
-
-    if (!sessions[chatId]) {
-        sessions[chatId] = [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'system', content: `Имя клиента: ${userFirstName}` }
-        ];
-    }
-    const messages = sessions[chatId];
-    messages.push({ role: 'user', content: finalMessage });
-
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.7 })
-    });
-
-    const data = await response.json();
-    if (data.error) throw new Error('DeepSeek API error: ' + data.error.message);
-    if (!data.choices?.[0]?.message) throw new Error('Invalid DeepSeek response');
-    const reply = data.choices[0].message.content;
-
-    messages[messages.length - 1] = { role: 'user', content: userMessage };
-    messages.push({ role: 'assistant', content: reply });
-    if (messages.length > 30) {
-        sessions[chatId] = [messages[0], ...messages.slice(-30)];
-    }
-    saveSession(chatId, sessions[chatId]);
-    return reply;
-}
-
-async function notifyAdmin(text, extra = {}) {
-    if (!ADMIN_CHAT_ID) return;
-    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
-}
-
-// Хранилище состояний диалога и выбора оборудования
 const userState = new Map(); // chatId -> { step, data, equipment: Set }
 
+// ---------- Клавиатуры ----------
 function getFormatKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Концерты & Фестивали', 'format_concerts')],
@@ -185,6 +100,7 @@ function getCalendar(year, month, prefix) {
     return Markup.inlineKeyboard(buttons);
 }
 
+// ---------- Логика шагов ----------
 async function showNextStep(ctx, chatId) {
     const state = userState.get(chatId) || { step: 'format', data: {}, equipment: new Set() };
     const now = new Date();
@@ -193,7 +109,7 @@ async function showNextStep(ctx, chatId) {
             await ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
             break;
         case 'date_start':
-            await ctx.reply('📅 Выберите дату начала мероприятия:', getCalendar(now.getFullYear(), now.getMonth(), 'date_start'));
+            await ctx.reply('📅 Выберите дату начала:', getCalendar(now.getFullYear(), now.getMonth(), 'date_start'));
             break;
         case 'date_end':
             await ctx.reply('📅 Выберите дату окончания:', getCalendar(now.getFullYear(), now.getMonth(), 'date_end'));
@@ -216,12 +132,9 @@ async function showNextStep(ctx, chatId) {
             const summary = Object.entries(state.data)
                 .map(([k, v]) => `${k}: ${v}`)
                 .join('\n');
-            try {
-                const reply = await askDeepSeek(`Сводка: ${summary}`, chatId, '', false);
-                await ctx.reply(reply || 'Данные собраны. Менеджер свяжется с вами.');
-            } catch (e) {
-                await ctx.reply('Данные собраны. Менеджер свяжется с вами.');
-            }
+            await ctx.reply('Спасибо! Ваши данные отправлены менеджеру.');
+            // Здесь можно добавить отправку summary администратору
+            notifyAdmin(`📋 Новая заявка:\n\n${summary}`);
             userState.delete(chatId);
             break;
         }
@@ -230,6 +143,12 @@ async function showNextStep(ctx, chatId) {
     }
 }
 
+async function notifyAdmin(text, extra = {}) {
+    if (!ADMIN_CHAT_ID) return;
+    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
+}
+
+// ---------- Обработчики кнопок ----------
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
@@ -367,7 +286,6 @@ bot.on('callback_query', async (ctx) => {
         await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
         return;
     }
-
     // Связаться с менеджером
     if (data === 'contact_manager') {
         manualMode[chatId] = true;
@@ -379,41 +297,7 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
-bot.on('text', async (ctx, next) => {
-    const chatId = ctx.chat.id;
-    const userMessage = ctx.message.text;
-    const user = ctx.from;
-    if (String(user.id) === String(ADMIN_CHAT_ID)) return next();
-
-    lastActiveClient[ADMIN_CHAT_ID] = user.id;
-    notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`, Markup.inlineKeyboard([Markup.button.callback('✉️ Ответить', `reply_to_${user.id}`)]));
-
-    if (manualMode[chatId]) return;
-
-    const state = userState.get(chatId);
-    if (!state) {
-        userState.set(chatId, { step: 'format', data: {}, equipment: new Set() });
-        await ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Давайте подберём оборудование для вашего мероприятия.');
-        await showNextStep(ctx, chatId);
-        return;
-    }
-
-    // Ручной ввод — сохраняем и переходим
-    const step = state.step;
-    if (step && step !== 'confirm') {
-        state.data[step] = userMessage;
-        const order = ['format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount'];
-        const idx = order.indexOf(step);
-        if (idx >= 0 && idx < order.length - 1) {
-            state.step = order[idx + 1];
-        } else {
-            state.step = 'confirm';
-        }
-        userState.set(chatId, state);
-        await showNextStep(ctx, chatId);
-    }
-});
-
+// ---------- Команда /start ----------
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
     userState.delete(chatId);
@@ -422,6 +306,32 @@ bot.start((ctx) => {
     showNextStep(ctx, chatId);
 });
 
+// ---------- Обработка текстовых сообщений (для ответа на вопросы) ----------
+bot.on('text', async (ctx, next) => {
+    const chatId = ctx.chat.id;
+    const userMessage = ctx.message.text;
+    const user = ctx.from;
+    if (String(user.id) === String(ADMIN_CHAT_ID)) return next();
+
+    lastActiveClient[ADMIN_CHAT_ID] = user.id;
+    notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`);
+
+    if (manualMode[chatId]) return;
+
+    // Проверяем, спрашивает ли пользователь об опыте
+    const lowerMessage = userMessage.toLowerCase();
+    if (PORTFOLIO_KEYWORDS.some(kw => lowerMessage.includes(kw))) {
+        await ctx.reply(PORTFOLIO_TEXT);
+        return;
+    }
+
+    // Если пользователь просто что-то пишет, а не нажимает кнопки, подсказываем ему
+    if (userState.has(chatId)) {
+        await ctx.reply('Пожалуйста, используйте кнопки выше для ответа.');
+    }
+});
+
+// ---------- Команды админа ----------
 bot.command('reply', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
     const targetId = lastActiveClient[ADMIN_CHAT_ID];
@@ -439,10 +349,7 @@ bot.command('resume', (ctx) => {
     ctx.reply('Автоответы возобновлены.');
 });
 
-bot.command('portfolio', (ctx) => {
-    ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
-});
-
+// ---------- Пересылка файлов ----------
 bot.on('document', async (ctx) => {
     const user = ctx.from;
     const doc = ctx.message.document;
@@ -468,53 +375,30 @@ bot.on('photo', async (ctx) => {
     } catch (err) { console.error('Ошибка пересылки фото:', err.message); }
 });
 
-bot.on('message', async (ctx, next) => {
-    const user = ctx.from;
-    if (String(user.id) !== String(ADMIN_CHAT_ID)) return next();
-    const targetId = lastActiveClient[ADMIN_CHAT_ID];
-    if (!targetId) return next();
-    const msg = ctx.message;
-    if (msg.document) {
-        try {
-            await ctx.telegram.sendDocument(targetId, msg.document.file_id, { caption: msg.caption || '' });
-            ctx.reply('✅ Документ отправлен клиенту.');
-        } catch (err) { ctx.reply('❌ Ошибка отправки.'); }
-    } else if (msg.photo) {
-        const largest = msg.photo[msg.photo.length - 1];
-        try {
-            await ctx.telegram.sendPhoto(targetId, largest.file_id, { caption: msg.caption || '' });
-            ctx.reply('✅ Фото отправлено клиенту.');
-        } catch (err) { ctx.reply('❌ Ошибка отправки.'); }
-    }
-    return next();
-});
-
+// ---------- HTTP-сервер для Render ----------
 http.createServer((req, res) => {
-    console.log(`Получен HTTP-запрос: ${req.method} ${req.url} от ${req.socket.remoteAddress}`);
     res.writeHead(200);
     res.end('OK');
 }).listen(process.env.PORT || 10000);
 
+// ---------- Защита от падений ----------
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 process.on('unhandledRejection', (reason) => {
     console.error('Необработанная ошибка:', reason);
-    notifyAdmin(`🚨 Необработанная ошибка: ${reason}`);
 });
 process.on('uncaughtException', (err) => {
     console.error('Фатальная ошибка:', err.message);
-    notifyAdmin(`🚨 Фатальная ошибка: ${err.message}`);
     setTimeout(() => process.exit(1), 1000);
 });
 
+// ---------- Запуск ----------
 async function launchBot() {
-    loadSessions();
     while (true) {
         try {
             await bot.launch();
             console.log('Бот MLK запущен');
-            notifyAdmin('✅ Бот запущен и работает');
             break;
         } catch (err) {
             console.error('Ошибка запуска, повтор через 5 сек:', err.message);
