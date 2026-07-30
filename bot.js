@@ -17,7 +17,6 @@ const bot = new Telegraf(BOT_TOKEN);
 const SYSTEM_PROMPT = fs.readFileSync('./promt.txt', 'utf8');
 const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
-// Расширенный список ключевых слов для портфолио
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
@@ -192,20 +191,25 @@ async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
 }
 
 const tagToKeyboard = {
-    '[ask_date_start]': { type: 'calendar', prefix: 'date_start', text: '📅 Выберите дату начала мероприятия:' },
-    '[ask_date_end]': { type: 'calendar', prefix: 'date_end', text: '📅 Выберите дату окончания:' },
-    '[ask_ready_date]': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования (можно пропустить):' },
-    '[ask_format]': { type: 'format', prefix: 'format', text: '🎭 Выберите формат мероприятия:' },
-    '[ask_place]': { type: 'place', prefix: 'place', text: '📍 Где проходит мероприятие?' },
-    '[ask_equipment]': { type: 'equipment', prefix: 'equip', text: '🔧 Какое оборудование необходимо? (можно выбрать несколько)' },
-    '[ask_mount]': { type: 'mount', prefix: 'mount', text: '⏱ Время монтажа:' }
+    'ask_date_start': { type: 'calendar', prefix: 'date_start', text: '📅 Выберите дату начала мероприятия:' },
+    'ask_date_end':   { type: 'calendar', prefix: 'date_end',   text: '📅 Выберите дату окончания:' },
+    'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования (можно пропустить):' },
+    'ask_format':     { type: 'format',   prefix: 'format',     text: '🎭 Выберите формат мероприятия:' },
+    'ask_place':      { type: 'place',    prefix: 'place',      text: '📍 Где проходит мероприятие?' },
+    'ask_equipment':  { type: 'equipment', prefix: 'equip',     text: '🔧 Какое оборудование необходимо? (можно выбрать несколько)' },
+    'ask_mount':      { type: 'mount',    prefix: 'mount',      text: '⏱ Время монтажа:' }
 };
 
-bot.on('text', async (ctx) => {
+bot.on('text', async (ctx, next) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
     const user = ctx.from;
-    if (String(user.id) === String(ADMIN_CHAT_ID)) return;
+
+    // Администраторские сообщения не обрабатываем как клиентские,
+    // но пропускаем дальше, чтобы работали команды /form, /reply и т.д.
+    if (String(user.id) === String(ADMIN_CHAT_ID)) {
+        return next();
+    }
 
     lastActiveClient[ADMIN_CHAT_ID] = user.id;
     notifyAdmin(
@@ -223,15 +227,19 @@ bot.on('text', async (ctx) => {
     try {
         const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
         console.log('Ответ ИИ:', reply);
+
+        // Ищем любой тег в ответе (надёжнее, чем includes)
+        const tagRegex = /\[(ask_\w+)\]/;
+        const match = reply.match(tagRegex);
         let finalText = reply;
         let keyboardInfo = null;
-        for (const [tag, info] of Object.entries(tagToKeyboard)) {
-            if (reply.includes(tag)) {
-                console.log(`Найден тег: ${tag}`);
-                finalText = finalText.replace(tag, '').trim();
-                keyboardInfo = info;
-                break;
-            }
+
+        if (match) {
+            const tagName = match[1]; // например, 'ask_format'
+            const fullTag = match[0]; // '[ask_format]'
+            console.log(`Найден тег: ${fullTag}`);
+            finalText = reply.replace(fullTag, '').trim();
+            keyboardInfo = tagToKeyboard[tagName];
         }
 
         if (keyboardInfo) {
@@ -331,7 +339,6 @@ bot.on('callback_query', async (ctx) => {
         if (data === 'equip_done') {
             await ctx.answerCbQuery();
             await ctx.editMessageReplyMarkup(undefined);
-            // Получаем выбранные опции
             const selected = ctx.callbackQuery.message.reply_markup.inline_keyboard
                 .flat()
                 .filter(btn => btn.callback_data.startsWith('equip_') && btn.callback_data !== 'equip_done')
@@ -414,7 +421,7 @@ bot.command('portfolio', (ctx) => {
 });
 
 bot.command('form', (ctx) => {
-    ctx.reply('Пожалуйста, заполните форму для быстрого расчёта:', Markup.inlineKeyboard([
+    ctx.reply('Пожалуйста, заполните форму для отправки заявки.', Markup.inlineKeyboard([
         Markup.button.url('📋 Заполнить форму', 'https://mlk-bot.onrender.com/form')
     ]));
 });
