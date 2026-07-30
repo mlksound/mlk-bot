@@ -75,9 +75,9 @@ function getFormatKeyboard() {
 
 function getLevelKeyboard() {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('Стандартный (обычные требования)', 'level_standard')],
-        [Markup.button.callback('Высокие требования (повышенные требования, ТВ-трансляции)', 'level_high')],
-        [Markup.button.callback('Высший уровень (высшие должностные лица, международные)', 'level_top')]
+        [Markup.button.callback('Стандартный (обычные требования к оборудованию и документации)', 'level_standard')],
+        [Markup.button.callback('Высокие требования (повышенные требования к оборудованию и документации, прямые ТВ-трансляции)', 'level_high')],
+        [Markup.button.callback('Высший уровень (с высшими должностными лицами, масштабные и международные мероприятия)', 'level_top')]
     ]);
 }
 
@@ -212,7 +212,7 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработка ответа ИИ ----------
+// ---------- Обработка ответа ИИ (теги + fallback) ----------
 async function handleAIReply(ctx, text, chatId) {
     const tagRegex = /\[(ask_\w+)\]/;
     const match = text.match(tagRegex);
@@ -237,6 +237,7 @@ async function handleAIReply(ctx, text, chatId) {
         };
         keyboardInfo = tagToKeyboard[tagName];
     } else {
+        // Fallback: если тег не найден, но по ключевым словам можно определить нужную клавиатуру
         const lowerText = text.toLowerCase();
         if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
             keyboardInfo = { type: 'format' };
@@ -484,6 +485,13 @@ bot.on('callback_query', async (ctx) => {
         sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
         return;
     }
+
+    // Кнопка "Начать опрос"
+    if (data === 'start_survey') {
+        await ctx.answerCbQuery();
+        await ctx.reply('Хорошо, давайте начнём опрос. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
+        return;
+    }
 });
 
 // ---------- Текстовые сообщения ----------
@@ -498,15 +506,9 @@ bot.on('text', async (ctx, next) => {
 
     if (manualMode[chatId]) return;
 
-    const lowerMsg = userMessage.toLowerCase();
-    if (lowerMsg.includes('отправить тз') || lowerMsg.includes('отправить техзадание') || lowerMsg.includes('скинуть тз')) {
-        await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
-        if (!sessions[chatId]) sessions[chatId] = [];
-        sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
-        return;
-    }
+    const lowerMessage = userMessage.toLowerCase();
+    const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
 
-    const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMsg.includes(keyword));
     ctx.sendChatAction('typing');
     try {
         const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
@@ -520,11 +522,10 @@ bot.on('text', async (ctx, next) => {
 // ---------- Команды ----------
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
-    ctx.reply(
-        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ». Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.',
-        Markup.inlineKeyboard([Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')])
-    );
-    ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
+    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ». Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.', Markup.inlineKeyboard([
+        [Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')],
+        [Markup.button.callback('📋 Начать опрос', 'start_survey')]
+    ]));
 });
 
 bot.command('reply', (ctx) => {
