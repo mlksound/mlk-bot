@@ -60,7 +60,7 @@ function ensureSession(chatId) {
 
 const manualMode = {};
 const lastActiveClient = {};
-const equipmentSelection = new Map(); // chatId -> Set
+const equipmentSelection = new Map();
 
 // ---------- Клавиатуры ----------
 function getFormatKeyboard() {
@@ -236,6 +236,25 @@ async function handleAIReply(ctx, text, chatId) {
             'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования:' }
         };
         keyboardInfo = tagToKeyboard[tagName];
+    } else {
+        const lowerText = text.toLowerCase();
+        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
+            keyboardInfo = { type: 'format' };
+        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия')) {
+            keyboardInfo = { type: 'level' };
+        } else if (lowerText.includes('персонал')) {
+            keyboardInfo = { type: 'personnel' };
+        } else if (lowerText.includes('место') && lowerText.includes('проходит')) {
+            keyboardInfo = { type: 'place' };
+        } else if (lowerText.includes('лифт') || lowerText.includes('подъем')) {
+            keyboardInfo = { type: 'lift' };
+        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое'))) {
+            keyboardInfo = { type: 'equipment' };
+        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж')) {
+            keyboardInfo = { type: 'mount' };
+        } else if (lowerText.includes('демонтаж')) {
+            keyboardInfo = { type: 'demount' };
+        }
     }
 
     if (finalText.length > 0) await ctx.reply(finalText);
@@ -461,7 +480,6 @@ bot.on('callback_query', async (ctx) => {
     if (data === 'send_tz') {
         await ctx.answerCbQuery();
         await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
-        // Устанавливаем флаг ожидания файлов
         if (!sessions[chatId]) sessions[chatId] = [];
         sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
         return;
@@ -480,9 +498,15 @@ bot.on('text', async (ctx, next) => {
 
     if (manualMode[chatId]) return;
 
-    const lowerMessage = userMessage.toLowerCase();
-    const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
+    const lowerMsg = userMessage.toLowerCase();
+    if (lowerMsg.includes('отправить тз') || lowerMsg.includes('отправить техзадание') || lowerMsg.includes('скинуть тз')) {
+        await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
+        if (!sessions[chatId]) sessions[chatId] = [];
+        sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
+        return;
+    }
 
+    const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMsg.includes(keyword));
     ctx.sendChatAction('typing');
     try {
         const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
@@ -496,9 +520,11 @@ bot.on('text', async (ctx, next) => {
 // ---------- Команды ----------
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
-    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.', Markup.inlineKeyboard([
-        [Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')]
-    ]));
+    ctx.reply(
+        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ». Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.',
+        Markup.inlineKeyboard([Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')])
+    );
+    ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
 });
 
 bot.command('reply', (ctx) => {
@@ -528,7 +554,7 @@ bot.on('document', async (ctx) => {
     if (sessions[chatId] && sessions[chatId].some(m => m.content === 'Клиент хочет отправить файлы.')) {
         const user = ctx.from;
         const doc = ctx.message.document;
-        await ctx.reply('Спасибо! Файлы получены, я передаю их в отдел подготовки КП. Если понадобятся уточнения, с вами свяжутся.');
+        await ctx.reply('Спасибо! Файлы получены, я передаю их в отдел подготовки КП.');
         try {
             await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
                 caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
