@@ -20,9 +20,6 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 // Ключевые слова, при которых добавляем портфолио
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект'];
 
-// Инструкция для модели, чтобы она НЕ ВЫДУМЫВАЛА проекты
-const PORTFOLIO_INSTRUCTION = '\n\n**ВАЖНО: Сейчас ты должен использовать ТОЛЬКО проекты из списка ниже. Не придумывай других мероприятий, городов или названий. Если подходящего проекта нет, скажи, что точный пример найдёт менеджер.**\n';
-
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) {
     fs.mkdirSync(SESSIONS_DIR);
@@ -30,6 +27,7 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
+// Загрузка сессий при старте
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
@@ -53,11 +51,13 @@ function loadSessions() {
     console.log(`Загружено сессий: ${loadedCount}`);
 }
 
+// Сохранение сессии в файл
 function saveSession(chatId, messages) {
     const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
     fs.writeFileSync(filePath, JSON.stringify(messages));
 }
 
+// Подгрузка сессии из файла, если она не в памяти
 function ensureSession(chatId) {
     if (!sessions[chatId]) {
         const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
@@ -79,20 +79,20 @@ const greetedUsers = {};
 
 async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
     ensureSession(chatId);
-    let systemPrompt = SYSTEM_PROMPT;
-    if (addPortfolio) {
-        // Добавляем строгую инструкцию и только потом портфолио
-        systemPrompt += PORTFOLIO_INSTRUCTION + PORTFOLIO_TEXT;
+    let finalMessage = userMessage;
+    if (addPortfolio && PORTFOLIO_TEXT) {
+        // Вставляем портфолио прямо в сообщение пользователя с жёстким приказом
+        finalMessage = `Отвечай, используя ТОЛЬКО проекты из списка ниже. Не выдумывай других. Вот список:\n${PORTFOLIO_TEXT}\n\nВопрос клиента: ${userMessage}`;
     }
-    
+
     if (!sessions[chatId]) {
         sessions[chatId] = [
-            { role: 'system', content: systemPrompt },
+            { role: 'system', content: SYSTEM_PROMPT },
             { role: 'system', content: `Имя клиента: ${userFirstName}` }
         ];
     }
     const messages = sessions[chatId];
-    messages.push({ role: 'user', content: userMessage });
+    messages.push({ role: 'user', content: finalMessage });
 
     const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
@@ -108,6 +108,8 @@ async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = fa
     if (!data.choices?.[0]?.message) throw new Error('Invalid DeepSeek response');
     const reply = data.choices[0].message.content;
 
+    // Возвращаем исходное сообщение в историю, чтобы не хранить портфолио
+    messages[messages.length - 1] = { role: 'user', content: userMessage };
     messages.push({ role: 'assistant', content: reply });
     if (messages.length > 30) {
         sessions[chatId] = [messages[0], ...messages.slice(-30)];
@@ -416,6 +418,12 @@ bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
 });
 
+bot.command('form', (ctx) => {
+    ctx.reply('Пожалуйста, заполните форму для быстрого расчёта:', Markup.inlineKeyboard([
+        Markup.button.url('📋 Заполнить форму', 'https://mlk-bot.onrender.com/form')
+    ]));
+});
+
 bot.on('document', async (ctx) => {
     const user = ctx.from;
     const doc = ctx.message.document;
@@ -463,6 +471,22 @@ bot.on('message', async (ctx, next) => {
 });
 
 http.createServer((req, res) => {
+    if (req.url === '/form') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Форма MLK</title></head>
+<body>
+<script data-b24-form="inline/63/7ibl9f" data-skip-moving="true">
+(function(w,d,u){
+var s=d.createElement('script');s.async=true;s.src=u+'?'+(Date.now()/180000|0);
+var h=d.getElementsByTagName('script')[0];h.parentNode.insertBefore(s,h);
+})(window,document,'https://cdn-ru.bitrix24.by/b25076776/crm/form/loader_63.js');
+</script>
+</body>
+</html>`);
+        return;
+    }
     console.log(`Получен HTTP-запрос: ${req.method} ${req.url} от ${req.socket.remoteAddress}`);
     res.writeHead(200);
     res.end('OK');
