@@ -60,7 +60,7 @@ function ensureSession(chatId) {
 
 const manualMode = {};
 const lastActiveClient = {};
-const equipmentSelection = new Map(); // chatId -> Set
+const equipmentSelection = new Map();
 
 // ---------- Клавиатуры ----------
 function getFormatKeyboard() {
@@ -75,9 +75,9 @@ function getFormatKeyboard() {
 
 function getLevelKeyboard() {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('Стандартный', 'level_standard')],
-        [Markup.button.callback('Высокие требования', 'level_high')],
-        [Markup.button.callback('Высший уровень', 'level_top')]
+        [Markup.button.callback('Стандартный (обычные требования к оборудованию и документации)', 'level_standard')],
+        [Markup.button.callback('Высокие требования (повышенные требования к оборудованию и документации, прямые ТВ-трансляции)', 'level_high')],
+        [Markup.button.callback('Высший уровень (с высшими должностными лицами, масштабные и международные мероприятия)', 'level_top')]
     ]);
 }
 
@@ -212,7 +212,7 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработка ответа ИИ (теги -> клавиатуры) ----------
+// ---------- Обработка ответа ИИ (теги + fallback) ----------
 async function handleAIReply(ctx, text, chatId) {
     const tagRegex = /\[(ask_\w+)\]/;
     const match = text.match(tagRegex);
@@ -236,6 +236,26 @@ async function handleAIReply(ctx, text, chatId) {
             'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования:' }
         };
         keyboardInfo = tagToKeyboard[tagName];
+    } else {
+        // Fallback
+        const lowerText = text.toLowerCase();
+        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
+            keyboardInfo = { type: 'format' };
+        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия')) {
+            keyboardInfo = { type: 'level' };
+        } else if (lowerText.includes('персонал')) {
+            keyboardInfo = { type: 'personnel' };
+        } else if (lowerText.includes('место') && lowerText.includes('проходит')) {
+            keyboardInfo = { type: 'place' };
+        } else if (lowerText.includes('лифт') || lowerText.includes('подъем')) {
+            keyboardInfo = { type: 'lift' };
+        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое'))) {
+            keyboardInfo = { type: 'equipment' };
+        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж')) {
+            keyboardInfo = { type: 'mount' };
+        } else if (lowerText.includes('демонтаж')) {
+            keyboardInfo = { type: 'demount' };
+        }
     }
 
     if (finalText.length > 0) await ctx.reply(finalText);
@@ -461,9 +481,15 @@ bot.on('callback_query', async (ctx) => {
     if (data === 'send_tz') {
         await ctx.answerCbQuery();
         await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
-        // Устанавливаем флаг ожидания файлов (можно хранить в сессии)
         if (!sessions[chatId]) sessions[chatId] = [];
         sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
+        return;
+    }
+
+    // Кнопка "Начать опрос"
+    if (data === 'start_survey') {
+        await ctx.answerCbQuery();
+        await ctx.reply('Хорошо, давайте начнём опрос. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
         return;
     }
 });
@@ -496,8 +522,9 @@ bot.on('text', async (ctx, next) => {
 // ---------- Команды ----------
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
-    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.', Markup.inlineKeyboard([
-        [Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')]
+    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ». Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.', Markup.inlineKeyboard([
+        [Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')],
+        [Markup.button.callback('📋 Начать опрос', 'start_survey')]
     ]));
 });
 
@@ -525,21 +552,18 @@ bot.command('portfolio', (ctx) => {
 // ---------- Пересылка файлов ----------
 bot.on('document', async (ctx) => {
     const chatId = ctx.chat.id;
-    // Проверяем, ожидает ли бот файлы ТЗ
     if (sessions[chatId] && sessions[chatId].some(m => m.content === 'Клиент хочет отправить файлы.')) {
         const user = ctx.from;
         const doc = ctx.message.document;
-        await ctx.reply('Спасибо! Файлы получены, я передаю их в отдел подготовки КП. Если понадобятся уточнения, с вами свяжутся.');
+        await ctx.reply('Спасибо! Файлы получены, я передаю их в отдел подготовки КП.');
         try {
             await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
                 caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
             });
         } catch (err) { console.error('Ошибка пересылки:', err.message); }
-        // Убираем флаг
         sessions[chatId] = sessions[chatId].filter(m => m.content !== 'Клиент хочет отправить файлы.');
         return;
     }
-    // Обычная пересылка
     const user = ctx.from;
     const doc = ctx.message.document;
     await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
@@ -563,7 +587,7 @@ bot.on('photo', async (ctx) => {
     } catch (err) { console.error('Ошибка пересылки:', err.message); }
 });
 
-// ---------- HTTP сервер для Render ----------
+// ---------- HTTP сервер ----------
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('OK');
@@ -581,7 +605,6 @@ process.on('uncaughtException', (err) => {
     setTimeout(() => process.exit(1), 1000);
 });
 
-// ---------- Запуск ----------
 async function launchBot() {
     loadSessions();
     while (true) {
