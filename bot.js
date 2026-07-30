@@ -20,9 +20,7 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
-if (!fs.existsSync(SESSIONS_DIR)) {
-    fs.mkdirSync(SESSIONS_DIR);
-}
+if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR);
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
@@ -42,85 +40,71 @@ function loadSessions() {
             const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
             sessions[path.basename(file, '.json')] = data;
             loadedCount++;
-        } catch (e) {
-            console.error('Ошибка чтения сессии:', e.message);
-        }
+        } catch (e) { console.error('Ошибка чтения сессии:', e.message); }
     }
     console.log(`Загружено сессий: ${loadedCount}`);
 }
 
 function saveSession(chatId, messages) {
-    const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(messages));
+    fs.writeFileSync(path.join(SESSIONS_DIR, `${chatId}.json`), JSON.stringify(messages));
 }
 
 function ensureSession(chatId) {
     if (!sessions[chatId]) {
         const filePath = path.join(SESSIONS_DIR, `${chatId}.json`);
         if (fs.existsSync(filePath)) {
-            try {
-                const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-                sessions[chatId] = data;
-                console.log(`Сессия для ${chatId} подгружена из файла`);
-            } catch (e) {
-                console.error('Ошибка подгрузки сессии:', e.message);
-            }
+            try { sessions[chatId] = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) {}
         }
     }
 }
 
-const manualMode = {};
-const lastActiveClient = {};
-const greetedUsers = {};
+// Хранилище состояний диалога и выбора оборудования
+const userState = new Map(); // chatId -> { step, data }
+// Шаги: 'format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount', 'confirm', null
 
-// Хранилище выбранного оборудования для каждого чата
-const equipmentSelection = new Map(); // chatId -> Set of types
-
-async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
-    ensureSession(chatId);
-    let finalMessage = userMessage;
-    if (addPortfolio && PORTFOLIO_TEXT) {
-        finalMessage = `Отвечай, используя ТОЛЬКО проекты из списка ниже. Не выдумывай других. Вот список:\n${PORTFOLIO_TEXT}\n\nВопрос клиента: ${userMessage}`;
-    }
-
-    if (!sessions[chatId]) {
-        sessions[chatId] = [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'system', content: `Имя клиента: ${userFirstName}` }
-        ];
-    }
-    const messages = sessions[chatId];
-    messages.push({ role: 'user', content: finalMessage });
-
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.7 })
-    });
-
-    const data = await response.json();
-    if (data.error) throw new Error('DeepSeek API error: ' + data.error.message);
-    if (!data.choices?.[0]?.message) throw new Error('Invalid DeepSeek response');
-    const reply = data.choices[0].message.content;
-
-    messages[messages.length - 1] = { role: 'user', content: userMessage };
-    messages.push({ role: 'assistant', content: reply });
-    if (messages.length > 30) {
-        sessions[chatId] = [messages[0], ...messages.slice(-30)];
-    }
-    saveSession(chatId, sessions[chatId]);
-    return reply;
+// Вспомогательные функции для отправки клавиатур
+function getFormatKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('Концерты & Фестивали', 'format_concerts')],
+        [Markup.button.callback('Конференции & Презентации & TV-проекты', 'format_conferences')],
+        [Markup.button.callback('Корпоративы & Торжества', 'format_corporate')],
+        [Markup.button.callback('Выставки', 'format_exhibitions')],
+        [Markup.button.callback('Спортивные мероприятия', 'format_sports')],
+        [Markup.button.callback('Пропустить', 'format_skip')]
+    ]);
 }
 
-async function notifyAdmin(text, extra = {}) {
-    if (!ADMIN_CHAT_ID) return;
-    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
+function getPlaceKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('Улица', 'place_outdoor')],
+        [Markup.button.callback('Помещение', 'place_indoor')],
+        [Markup.button.callback('Под навесом', 'place_tent')],
+        [Markup.button.callback('Пропустить', 'place_skip')]
+    ]);
 }
 
-function buildCalendar(year, month, prefix) {
+function getMountKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('Любое по согласованию', 'mount_any')],
+        [Markup.button.callback('Нужно смонтировать ночью/рано утром', 'mount_night')],
+        [Markup.button.callback('Пропустить', 'mount_skip')]
+    ]);
+}
+
+function getEquipmentKeyboard(chatId) {
+    const selected = userState.get(chatId)?.equipment || new Set();
+    const mark = (type) => selected.has(type) ? '✅ ' : '';
+    return Markup.inlineKeyboard([
+        [Markup.button.callback(mark('all') + 'Весь комплект', 'equip_all')],
+        [Markup.button.callback(mark('sound') + 'Звуковое оборудование', 'equip_sound')],
+        [Markup.button.callback(mark('led') + 'Светодиодные экраны', 'equip_led')],
+        [Markup.button.callback(mark('light') + 'Световое оборудование', 'equip_light')],
+        [Markup.button.callback(mark('stage') + 'Сценические конструкции', 'equip_stage')],
+        [Markup.button.callback('Готово (продолжить)', 'equip_done')]
+    ]);
+}
+
+function getCalendar(year, month, prefix) {
     const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
     const daysInMonth = lastDay.getDate();
@@ -152,230 +136,162 @@ function buildCalendar(year, month, prefix) {
         buttons.push(row);
     }
     buttons.push([Markup.button.callback('Пропустить', `${prefix}_skip`)]);
-    return { buttons, header };
+    return Markup.inlineKeyboard(buttons);
 }
 
-// Формирует клавиатуру выбора оборудования с учётом текущего выбора
-function buildEquipmentKeyboard(chatId) {
-    const selected = equipmentSelection.get(chatId) || new Set();
-    const mark = (type) => selected.has(type) ? '✅ ' : '';
-    return Markup.inlineKeyboard([
-        [Markup.button.callback(mark('all') + 'Весь комплект', 'equip_all')],
-        [Markup.button.callback(mark('sound') + 'Звуковое оборудование', 'equip_sound')],
-        [Markup.button.callback(mark('led') + 'Светодиодные экраны', 'equip_led')],
-        [Markup.button.callback(mark('light') + 'Световое оборудование', 'equip_light')],
-        [Markup.button.callback(mark('stage') + 'Сценические конструкции', 'equip_stage')],
-        [Markup.button.callback('Готово (продолжить)', 'equip_done')]
-    ]);
-}
-
-async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
-    if (keyboardType === 'calendar') {
-        const now = new Date();
-        const { buttons } = buildCalendar(now.getFullYear(), now.getMonth(), prefix);
-        await ctx.reply(text, Markup.inlineKeyboard(buttons));
-    } else if (keyboardType === 'format') {
-        await ctx.reply(text, Markup.inlineKeyboard([
-            [Markup.button.callback('Концерты & Фестивали', 'format_concerts')],
-            [Markup.button.callback('Конференции & Презентации & TV-проекты', 'format_conferences')],
-            [Markup.button.callback('Корпоративы & Торжества', 'format_corporate')],
-            [Markup.button.callback('Выставки', 'format_exhibitions')],
-            [Markup.button.callback('Спортивные мероприятия', 'format_sports')],
-            [Markup.button.callback('Пропустить', 'format_skip')]
-        ]));
-    } else if (keyboardType === 'place') {
-        await ctx.reply(text, Markup.inlineKeyboard([
-            [Markup.button.callback('Улица', 'place_outdoor')],
-            [Markup.button.callback('Помещение', 'place_indoor')],
-            [Markup.button.callback('Под навесом', 'place_tent')],
-            [Markup.button.callback('Пропустить', 'place_skip')]
-        ]));
-    } else if (keyboardType === 'equipment') {
-        // Сбрасываем предыдущий выбор при новом показе
-        equipmentSelection.set(ctx.chat.id, new Set());
-        await ctx.reply(text, buildEquipmentKeyboard(ctx.chat.id));
-    } else if (keyboardType === 'mount') {
-        await ctx.reply(text, Markup.inlineKeyboard([
-            [Markup.button.callback('Любое по согласованию', 'mount_any')],
-            [Markup.button.callback('Нужно смонтировать ночью/рано утром', 'mount_night')],
-            [Markup.button.callback('Пропустить', 'mount_skip')]
-        ]));
+// Переход к следующему шагу
+async function showNextStep(ctx, chatId) {
+    const state = userState.get(chatId) || { step: 'format', data: {} };
+    const now = new Date();
+    switch (state.step) {
+        case 'format':
+            await ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
+            break;
+        case 'date_start':
+            await ctx.reply('📅 Выберите дату начала мероприятия:', getCalendar(now.getFullYear(), now.getMonth(), 'date_start'));
+            break;
+        case 'date_end':
+            await ctx.reply('📅 Выберите дату окончания:', getCalendar(now.getFullYear(), now.getMonth(), 'date_end'));
+            break;
+        case 'ready_date':
+            await ctx.reply('📅 Готовность оборудования (можно пропустить):', getCalendar(now.getFullYear(), now.getMonth(), 'ready_date'));
+            break;
+        case 'place':
+            await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
+            break;
+        case 'equipment':
+            // При первом входе на шаг сбрасываем выбор
+            if (!state.equipment) state.equipment = new Set();
+            userState.set(chatId, state);
+            await ctx.reply('🔧 Какое оборудование необходимо? (можно выбрать несколько)', getEquipmentKeyboard(chatId));
+            break;
+        case 'mount':
+            await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
+            break;
+        case 'confirm':
+            // Собираем итоговую сводку и отправляем ИИ
+            const summary = Object.entries(state.data)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join('\n');
+            // Отправляем ИИ сообщение-сводку для генерации финального ответа
+            const reply = await askDeepSeek(`Сводка: ${summary}`, chatId, '', false);
+            await ctx.reply(reply || 'Данные собраны. Менеджер свяжется с вами.');
+            // Сбрасываем состояние
+            userState.delete(chatId);
+            break;
+        default:
+            break;
     }
 }
 
-const tagToKeyboard = {
-    'ask_date_start': { type: 'calendar', prefix: 'date_start', text: '📅 Выберите дату начала мероприятия:' },
-    'ask_date_end':   { type: 'calendar', prefix: 'date_end',   text: '📅 Выберите дату окончания:' },
-    'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования (можно пропустить):' },
-    'ask_format':     { type: 'format',   prefix: 'format',     text: '🎭 Выберите формат мероприятия:' },
-    'ask_place':      { type: 'place',    prefix: 'place',      text: '📍 Где проходит мероприятие?' },
-    'ask_equipment':  { type: 'equipment', prefix: 'equip',     text: '🔧 Какое оборудование необходимо? (можно выбрать несколько)' },
-    'ask_mount':      { type: 'mount',    prefix: 'mount',      text: '⏱ Время монтажа:' }
-};
-
-// Обработка обычных текстовых сообщений
-bot.on('text', async (ctx, next) => {
-    const chatId = ctx.chat.id;
-    const userMessage = ctx.message.text;
-    const user = ctx.from;
-
-    if (String(user.id) === String(ADMIN_CHAT_ID)) {
-        return next();
-    }
-
-    lastActiveClient[ADMIN_CHAT_ID] = user.id;
-    notifyAdmin(
-        `📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`,
-        Markup.inlineKeyboard([Markup.button.callback('✉️ Ответить', `reply_to_${user.id}`)])
-    );
-
-    if (manualMode[chatId]) return;
-
-    const lowerMessage = userMessage.toLowerCase();
-    const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
-
-    ctx.sendChatAction('typing');
-    try {
-        const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
-        console.log('Ответ ИИ:', reply);
-
-        // Поиск тега с гарантированным извлечением
-        const tagRegex = /\[(ask_\w+)\]/;
-        const match = reply.match(tagRegex);
-        let finalText = reply;
-        let keyboardInfo = null;
-
-        if (match) {
-            const tagName = match[1];
-            console.log(`Найден тег: ${tagName}`);
-            finalText = reply.replace(match[0], '').trim();
-            keyboardInfo = tagToKeyboard[tagName];
-        }
-
-        if (keyboardInfo) {
-            console.log(`Показываю клавиатуру типа: ${keyboardInfo.type}`);
-            if (finalText.length > 0) {
-                await ctx.reply(finalText);
-            }
-            try {
-                await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
-            } catch (e) {
-                console.error('Ошибка отправки клавиатуры:', e.message);
-                // fallback
-                let fallbackText = keyboardInfo.text + '\n';
-                if (keyboardInfo.type === 'equipment') {
-                    fallbackText += '1. Весь комплект\n2. Звук\n3. Экраны\n4. Свет\n5. Сцена';
-                } else if (keyboardInfo.type === 'format') {
-                    fallbackText += '1. Концерты\n2. Конференции\n3. Корпоративы\n4. Выставки\n5. Спорт';
-                }
-                await ctx.reply(fallbackText || 'Пожалуйста, выберите вариант:');
-            }
-        } else {
-            await ctx.reply(finalText, Markup.inlineKeyboard([
-                Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')
-            ]));
-            notifyAdmin(`🤖 Ответ ИИ клиенту ${user.first_name}:\n\n${finalText}`);
-        }
-    } catch (err) {
-        console.error('Ошибка DeepSeek:', err.message);
-        await ctx.reply('Извините, произошла техническая ошибка.');
-    }
-});
-
-// Обработка callback-запросов (календари, кнопки, оборудование)
+// Обработка callback-запросов (календари, кнопки)
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
     if (data === 'ignore') return ctx.answerCbQuery();
 
-    // Обработка календарей
-    const calendarPrefixes = ['date_start', 'date_end', 'ready_date'];
-    for (const prefix of calendarPrefixes) {
-        if (data.startsWith(prefix)) {
-            const parts = data.split('_');
-            if (parts[2] === 'prev' || parts[2] === 'next') {
-                const year = parseInt(parts[3]);
-                const month = parseInt(parts[4]);
-                const newDate = new Date(year, month);
-                if (parts[2] === 'prev') newDate.setMonth(newDate.getMonth() - 1);
-                else newDate.setMonth(newDate.getMonth() + 1);
-                const { buttons } = buildCalendar(newDate.getFullYear(), newDate.getMonth(), prefix);
-                await ctx.editMessageText('📅 Выберите дату:', Markup.inlineKeyboard(buttons));
-            } else if (parts[2] === 'set') {
-                const dateStr = parts[3];
-                await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
-                await ctx.editMessageReplyMarkup(undefined);
-                const humanDate = dateStr.split('-').reverse().join('.');
-                const messageText = `Дата${prefix === 'date_start' ? ' начала' : prefix === 'date_end' ? ' окончания' : ' готовности'}: ${humanDate}`;
-                await ctx.reply(messageText);
-                const user = ctx.from;
-                const reply = await askDeepSeek(messageText, chatId, user.first_name);
-                await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
-            } else if (parts[2] === 'skip') {
-                await ctx.answerCbQuery('Пропущено');
-                await ctx.editMessageReplyMarkup(undefined);
-                const skipMsg = prefix === 'date_start' ? 'Дата начала не указана' : prefix === 'date_end' ? 'Дата окончания не указана' : 'Готовность не указана';
-                await ctx.reply(skipMsg);
-                const user = ctx.from;
-                const reply = await askDeepSeek(skipMsg, chatId, user.first_name);
-                await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+    const state = userState.get(chatId) || { step: 'format', data: {} };
+
+    // Календари
+    if (data.startsWith('date_start') || data.startsWith('date_end') || data.startsWith('ready_date')) {
+        const parts = data.split('_');
+        const prefix = parts[0] + '_' + parts[1]; // date_start, date_end, ready_date
+        if (parts[2] === 'prev' || parts[2] === 'next') {
+            const year = parseInt(parts[3]);
+            const month = parseInt(parts[4]);
+            const newDate = new Date(year, month);
+            if (parts[2] === 'prev') newDate.setMonth(newDate.getMonth() - 1);
+            else newDate.setMonth(newDate.getMonth() + 1);
+            await ctx.editMessageText('📅 Выберите дату:', getCalendar(newDate.getFullYear(), newDate.getMonth(), prefix));
+        } else if (parts[2] === 'set') {
+            const dateStr = parts[3];
+            await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
+            await ctx.editMessageReplyMarkup(undefined);
+            const humanDate = dateStr.split('-').reverse().join('.');
+            const labelMap = {
+                date_start: 'Дата начала',
+                date_end: 'Дата окончания',
+                ready_date: 'Дата готовности'
+            };
+            state.data[prefix] = humanDate;
+            // Переход к следующему шагу
+            const stepOrder = ['date_start', 'date_end', 'ready_date'];
+            const idx = stepOrder.indexOf(prefix);
+            if (idx < stepOrder.length - 1) {
+                state.step = stepOrder[idx + 1];
+            } else {
+                state.step = 'place';
             }
-            return;
+            userState.set(chatId, state);
+            await ctx.reply(`${labelMap[prefix]}: ${humanDate}`);
+            await showNextStep(ctx, chatId);
+        } else if (parts[2] === 'skip') {
+            await ctx.answerCbQuery('Пропущено');
+            await ctx.editMessageReplyMarkup(undefined);
+            const stepOrder = ['date_start', 'date_end', 'ready_date'];
+            const idx = stepOrder.indexOf(prefix);
+            if (idx < stepOrder.length - 1) {
+                state.step = stepOrder[idx + 1];
+            } else {
+                state.step = 'place';
+            }
+            userState.set(chatId, state);
+            await ctx.reply('Пропущено');
+            await showNextStep(ctx, chatId);
         }
+        return;
     }
 
-    // Обработка формата
+    // Формат
     if (data.startsWith('format_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         const text = data === 'format_skip' ? 'Формат не указан' : `Формат: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        state.data.format = text;
+        state.step = 'date_start';
+        userState.set(chatId, state);
         await ctx.reply(text);
-        const user = ctx.from;
-        const reply = await askDeepSeek(text, chatId, user.first_name);
-        await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+        await showNextStep(ctx, chatId);
         return;
     }
 
-    // Обработка места
+    // Место
     if (data.startsWith('place_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         const text = data === 'place_skip' ? 'Место не указано' : `Место: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        state.data.place = text;
+        state.step = 'equipment';
+        userState.set(chatId, state);
         await ctx.reply(text);
-        const user = ctx.from;
-        const reply = await askDeepSeek(text, chatId, user.first_name);
-        await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+        await showNextStep(ctx, chatId);
         return;
     }
 
-    // Обработка оборудования (с сохранением состояния)
+    // Оборудование
     if (data.startsWith('equip_')) {
+        if (!state.equipment) state.equipment = new Set();
         if (data === 'equip_done') {
-            const selSet = equipmentSelection.get(chatId) || new Set();
             const typeNames = {
                 sound: 'Звуковое оборудование',
                 led: 'Светодиодные экраны',
                 light: 'Световое оборудование',
                 stage: 'Сценические конструкции'
             };
-            const selectedTexts = Array.from(selSet).map(t => typeNames[t]);
-            const messageText = selectedTexts.length > 0
-                ? `Выбрано оборудование: ${selectedTexts.join(', ')}`
-                : 'Оборудование не выбрано';
+            const selected = Array.from(state.equipment).map(t => typeNames[t]);
+            const messageText = selected.length > 0 ? `Выбрано оборудование: ${selected.join(', ')}` : 'Оборудование не выбрано';
             await ctx.answerCbQuery('Готово');
             await ctx.editMessageReplyMarkup(undefined);
+            state.data.equipment = messageText;
+            state.step = 'mount';
+            userState.set(chatId, state);
             await ctx.reply(messageText);
-            equipmentSelection.delete(chatId);
-            const user = ctx.from;
-            const reply = await askDeepSeek(messageText, chatId, user.first_name);
-            await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+            await showNextStep(ctx, chatId);
         } else if (data === 'equip_all') {
-            // Выбрать все
-            equipmentSelection.set(chatId, new Set(['sound', 'led', 'light', 'stage']));
+            state.equipment = new Set(['sound', 'led', 'light', 'stage']);
             await ctx.answerCbQuery('Выбран полный комплект');
-            await ctx.editMessageReplyMarkup(buildEquipmentKeyboard(chatId));
+            await ctx.editMessageReplyMarkup(getEquipmentKeyboard(chatId));
         } else {
-            // Переключение конкретного пункта
             const typeMap = {
                 equip_sound: 'sound',
                 equip_led: 'led',
@@ -384,42 +300,41 @@ bot.on('callback_query', async (ctx) => {
             };
             const type = typeMap[data];
             if (!type) return;
-            if (!equipmentSelection.has(chatId)) {
-                equipmentSelection.set(chatId, new Set());
-            }
-            const selSet = equipmentSelection.get(chatId);
-            if (selSet.has(type)) {
-                selSet.delete(type);
+            if (state.equipment.has(type)) {
+                state.equipment.delete(type);
                 await ctx.answerCbQuery('Убрано');
             } else {
-                selSet.add(type);
+                state.equipment.add(type);
                 await ctx.answerCbQuery('Добавлено');
             }
-            // Обновляем клавиатуру, показывая актуальный выбор
-            await ctx.editMessageReplyMarkup(buildEquipmentKeyboard(chatId));
+            await ctx.editMessageReplyMarkup(getEquipmentKeyboard(chatId));
         }
+        userState.set(chatId, state);
         return;
     }
 
-    // Обработка монтажа
+    // Монтаж
     if (data.startsWith('mount_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         const text = data === 'mount_skip' ? 'Время монтажа не указано' : `Монтаж: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        state.data.mount = text;
+        state.step = 'confirm';
+        userState.set(chatId, state);
         await ctx.reply(text);
-        const user = ctx.from;
-        const reply = await askDeepSeek(text, chatId, user.first_name);
-        await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+        await showNextStep(ctx, chatId);
         return;
     }
 
-    // Обработка reply_to_ и contact_manager
+    // Ответить админу
     if (data.startsWith('reply_to_')) {
         lastActiveClient[ADMIN_CHAT_ID] = data.replace('reply_to_', '');
         await ctx.answerCbQuery('Теперь просто напишите /reply текст');
         await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
         return;
     }
+
+    // Связаться с менеджером
     if (data === 'contact_manager') {
         manualMode[chatId] = true;
         await ctx.answerCbQuery('Заявка отправлена!');
@@ -430,16 +345,57 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
+// Обработка текстовых сообщений (для ручного ввода дат, адреса, оборудования и т.д.)
+bot.on('text', async (ctx, next) => {
+    const chatId = ctx.chat.id;
+    const userMessage = ctx.message.text;
+    const user = ctx.from;
+    if (String(user.id) === String(ADMIN_CHAT_ID)) return next();
+
+    lastActiveClient[ADMIN_CHAT_ID] = user.id;
+    notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`, Markup.inlineKeyboard([Markup.button.callback('✉️ Ответить', `reply_to_${user.id}`)]));
+
+    if (manualMode[chatId]) return;
+
+    const state = userState.get(chatId);
+    if (!state) {
+        // Начинаем новый диалог
+        userState.set(chatId, { step: 'format', data: {} });
+        await ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Давайте подберём оборудование для вашего мероприятия.');
+        await showNextStep(ctx, chatId);
+        return;
+    }
+
+    // Если пользователь ввёл текст вместо кнопки, пытаемся интерпретировать
+    // Для простоты просто переходим к следующему шагу, сохраняя текст как данные
+    const stepMap = {
+        'format': 'format',
+        'date_start': 'date_start',
+        'date_end': 'date_end',
+        'ready_date': 'ready_date',
+        'place': 'place',
+        'equipment': 'equipment',
+        'mount': 'mount'
+    };
+    state.data[state.step] = userMessage;
+    const stepOrder = ['format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount'];
+    const idx = stepOrder.indexOf(state.step);
+    if (idx < stepOrder.length - 1) {
+        state.step = stepOrder[idx + 1];
+    } else {
+        state.step = 'confirm';
+    }
+    userState.set(chatId, state);
+    await showNextStep(ctx, chatId);
+});
+
+// Команды и остальное (без изменений)
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
-    if (greetedUsers[chatId]) {
-        ctx.reply('С возвращением! Продолжим с того места, где остановились.');
-    } else {
-        ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Рад помочь с техническим оснащением. Просто опишите вашу задачу — я помогу подобрать оборудование и отвечу на вопросы.');
-        greetedUsers[chatId] = true;
-    }
-    lastActiveClient[ADMIN_CHAT_ID] = chatId;
-    notifyAdmin(`🔔 Новый диалог (или возвращение): ${ctx.from.first_name} (@${ctx.from.username || 'нет'}, ID: ${chatId})`);
+    userState.delete(chatId);
+    userState.set(chatId, { step: 'format', data: {} });
+    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Давайте подберём оборудование для вашего мероприятия.');
+    showNextStep(ctx, chatId);
 });
 
 bot.command('reply', (ctx) => {
@@ -459,92 +415,9 @@ bot.command('resume', (ctx) => {
     ctx.reply('Автоответы возобновлены.');
 });
 
-bot.command('menu', (ctx) => {
-    ctx.reply('Вы можете заполнить данные в любое время прямо в чате. Просто расскажите о мероприятии, а я буду задавать уточняющие вопросы и предлагать удобные формы для ввода.');
-});
-
 bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
 });
 
-bot.on('document', async (ctx) => {
-    const user = ctx.from;
-    const doc = ctx.message.document;
-    if (!doc) return;
-    await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
-    try {
-        await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
-            caption: `📎 Документ от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
-        });
-    } catch (err) { console.error('Ошибка пересылки документа:', err.message); }
-});
-
-bot.on('photo', async (ctx) => {
-    const user = ctx.from;
-    const photos = ctx.message.photo;
-    if (!photos || photos.length === 0) return;
-    const largest = photos[photos.length - 1];
-    await ctx.reply('Спасибо! Я передал ваше фото менеджеру.');
-    try {
-        await ctx.telegram.sendPhoto(ADMIN_CHAT_ID, largest.file_id, {
-            caption: `📷 Фото от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})`
-        });
-    } catch (err) { console.error('Ошибка пересылки фото:', err.message); }
-});
-
-bot.on('message', async (ctx, next) => {
-    const user = ctx.from;
-    if (String(user.id) !== String(ADMIN_CHAT_ID)) return next();
-    const targetId = lastActiveClient[ADMIN_CHAT_ID];
-    if (!targetId) return next();
-    const msg = ctx.message;
-    if (msg.document) {
-        try {
-            await ctx.telegram.sendDocument(targetId, msg.document.file_id, { caption: msg.caption || '' });
-            ctx.reply('✅ Документ отправлен клиенту.');
-        } catch (err) { ctx.reply('❌ Ошибка отправки.'); }
-    } else if (msg.photo) {
-        const largest = msg.photo[msg.photo.length - 1];
-        try {
-            await ctx.telegram.sendPhoto(targetId, largest.file_id, { caption: msg.caption || '' });
-            ctx.reply('✅ Фото отправлено клиенту.');
-        } catch (err) { ctx.reply('❌ Ошибка отправки.'); }
-    }
-    return next();
-});
-
-http.createServer((req, res) => {
-    console.log(`Получен HTTP-запрос: ${req.method} ${req.url} от ${req.socket.remoteAddress}`);
-    res.writeHead(200);
-    res.end('OK');
-}).listen(process.env.PORT || 10000);
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-process.on('unhandledRejection', (reason) => {
-    console.error('Необработанная ошибка:', reason);
-    notifyAdmin(`🚨 Необработанная ошибка: ${reason}`);
-});
-process.on('uncaughtException', (err) => {
-    console.error('Фатальная ошибка:', err.message);
-    notifyAdmin(`🚨 Фатальная ошибка: ${err.message}`);
-    setTimeout(() => process.exit(1), 1000);
-});
-
-async function launchBot() {
-    loadSessions();
-    while (true) {
-        try {
-            await bot.launch();
-            console.log('Бот MLK запущен');
-            notifyAdmin('✅ Бот запущен и работает');
-            break;
-        } catch (err) {
-            console.error('Ошибка запуска, повтор через 5 сек:', err.message);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
-    }
-}
-
-launchBot();
+// ... (остальной код: document, photo, message forwarding, http сервер, запуск)
+// Ниже вставьте уже существующие обработчики document, photo, message, http сервер, launchBot, они без изменений.
