@@ -21,6 +21,8 @@ const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли
 
 const manualMode = {};
 const lastActiveClient = {};
+
+// Состояние анкеты для каждого чата
 const userState = new Map(); // chatId -> { step, data, equipment: Set }
 
 // ---------- Клавиатуры ----------
@@ -53,7 +55,8 @@ function getMountKeyboard() {
 }
 
 function getEquipmentKeyboard(chatId) {
-    const selected = userState.get(chatId)?.equipment || new Set();
+    const state = userState.get(chatId);
+    const selected = state?.equipment || new Set();
     const mark = (type) => selected.has(type) ? '✅ ' : '';
     return Markup.inlineKeyboard([
         [Markup.button.callback(mark('all') + 'Весь комплект', 'equip_all')],
@@ -100,7 +103,7 @@ function getCalendar(year, month, prefix) {
     return Markup.inlineKeyboard(buttons);
 }
 
-// ---------- Логика шагов ----------
+// Переход к следующему шагу
 async function showNextStep(ctx, chatId) {
     const state = userState.get(chatId) || { step: 'format', data: {}, equipment: new Set() };
     const now = new Date();
@@ -132,9 +135,10 @@ async function showNextStep(ctx, chatId) {
             const summary = Object.entries(state.data)
                 .map(([k, v]) => `${k}: ${v}`)
                 .join('\n');
-            await ctx.reply('Спасибо! Ваши данные отправлены менеджеру.');
-            // Здесь можно добавить отправку summary администратору
-            notifyAdmin(`📋 Новая заявка:\n\n${summary}`);
+            await ctx.reply('Спасибо! Ваши данные отправлены менеджеру. Мы свяжемся с вами в ближайшее время.');
+            if (ADMIN_CHAT_ID) {
+                bot.telegram.sendMessage(ADMIN_CHAT_ID, `📋 Новая заявка:\n\n${summary}`);
+            }
             userState.delete(chatId);
             break;
         }
@@ -143,12 +147,13 @@ async function showNextStep(ctx, chatId) {
     }
 }
 
+// Уведомление администратора
 async function notifyAdmin(text, extra = {}) {
     if (!ADMIN_CHAT_ID) return;
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработчики кнопок ----------
+// ---------- Обработка кнопок ----------
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
@@ -286,6 +291,7 @@ bot.on('callback_query', async (ctx) => {
         await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
         return;
     }
+
     // Связаться с менеджером
     if (data === 'contact_manager') {
         manualMode[chatId] = true;
@@ -294,6 +300,52 @@ bot.on('callback_query', async (ctx) => {
         lastActiveClient[ADMIN_CHAT_ID] = chatId;
         notifyAdmin(`📞 Клиент ${ctx.from.first_name} (@${ctx.from.username || 'нет'}, ID: ${chatId}) запросил менеджера.`);
         return;
+    }
+});
+
+// ---------- Обработка текстовых сообщений ----------
+bot.on('text', async (ctx, next) => {
+    const chatId = ctx.chat.id;
+    const userMessage = ctx.message.text;
+    const user = ctx.from;
+    if (String(user.id) === String(ADMIN_CHAT_ID)) return next();
+
+    lastActiveClient[ADMIN_CHAT_ID] = user.id;
+    notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`);
+
+    if (manualMode[chatId]) return;
+
+    const state = userState.get(chatId);
+    if (!state) {
+        // Новый диалог
+        userState.set(chatId, { step: 'format', data: {}, equipment: new Set() });
+        await ctx.reply('Здравствуйте! Меня зовут Дмитрий, я консультант MLK. Давайте подберём оборудование для вашего мероприятия.');
+        await showNextStep(ctx, chatId);
+        return;
+    }
+
+    // Проверка на запрос портфолио
+    const lowerMessage = userMessage.toLowerCase();
+    if (PORTFOLIO_KEYWORDS.some(kw => lowerMessage.includes(kw))) {
+        await ctx.reply(PORTFOLIO_TEXT || 'Информация о портфолио временно недоступна.');
+        // Не прерываем анкету, после ответа возвращаем текущий шаг
+        await showNextStep(ctx, chatId);
+        return;
+    }
+
+    // Обработка ввода на текущем шаге (если пользователь пишет текст вместо кнопок)
+    const step = state.step;
+    if (step && step !== 'confirm') {
+        state.data[step] = userMessage;
+        const order = ['format', 'date_start', 'date_end', 'ready_date', 'place', 'equipment', 'mount'];
+        const idx = order.indexOf(step);
+        if (idx >= 0 && idx < order.length - 1) {
+            state.step = order[idx + 1];
+        } else {
+            state.step = 'confirm';
+        }
+        userState.set(chatId, state);
+        await showNextStep(ctx, chatId);
     }
 });
 
@@ -306,32 +358,7 @@ bot.start((ctx) => {
     showNextStep(ctx, chatId);
 });
 
-// ---------- Обработка текстовых сообщений (для ответа на вопросы) ----------
-bot.on('text', async (ctx, next) => {
-    const chatId = ctx.chat.id;
-    const userMessage = ctx.message.text;
-    const user = ctx.from;
-    if (String(user.id) === String(ADMIN_CHAT_ID)) return next();
-
-    lastActiveClient[ADMIN_CHAT_ID] = user.id;
-    notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`);
-
-    if (manualMode[chatId]) return;
-
-    // Проверяем, спрашивает ли пользователь об опыте
-    const lowerMessage = userMessage.toLowerCase();
-    if (PORTFOLIO_KEYWORDS.some(kw => lowerMessage.includes(kw))) {
-        await ctx.reply(PORTFOLIO_TEXT);
-        return;
-    }
-
-    // Если пользователь просто что-то пишет, а не нажимает кнопки, подсказываем ему
-    if (userState.has(chatId)) {
-        await ctx.reply('Пожалуйста, используйте кнопки выше для ответа.');
-    }
-});
-
-// ---------- Команды админа ----------
+// Команды админа
 bot.command('reply', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
     const targetId = lastActiveClient[ADMIN_CHAT_ID];
@@ -339,7 +366,7 @@ bot.command('reply', (ctx) => {
     const text = ctx.message.text.split(' ').slice(1).join(' ');
     if (!text) return ctx.reply('Напишите текст после /reply');
     bot.telegram.sendMessage(targetId, text)
-        .then(() => { ctx.reply('✅ Отправлено'); notifyAdmin(`✉️ Ваш ответ клиенту ${targetId}:\n\n${text}`); })
+        .then(() => { ctx.reply('✅ Отправлено'); })
         .catch(err => ctx.reply('❌ Ошибка отправки.'));
 });
 
@@ -349,7 +376,7 @@ bot.command('resume', (ctx) => {
     ctx.reply('Автоответы возобновлены.');
 });
 
-// ---------- Пересылка файлов ----------
+// Пересылка файлов
 bot.on('document', async (ctx) => {
     const user = ctx.from;
     const doc = ctx.message.document;
@@ -375,13 +402,12 @@ bot.on('photo', async (ctx) => {
     } catch (err) { console.error('Ошибка пересылки фото:', err.message); }
 });
 
-// ---------- HTTP-сервер для Render ----------
+// HTTP-сервер для Render
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('OK');
 }).listen(process.env.PORT || 10000);
 
-// ---------- Защита от падений ----------
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
@@ -393,7 +419,6 @@ process.on('uncaughtException', (err) => {
     setTimeout(() => process.exit(1), 1000);
 });
 
-// ---------- Запуск ----------
 async function launchBot() {
     while (true) {
         try {
