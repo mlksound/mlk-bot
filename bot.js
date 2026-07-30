@@ -175,6 +175,7 @@ async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
         ]));
     } else if (keyboardType === 'equipment') {
         await ctx.reply(text, Markup.inlineKeyboard([
+            [Markup.button.callback('Весь комплект', 'equip_all')],
             [Markup.button.callback('Звуковое оборудование', 'equip_sound')],
             [Markup.button.callback('Светодиодные экраны', 'equip_led')],
             [Markup.button.callback('Световое оборудование', 'equip_light')],
@@ -205,8 +206,6 @@ bot.on('text', async (ctx, next) => {
     const userMessage = ctx.message.text;
     const user = ctx.from;
 
-    // Администраторские сообщения не обрабатываем как клиентские,
-    // но пропускаем дальше, чтобы работали команды /form, /reply и т.д.
     if (String(user.id) === String(ADMIN_CHAT_ID)) {
         return next();
     }
@@ -219,7 +218,6 @@ bot.on('text', async (ctx, next) => {
 
     if (manualMode[chatId]) return;
 
-    // Проверяем, нужно ли добавить портфолио
     const lowerMessage = userMessage.toLowerCase();
     const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
 
@@ -228,17 +226,16 @@ bot.on('text', async (ctx, next) => {
         const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
         console.log('Ответ ИИ:', reply);
 
-        // Ищем любой тег в ответе (надёжнее, чем includes)
+        // Надёжный поиск тегов
         const tagRegex = /\[(ask_\w+)\]/;
         const match = reply.match(tagRegex);
         let finalText = reply;
         let keyboardInfo = null;
 
         if (match) {
-            const tagName = match[1]; // например, 'ask_format'
-            const fullTag = match[0]; // '[ask_format]'
-            console.log(`Найден тег: ${fullTag}`);
-            finalText = reply.replace(fullTag, '').trim();
+            const tagName = match[1];
+            console.log(`Найден тег: ${tagName}`);
+            finalText = reply.replace(match[0], '').trim();
             keyboardInfo = tagToKeyboard[tagName];
         }
 
@@ -251,12 +248,11 @@ bot.on('text', async (ctx, next) => {
                 await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
             } catch (e) {
                 console.error('Ошибка отправки клавиатуры:', e.message);
-                // Fallback: текстовый список вариантов
                 let fallbackText = keyboardInfo.text + '\n';
                 if (keyboardInfo.type === 'equipment') {
-                    fallbackText += '1. Звуковое оборудование\n2. Светодиодные экраны\n3. Световое оборудование\n4. Сценические конструкции\nНапишите номера через запятую.';
+                    fallbackText += '1. Весь комплект\n2. Звук\n3. Экраны\n4. Свет\n5. Сцена';
                 } else if (keyboardInfo.type === 'format') {
-                    fallbackText += '1. Концерты & Фестивали\n2. Конференции & Презентации & TV-проекты\n3. Корпоративы & Торжества\n4. Выставки\n5. Спортивные мероприятия';
+                    fallbackText += '1. Концерты\n2. Конференции\n3. Корпоративы\n4. Выставки\n5. Спорт';
                 }
                 await ctx.reply(fallbackText || 'Пожалуйста, выберите вариант:');
             }
@@ -341,11 +337,19 @@ bot.on('callback_query', async (ctx) => {
             await ctx.editMessageReplyMarkup(undefined);
             const selected = ctx.callbackQuery.message.reply_markup.inline_keyboard
                 .flat()
-                .filter(btn => btn.callback_data.startsWith('equip_') && btn.callback_data !== 'equip_done')
+                .filter(btn => btn.callback_data.startsWith('equip_') && btn.callback_data !== 'equip_done' && btn.callback_data !== 'equip_all')
                 .map(btn => btn.text);
             const messageText = selected.length > 0 
                 ? `Выбрано оборудование: ${selected.join(', ')}` 
                 : 'Оборудование не выбрано';
+            await ctx.reply(messageText);
+            const user = ctx.from;
+            const reply = await askDeepSeek(messageText, chatId, user.first_name);
+            await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+        } else if (data === 'equip_all') {
+            await ctx.answerCbQuery('Выбран полный комплект');
+            await ctx.editMessageReplyMarkup(undefined);
+            const messageText = 'Выбрано оборудование: Звуковое оборудование, Светодиодные экраны, Световое оборудование, Сценические конструкции';
             await ctx.reply(messageText);
             const user = ctx.from;
             const reply = await askDeepSeek(messageText, chatId, user.first_name);
@@ -420,11 +424,7 @@ bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
 });
 
-bot.command('form', (ctx) => {
-    ctx.reply('Пожалуйста, заполните форму для отправки заявки.', Markup.inlineKeyboard([
-        Markup.button.url('📋 Заполнить форму', 'https://mlk-bot.onrender.com/form')
-    ]));
-});
+// Команда /form полностью удалена
 
 bot.on('document', async (ctx) => {
     const user = ctx.from;
@@ -473,22 +473,6 @@ bot.on('message', async (ctx, next) => {
 });
 
 http.createServer((req, res) => {
-    if (req.url === '/form') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`<!DOCTYPE html>
-<html lang="ru">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Форма MLK</title></head>
-<body>
-<script data-b24-form="inline/63/7ibl9f" data-skip-moving="true">
-(function(w,d,u){
-var s=d.createElement('script');s.async=true;s.src=u+'?'+(Date.now()/180000|0);
-var h=d.getElementsByTagName('script')[0];h.parentNode.insertBefore(s,h);
-})(window,document,'https://cdn-ru.bitrix24.by/b25076776/crm/form/loader_63.js');
-</script>
-</body>
-</html>`);
-        return;
-    }
     console.log(`Получен HTTP-запрос: ${req.method} ${req.url} от ${req.socket.remoteAddress}`);
     res.writeHead(200);
     res.end('OK');
