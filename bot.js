@@ -73,6 +73,9 @@ const manualMode = {};
 const lastActiveClient = {};
 const greetedUsers = {};
 
+// Хранилище выбранного оборудования для каждого чата
+const equipmentSelection = new Map(); // chatId -> Set of types
+
 async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
     ensureSession(chatId);
     let finalMessage = userMessage;
@@ -152,6 +155,20 @@ function buildCalendar(year, month, prefix) {
     return { buttons, header };
 }
 
+// Формирует клавиатуру выбора оборудования с учётом текущего выбора
+function buildEquipmentKeyboard(chatId) {
+    const selected = equipmentSelection.get(chatId) || new Set();
+    const mark = (type) => selected.has(type) ? '✅ ' : '';
+    return Markup.inlineKeyboard([
+        [Markup.button.callback(mark('all') + 'Весь комплект', 'equip_all')],
+        [Markup.button.callback(mark('sound') + 'Звуковое оборудование', 'equip_sound')],
+        [Markup.button.callback(mark('led') + 'Светодиодные экраны', 'equip_led')],
+        [Markup.button.callback(mark('light') + 'Световое оборудование', 'equip_light')],
+        [Markup.button.callback(mark('stage') + 'Сценические конструкции', 'equip_stage')],
+        [Markup.button.callback('Готово (продолжить)', 'equip_done')]
+    ]);
+}
+
 async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
     if (keyboardType === 'calendar') {
         const now = new Date();
@@ -174,14 +191,9 @@ async function sendInteractiveReply(ctx, text, keyboardType, prefix) {
             [Markup.button.callback('Пропустить', 'place_skip')]
         ]));
     } else if (keyboardType === 'equipment') {
-        await ctx.reply(text, Markup.inlineKeyboard([
-            [Markup.button.callback('Весь комплект', 'equip_all')],
-            [Markup.button.callback('Звуковое оборудование', 'equip_sound')],
-            [Markup.button.callback('Светодиодные экраны', 'equip_led')],
-            [Markup.button.callback('Световое оборудование', 'equip_light')],
-            [Markup.button.callback('Сценические конструкции', 'equip_stage')],
-            [Markup.button.callback('Готово (продолжить)', 'equip_done')]
-        ]));
+        // Сбрасываем предыдущий выбор при новом показе
+        equipmentSelection.set(ctx.chat.id, new Set());
+        await ctx.reply(text, buildEquipmentKeyboard(ctx.chat.id));
     } else if (keyboardType === 'mount') {
         await ctx.reply(text, Markup.inlineKeyboard([
             [Markup.button.callback('Любое по согласованию', 'mount_any')],
@@ -201,6 +213,7 @@ const tagToKeyboard = {
     'ask_mount':      { type: 'mount',    prefix: 'mount',      text: '⏱ Время монтажа:' }
 };
 
+// Обработка обычных текстовых сообщений
 bot.on('text', async (ctx, next) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
@@ -226,7 +239,7 @@ bot.on('text', async (ctx, next) => {
         const reply = await askDeepSeek(userMessage, chatId, user.first_name, addPortfolio);
         console.log('Ответ ИИ:', reply);
 
-        // Надёжный поиск тегов
+        // Поиск тега с гарантированным извлечением
         const tagRegex = /\[(ask_\w+)\]/;
         const match = reply.match(tagRegex);
         let finalText = reply;
@@ -248,6 +261,7 @@ bot.on('text', async (ctx, next) => {
                 await sendInteractiveReply(ctx, keyboardInfo.text, keyboardInfo.type, keyboardInfo.prefix);
             } catch (e) {
                 console.error('Ошибка отправки клавиатуры:', e.message);
+                // fallback
                 let fallbackText = keyboardInfo.text + '\n';
                 if (keyboardInfo.type === 'equipment') {
                     fallbackText += '1. Весь комплект\n2. Звук\n3. Экраны\n4. Свет\n5. Сцена';
@@ -268,12 +282,13 @@ bot.on('text', async (ctx, next) => {
     }
 });
 
-// Обработка callback-запросов (календари, кнопки)
+// Обработка callback-запросов (календари, кнопки, оборудование)
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
     if (data === 'ignore') return ctx.answerCbQuery();
 
+    // Обработка календарей
     const calendarPrefixes = ['date_start', 'date_end', 'ready_date'];
     for (const prefix of calendarPrefixes) {
         if (data.startsWith(prefix)) {
@@ -309,6 +324,7 @@ bot.on('callback_query', async (ctx) => {
         }
     }
 
+    // Обработка формата
     if (data.startsWith('format_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
@@ -320,6 +336,7 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
+    // Обработка места
     if (data.startsWith('place_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
@@ -331,35 +348,60 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
+    // Обработка оборудования (с сохранением состояния)
     if (data.startsWith('equip_')) {
         if (data === 'equip_done') {
-            await ctx.answerCbQuery();
-            await ctx.editMessageReplyMarkup(undefined);
-            const selected = ctx.callbackQuery.message.reply_markup.inline_keyboard
-                .flat()
-                .filter(btn => btn.callback_data.startsWith('equip_') && btn.callback_data !== 'equip_done' && btn.callback_data !== 'equip_all')
-                .map(btn => btn.text);
-            const messageText = selected.length > 0 
-                ? `Выбрано оборудование: ${selected.join(', ')}` 
+            const selSet = equipmentSelection.get(chatId) || new Set();
+            const typeNames = {
+                sound: 'Звуковое оборудование',
+                led: 'Светодиодные экраны',
+                light: 'Световое оборудование',
+                stage: 'Сценические конструкции'
+            };
+            const selectedTexts = Array.from(selSet).map(t => typeNames[t]);
+            const messageText = selectedTexts.length > 0
+                ? `Выбрано оборудование: ${selectedTexts.join(', ')}`
                 : 'Оборудование не выбрано';
+            await ctx.answerCbQuery('Готово');
+            await ctx.editMessageReplyMarkup(undefined);
             await ctx.reply(messageText);
+            equipmentSelection.delete(chatId);
             const user = ctx.from;
             const reply = await askDeepSeek(messageText, chatId, user.first_name);
             await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
         } else if (data === 'equip_all') {
+            // Выбрать все
+            equipmentSelection.set(chatId, new Set(['sound', 'led', 'light', 'stage']));
             await ctx.answerCbQuery('Выбран полный комплект');
-            await ctx.editMessageReplyMarkup(undefined);
-            const messageText = 'Выбрано оборудование: Звуковое оборудование, Светодиодные экраны, Световое оборудование, Сценические конструкции';
-            await ctx.reply(messageText);
-            const user = ctx.from;
-            const reply = await askDeepSeek(messageText, chatId, user.first_name);
-            await ctx.reply(reply, Markup.inlineKeyboard([Markup.button.callback('📞 Связаться с менеджером', 'contact_manager')]));
+            await ctx.editMessageReplyMarkup(buildEquipmentKeyboard(chatId));
         } else {
-            await ctx.answerCbQuery('Добавлено');
+            // Переключение конкретного пункта
+            const typeMap = {
+                equip_sound: 'sound',
+                equip_led: 'led',
+                equip_light: 'light',
+                equip_stage: 'stage'
+            };
+            const type = typeMap[data];
+            if (!type) return;
+            if (!equipmentSelection.has(chatId)) {
+                equipmentSelection.set(chatId, new Set());
+            }
+            const selSet = equipmentSelection.get(chatId);
+            if (selSet.has(type)) {
+                selSet.delete(type);
+                await ctx.answerCbQuery('Убрано');
+            } else {
+                selSet.add(type);
+                await ctx.answerCbQuery('Добавлено');
+            }
+            // Обновляем клавиатуру, показывая актуальный выбор
+            await ctx.editMessageReplyMarkup(buildEquipmentKeyboard(chatId));
         }
         return;
     }
 
+    // Обработка монтажа
     if (data.startsWith('mount_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
@@ -371,6 +413,7 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
+    // Обработка reply_to_ и contact_manager
     if (data.startsWith('reply_to_')) {
         lastActiveClient[ADMIN_CHAT_ID] = data.replace('reply_to_', '');
         await ctx.answerCbQuery('Теперь просто напишите /reply текст');
@@ -423,8 +466,6 @@ bot.command('menu', (ctx) => {
 bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
 });
-
-// Команда /form полностью удалена
 
 bot.on('document', async (ctx) => {
     const user = ctx.from;
