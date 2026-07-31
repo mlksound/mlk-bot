@@ -26,6 +26,8 @@ const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
 // Хранилище для ожидания точного времени монтажа/демонтажа
 const awaitingTime = new Map(); // chatId -> 'mount' | 'demount'
+// Хранилище для отслеживания уже отвеченных вопросов (чтобы не дублировать)
+const answeredQuestions = new Map(); // chatId -> Set(['personnel', 'level', ...])
 
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
@@ -221,6 +223,7 @@ async function handleAIReply(ctx, text, chatId) {
     const match = text.match(tagRegex);
     let finalText = text;
     let keyboardInfo = null;
+    const answered = answeredQuestions.get(chatId) || new Set();
 
     if (match) {
         const tagName = match[1];
@@ -239,23 +242,27 @@ async function handleAIReply(ctx, text, chatId) {
             'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования:' }
         };
         keyboardInfo = tagToKeyboard[tagName];
+        if (keyboardInfo && answered.has(keyboardInfo.type)) {
+            // Уже отвечали – не показываем повторно
+            keyboardInfo = null;
+        }
     } else {
         const lowerText = text.toLowerCase();
-        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
+        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой')) && !answered.has('format')) {
             keyboardInfo = { type: 'format' };
-        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия')) {
+        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия') && !answered.has('level')) {
             keyboardInfo = { type: 'level' };
-        } else if (lowerText.includes('персонал')) {
+        } else if (lowerText.includes('персонал') && !answered.has('personnel')) {
             keyboardInfo = { type: 'personnel' };
-        } else if (lowerText.includes('место') && lowerText.includes('проходит')) {
+        } else if (lowerText.includes('место') && lowerText.includes('проходит') && !answered.has('place')) {
             keyboardInfo = { type: 'place' };
-        } else if (lowerText.includes('лифт') || lowerText.includes('подъем')) {
+        } else if (lowerText.includes('лифт') || lowerText.includes('подъем') && !answered.has('lift')) {
             keyboardInfo = { type: 'lift' };
-        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое'))) {
+        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое')) && !answered.has('equipment')) {
             keyboardInfo = { type: 'equipment' };
-        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж')) {
+        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж') && !answered.has('mount')) {
             keyboardInfo = { type: 'mount' };
-        } else if (lowerText.includes('демонтаж')) {
+        } else if (lowerText.includes('демонтаж') && !answered.has('demount')) {
             keyboardInfo = { type: 'demount' };
         }
     }
@@ -263,6 +270,8 @@ async function handleAIReply(ctx, text, chatId) {
     if (finalText.length > 0) await ctx.reply(finalText);
 
     if (keyboardInfo) {
+        answered.add(keyboardInfo.type);
+        answeredQuestions.set(chatId, answered);
         if (keyboardInfo.type === 'format') await ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
         else if (keyboardInfo.type === 'level') await ctx.reply('📊 Укажите уровень мероприятия:', getLevelKeyboard());
         else if (keyboardInfo.type === 'personnel') await ctx.reply('👷 Выберите обслуживающий персонал:', getPersonnelKeyboard());
@@ -304,9 +313,9 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
                 await ctx.editMessageReplyMarkup(undefined);
                 const humanDate = dateStr.split('-').reverse().join('.');
-                const messageText = prefix === 'date_start' ? `Дата начала: ${humanDate}` :
-                                    prefix === 'date_end'   ? `Дата окончания: ${humanDate}` :
-                                    `Готовность оборудования: ${humanDate}`;
+                const messageText = prefix === 'date_start' ? `Дата начала: ${humanDate} (введите время, например, 18:00)` :
+                                    prefix === 'date_end'   ? `Дата окончания: ${humanDate} (введите время)` :
+                                    `Готовность оборудования: ${humanDate} (введите время)`;
                 await ctx.reply(messageText);
                 const user = ctx.from;
                 const reply = await askDeepSeek(messageText, chatId, user.first_name);
@@ -502,10 +511,10 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Кнопка "Начать опрос"
+    // Кнопка "Продолжить диалог"
     if (data === 'start_survey') {
         await ctx.answerCbQuery();
-        await ctx.reply('Хорошо, давайте начнём опрос. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
+        await ctx.reply('Хорошо, давайте обсудим ваше мероприятие. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
         return;
     }
 });
@@ -550,10 +559,15 @@ bot.on('text', async (ctx, next) => {
 // ---------- Команды ----------
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
-    ctx.reply('Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ». Если у вас есть готовое ТЗ, райдеры или файлы, отправьте их, и я передам в отдел подготовки КП. Если нет, я задам несколько вопросов для точного расчёта.', Markup.inlineKeyboard([
-        [Markup.button.callback('📎 Отправить ТЗ и другие файлы', 'send_tz')],
-        [Markup.button.callback('📋 Начать опрос', 'start_survey')]
-    ]));
+    ctx.reply(
+        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий „под ключ“.\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
+        Markup.inlineKeyboard([
+            [Markup.button.callback('📎 Отправить файлы', 'send_tz')],
+            [Markup.button.callback('💬 Продолжить диалог', 'start_survey')]
+        ])
+    );
+    // Сбрасываем историю ответов при новом старте
+    answeredQuestions.delete(chatId);
 });
 
 bot.command('reply', (ctx) => {
