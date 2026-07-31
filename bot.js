@@ -24,10 +24,10 @@ if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR);
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
-// Хранилище для ожидания точного времени монтажа/демонтажа
+// Ожидание точного времени монтажа/демонтажа
 const awaitingTime = new Map(); // chatId -> 'mount' | 'demount'
-// Хранилище для отслеживания уже отвеченных вопросов (чтобы не дублировать)
-const answeredQuestions = new Map(); // chatId -> Set(['personnel', 'level', ...])
+// Ожидание ввода времени после выбора даты (chatId -> {prefix, dateStr})
+const awaitingDateTime = new Map();
 
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
@@ -80,9 +80,9 @@ function getFormatKeyboard() {
 
 function getLevelKeyboard() {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('Стандартный (обычные требования к оборудованию и документации)', 'level_standard')],
-        [Markup.button.callback('Высокие требования (повышенные требования к оборудованию и документации, прямые ТВ-трансляции)', 'level_high')],
-        [Markup.button.callback('Высший уровень (с высшими должностными лицами, масштабные и международные мероприятия)', 'level_top')]
+        [Markup.button.callback('Стандартный (обычные требования)', 'level_standard')],
+        [Markup.button.callback('Высокие требования (ТВ-трансляции)', 'level_high')],
+        [Markup.button.callback('Высший уровень (высшие лица, международные)', 'level_top')]
     ]);
 }
 
@@ -113,14 +113,14 @@ function getLiftKeyboard() {
 function getMountKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Любое по согласованию', 'mount_any')],
-        [Markup.button.callback('Нужно смонтировать ночью/рано утром', 'mount_night')]
+        [Markup.button.callback('Ночью/рано утром', 'mount_night')]
     ]);
 }
 
 function getDemountKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Любое по согласованию', 'demount_any')],
-        [Markup.button.callback('Нужно демонтировать до определенного времени', 'demount_deadline')]
+        [Markup.button.callback('До определённого времени', 'demount_deadline')]
     ]);
 }
 
@@ -169,6 +169,21 @@ function getCalendar(year, month, prefix) {
         buttons.push(row);
     }
     buttons.push([Markup.button.callback('Пропустить', `${prefix}_skip`)]);
+    return Markup.inlineKeyboard(buttons);
+}
+
+// Клавиатура выбора времени (часы:минуты)
+function getTimeKeyboard(prefix) {
+    const hours = Array.from({length: 24}, (_, i) => i.toString().padStart(2, '0'));
+    const minutes = ['00', '15', '30', '45'];
+    const buttons = [];
+    // часы в 4 ряда по 6
+    for (let i = 0; i < hours.length; i += 6) {
+        buttons.push(hours.slice(i, i + 6).map(h => Markup.button.callback(h, `${prefix}_hour_${h}`)));
+    }
+    // минуты отдельным рядом
+    buttons.push(minutes.map(m => Markup.button.callback(m, `${prefix}_min_${m}`)));
+    buttons.push([Markup.button.callback('Подтвердить', `${prefix}_time_done`)]);
     return Markup.inlineKeyboard(buttons);
 }
 
@@ -223,7 +238,6 @@ async function handleAIReply(ctx, text, chatId) {
     const match = text.match(tagRegex);
     let finalText = text;
     let keyboardInfo = null;
-    const answered = answeredQuestions.get(chatId) || new Set();
 
     if (match) {
         const tagName = match[1];
@@ -242,27 +256,23 @@ async function handleAIReply(ctx, text, chatId) {
             'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования:' }
         };
         keyboardInfo = tagToKeyboard[tagName];
-        if (keyboardInfo && answered.has(keyboardInfo.type)) {
-            // Уже отвечали – не показываем повторно
-            keyboardInfo = null;
-        }
     } else {
         const lowerText = text.toLowerCase();
-        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой')) && !answered.has('format')) {
+        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
             keyboardInfo = { type: 'format' };
-        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия') && !answered.has('level')) {
+        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия')) {
             keyboardInfo = { type: 'level' };
-        } else if (lowerText.includes('персонал') && !answered.has('personnel')) {
+        } else if (lowerText.includes('персонал')) {
             keyboardInfo = { type: 'personnel' };
-        } else if (lowerText.includes('место') && lowerText.includes('проходит') && !answered.has('place')) {
+        } else if (lowerText.includes('место') && lowerText.includes('проходит')) {
             keyboardInfo = { type: 'place' };
-        } else if (lowerText.includes('лифт') || lowerText.includes('подъем') && !answered.has('lift')) {
+        } else if (lowerText.includes('лифт') || lowerText.includes('подъем')) {
             keyboardInfo = { type: 'lift' };
-        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое')) && !answered.has('equipment')) {
+        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое'))) {
             keyboardInfo = { type: 'equipment' };
-        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж') && !answered.has('mount')) {
+        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж')) {
             keyboardInfo = { type: 'mount' };
-        } else if (lowerText.includes('демонтаж') && !answered.has('demount')) {
+        } else if (lowerText.includes('демонтаж')) {
             keyboardInfo = { type: 'demount' };
         }
     }
@@ -270,8 +280,6 @@ async function handleAIReply(ctx, text, chatId) {
     if (finalText.length > 0) await ctx.reply(finalText);
 
     if (keyboardInfo) {
-        answered.add(keyboardInfo.type);
-        answeredQuestions.set(chatId, answered);
         if (keyboardInfo.type === 'format') await ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
         else if (keyboardInfo.type === 'level') await ctx.reply('📊 Укажите уровень мероприятия:', getLevelKeyboard());
         else if (keyboardInfo.type === 'personnel') await ctx.reply('👷 Выберите обслуживающий персонал:', getPersonnelKeyboard());
@@ -296,6 +304,43 @@ bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery.data;
     if (data === 'ignore') return ctx.answerCbQuery();
 
+    // Обработка выбора времени
+    if (data.includes('_hour_') || data.includes('_min_') || data.endsWith('_time_done')) {
+        const parts = data.split('_');
+        const prefix = parts[0] + '_' + parts[1]; // date_start, date_end или ready_date
+        if (!awaitingDateTime.has(chatId)) return;
+        const timeData = awaitingDateTime.get(chatId);
+        if (!timeData[prefix]) timeData[prefix] = { hour: '00', min: '00' };
+        if (data.endsWith('_time_done')) {
+            awaitingDateTime.delete(chatId);
+            const { hour, min } = timeData[prefix];
+            const dateStr = timeData.dateStr;
+            const fullDate = `${dateStr} ${hour}:${min}`;
+            const labelMap = {
+                date_start: 'Дата начала',
+                date_end: 'Дата окончания',
+                ready_date: 'Готовность оборудования'
+            };
+            await ctx.editMessageReplyMarkup(undefined);
+            await ctx.reply(`${labelMap[prefix]}: ${fullDate}`);
+            const user = ctx.from;
+            const reply = await askDeepSeek(`${labelMap[prefix]}: ${fullDate}`, chatId, user.first_name);
+            await handleAIReply(ctx, reply, chatId);
+            return;
+        }
+        if (data.includes('_hour_')) {
+            timeData[prefix].hour = parts[parts.length - 1];
+        } else if (data.includes('_min_')) {
+            timeData[prefix].min = parts[parts.length - 1];
+        }
+        awaitingDateTime.set(chatId, timeData);
+        // Обновляем сообщение с выбранным временем
+        const { hour, min } = timeData[prefix];
+        await ctx.editMessageText(`Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`, getTimeKeyboard(prefix));
+        await ctx.answerCbQuery();
+        return;
+    }
+
     // Календари
     const calendarPrefixes = ['date_start', 'date_end', 'ready_date'];
     for (const prefix of calendarPrefixes) {
@@ -311,15 +356,12 @@ bot.on('callback_query', async (ctx) => {
             } else if (parts[2] === 'set') {
                 const dateStr = parts[3];
                 await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
-                await ctx.editMessageReplyMarkup(undefined);
-                const humanDate = dateStr.split('-').reverse().join('.');
-                const messageText = prefix === 'date_start' ? `Дата начала: ${humanDate} (введите время, например, 18:00)` :
-                                    prefix === 'date_end'   ? `Дата окончания: ${humanDate} (введите время)` :
-                                    `Готовность оборудования: ${humanDate} (введите время)`;
-                await ctx.reply(messageText);
-                const user = ctx.from;
-                const reply = await askDeepSeek(messageText, chatId, user.first_name);
-                await handleAIReply(ctx, reply, chatId);
+                // Переходим к выбору времени
+                const timeData = awaitingDateTime.get(chatId) || {};
+                timeData.dateStr = dateStr;
+                timeData[prefix] = { hour: '00', min: '00' };
+                awaitingDateTime.set(chatId, timeData);
+                await ctx.editMessageText(`Выберите время для ${prefix === 'date_start' ? 'начала' : prefix === 'date_end' ? 'окончания' : 'готовности'}:`, getTimeKeyboard(prefix));
             } else if (parts[2] === 'skip') {
                 await ctx.answerCbQuery('Пропущено');
                 await ctx.editMessageReplyMarkup(undefined);
@@ -460,7 +502,7 @@ bot.on('callback_query', async (ctx) => {
     if (data === 'mount_night') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        await ctx.reply('Монтаж: Нужно смонтировать ночью/рано утром. До какого времени? (введите время, например, «06:00»)');
+        await ctx.reply('Монтаж: Ночью/рано утром. До какого времени? (введите, например, 06:00)');
         awaitingTime.set(chatId, 'mount');
         return;
     }
@@ -479,7 +521,7 @@ bot.on('callback_query', async (ctx) => {
     if (data === 'demount_deadline') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        await ctx.reply('Демонтаж: Нужно демонтировать до определённого времени. До какого времени? (введите время)');
+        await ctx.reply('Демонтаж: До определённого времени. До какого? (введите время)');
         awaitingTime.set(chatId, 'demount');
         return;
     }
@@ -502,9 +544,10 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Кнопка "Отправить ТЗ"
+    // Кнопка "Отправить файлы"
     if (data === 'send_tz') {
         await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
         await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
         if (!sessions[chatId]) sessions[chatId] = [];
         sessions[chatId].push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
@@ -514,6 +557,7 @@ bot.on('callback_query', async (ctx) => {
     // Кнопка "Продолжить диалог"
     if (data === 'start_survey') {
         await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
         await ctx.reply('Хорошо, давайте обсудим ваше мероприятие. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
         return;
     }
@@ -531,13 +575,13 @@ bot.on('text', async (ctx, next) => {
 
     if (manualMode[chatId]) return;
 
-    // Проверяем, ожидается ли точное время монтажа/демонтажа
+    // Ожидание точного времени монтажа/демонтажа
     const timeAwaiting = awaitingTime.get(chatId);
     if (timeAwaiting) {
         awaitingTime.delete(chatId);
         const fullMessage = timeAwaiting === 'mount'
-            ? `Монтаж: Нужно смонтировать ночью/рано утром. Точное время: ${userMessage}`
-            : `Демонтаж: Нужно демонтировать до определённого времени. Точное время: ${userMessage}`;
+            ? `Монтаж: Ночью/рано утром, точное время: ${userMessage}`
+            : `Демонтаж: До определённого времени, точное время: ${userMessage}`;
         const reply = await askDeepSeek(fullMessage, chatId, user.first_name);
         await handleAIReply(ctx, reply, chatId);
         return;
@@ -560,14 +604,12 @@ bot.on('text', async (ctx, next) => {
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
     ctx.reply(
-        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий „под ключ“.\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
+        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
         Markup.inlineKeyboard([
             [Markup.button.callback('📎 Отправить файлы', 'send_tz')],
             [Markup.button.callback('💬 Продолжить диалог', 'start_survey')]
         ])
     );
-    // Сбрасываем историю ответов при новом старте
-    answeredQuestions.delete(chatId);
 });
 
 bot.command('reply', (ctx) => {
