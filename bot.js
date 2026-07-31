@@ -15,9 +15,9 @@ if (!BOT_TOKEN || !DEEPSEEK_API_KEY) {
 
 const bot = new Telegraf(BOT_TOKEN);
 const SYSTEM_PROMPT = fs.readFileSync('./promt.txt', 'utf8');
+const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
-// Хранилище состояний опроса
-const stateMap = new Map(); // chatId -> { step, data, equipment: Set, awaitingTimeType }
+const stateMap = new Map(); // chatId -> { step, data, equipment: Set, awaitingTimeType, time }
 
 // ---------- Клавиатуры ----------
 const formatKeyboard = Markup.inlineKeyboard([
@@ -118,12 +118,11 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Общение с ИИ ----------
-async function aiReply(chatId, userMsg, userName) {
+// ---------- ИИ ----------
+async function aiReply(prompt) {
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'system', content: `Клиент: ${userName || 'неизвестен'}` },
-        { role: 'user', content: userMsg }
+        { role: 'user', content: prompt }
     ];
     const r = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
@@ -140,25 +139,32 @@ async function notifyAdmin(text) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text); } catch (e) { console.error(e); }
 }
 
-// ---------- Управление шагами ----------
-const stepOrder = ['format', 'level', 'guests', 'personnel', 'date_start', 'date_end', 'ready_date', 'address', 'place', 'floor', 'lift', 'lift_size', 'equipment', 'mount', 'demount', 'confirm'];
-
-async function goNext(ctx, chatId, skip = false) {
+// ---------- Логика шагов ----------
+async function goNext(ctx, chatId) {
     const s = stateMap.get(chatId);
     if (!s) return;
-    const step = s.step;
+    let step = s.step;
     const data = s.data || {};
     s.data = data;
 
-    // Пропускаем неактуальные шаги
-    if (step === 'level' && !['fmt_concerts','fmt_sports'].includes(data.format_val)) { s.step = 'personnel'; goNext(ctx, chatId); return; }
-    if (step === 'guests' && data.format_val !== 'fmt_corporate') { s.step = 'personnel'; goNext(ctx, chatId); return; }
-    if (step === 'floor' && data.place_val !== 'plc_indoor') { s.step = 'equipment'; goNext(ctx, chatId); return; }
-    if (step === 'lift' && (!data.floor || parseInt(data.floor) <= 2)) { s.step = 'equipment'; goNext(ctx, chatId); return; }
-    if (step === 'lift_size' && data.lift_val !== 'lft_yes') { s.step = 'equipment'; goNext(ctx, chatId); return; }
+    // Пропуск неактуальных шагов
+    if (step === 'level' && data.format_val && !['concerts','sports'].includes(data.format_val)) {
+        s.step = 'personnel'; goNext(ctx, chatId); return;
+    }
+    if (step === 'guests' && data.format_val !== 'corporate') {
+        s.step = 'personnel'; goNext(ctx, chatId); return;
+    }
+    if (step === 'floor' && data.place_val !== 'indoor') {
+        s.step = 'equipment'; goNext(ctx, chatId); return;
+    }
+    if (step === 'lift' && (!data.floor || parseInt(data.floor) <= 2)) {
+        s.step = 'equipment'; goNext(ctx, chatId); return;
+    }
+    if (step === 'lift_size' && data.lift_val !== 'yes') {
+        s.step = 'equipment'; goNext(ctx, chatId); return;
+    }
 
-    const user = ctx.from;
-    const name = user.first_name;
+    const name = ctx.from?.first_name || 'клиент';
     let prompt = '';
     let keyboard = null;
 
@@ -168,14 +174,14 @@ async function goNext(ctx, chatId, skip = false) {
             keyboard = formatKeyboard;
             break;
         case 'level':
-            prompt = 'Попроси клиента выбрать уровень мероприятия (важность).';
+            prompt = 'Попроси клиента выбрать уровень мероприятия.';
             keyboard = levelKeyboard;
             break;
         case 'guests':
             prompt = 'Попроси клиента указать примерное количество гостей.';
             break;
         case 'personnel':
-            prompt = 'Попроси клиента выбрать тип обслуживающего персонала.';
+            prompt = 'Попроси клиента выбрать обслуживающий персонал.';
             keyboard = personnelKeyboard;
             break;
         case 'date_start':
@@ -194,18 +200,18 @@ async function goNext(ctx, chatId, skip = false) {
             prompt = 'Попроси клиента ввести адрес площадки.';
             break;
         case 'place':
-            prompt = 'Попроси клиента выбрать где проходит мероприятие (улица, помещение, под навесом).';
+            prompt = 'Попроси клиента выбрать где проходит мероприятие.';
             keyboard = placeKeyboard;
             break;
         case 'floor':
-            prompt = 'Попроси клиента указать этаж (если помещение).';
+            prompt = 'Попроси клиента указать этаж.';
             break;
         case 'lift':
             prompt = 'Попроси клиента выбрать способ подъема оборудования.';
             keyboard = liftKeyboard;
             break;
         case 'lift_size':
-            prompt = 'Попроси клиента указать габариты грузового лифта (примерные).';
+            prompt = 'Попроси клиента указать габариты лифта.';
             break;
         case 'equipment':
             prompt = 'Попроси клиента выбрать необходимое оборудование (можно несколько).';
@@ -220,10 +226,11 @@ async function goNext(ctx, chatId, skip = false) {
             prompt = 'Попроси клиента выбрать время демонтажа.';
             keyboard = demountKeyboard;
             break;
-        case 'confirm':
+        case 'confirm': {
             const summary = Object.entries(data).map(([k,v]) => `${k}: ${v}`).join('\n');
             prompt = `Подведи итог и скажи клиенту, что данные отправлены. Данные:\n${summary}`;
             break;
+        }
         default: break;
     }
     stateMap.set(chatId, s);
@@ -231,17 +238,12 @@ async function goNext(ctx, chatId, skip = false) {
     if (prompt) {
         let text;
         try {
-            text = await aiReply(chatId, prompt, name);
+            text = await aiReply(`${prompt} Имя клиента: ${name}. Текущие данные: ${JSON.stringify(data)}`);
         } catch (e) { text = 'Пожалуйста, ответьте на вопрос.'; }
         await ctx.reply(text);
     }
     if (keyboard) {
-        // Если это оборудование, не отправляем клавиатуру повторно при возврате (уже есть сообщение с клавиатурой)
-        if (step === 'equipment') {
-            await ctx.reply('🔧 Выберите оборудование:', keyboard);
-        } else {
-            await ctx.reply('Выберите вариант:', keyboard);
-        }
+        await ctx.reply('Выберите вариант:', keyboard);
     }
 }
 
@@ -256,7 +258,6 @@ bot.on('callback_query', async (ctx) => {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
-        // Ждём файлы (можно установить флаг)
         stateMap.set(chatId, { step: 'files', data: {} });
         return;
     }
@@ -271,7 +272,7 @@ bot.on('callback_query', async (ctx) => {
     const s = stateMap.get(chatId);
     if (!s) return;
 
-    // Обработка времени
+    // Время
     if (data.includes('_hour_') || data.includes('_min_') || data.endsWith('_time_done')) {
         const parts = data.split('_');
         const prefix = parts[0] + '_' + parts[1]; // dts, dte, rdy
@@ -284,13 +285,12 @@ bot.on('callback_query', async (ctx) => {
             const full = `${s.dateStr} ${hour}:${min}`;
             s.data[step] = full;
             delete s.dateStr;
-            // переходим к следующему шагу
-            const order = stepOrder;
+            const order = ['date_start', 'date_end', 'ready_date', 'address', 'place', 'floor', 'lift', 'lift_size', 'equipment', 'mount', 'demount', 'confirm'];
             const idx = order.indexOf(step);
             s.step = order[idx + 1] || 'confirm';
             stateMap.set(chatId, s);
             await ctx.editMessageReplyMarkup(undefined);
-            await ctx.reply(`${step === 'date_start' ? 'Дата начала' : step === 'date_end' ? 'Дата окончания' : 'Готовность оборудования'}: ${full}`);
+            await ctx.reply(`${step === 'date_start' ? 'Дата начала' : step === 'date_end' ? 'Дата окончания' : 'Готовность'}: ${full}`);
             goNext(ctx, chatId);
             await ctx.answerCbQuery();
             return;
@@ -306,7 +306,7 @@ bot.on('callback_query', async (ctx) => {
     // Календари
     if (data.startsWith('dts') || data.startsWith('dte') || data.startsWith('rdy')) {
         const p = data.split('_');
-        const prefix = p[0] + '_' + p[1]; // dts_, dte_, rdy_
+        const prefix = p[0] + '_' + p[1];
         if (p[2] === 'prev' || p[2] === 'next') {
             const year = +p[3], month = +p[4];
             const d = new Date(year, month);
@@ -318,7 +318,6 @@ bot.on('callback_query', async (ctx) => {
             s.dateStr = dateStr;
             const stepMap = { dts: 'date_start', dte: 'date_end', rdy: 'ready_date' };
             const step = stepMap[prefix.slice(0,3)];
-            // Показываем время
             await ctx.editMessageText(`Выберите время для ${step === 'date_start' ? 'начала' : step === 'date_end' ? 'окончания' : 'готовности'}:`, getTimeKeyboard(prefix.slice(0,3)));
             if (!s.time) s.time = {};
             if (!s.time[step]) s.time[step] = { hour: '00', min: '00' };
@@ -329,7 +328,7 @@ bot.on('callback_query', async (ctx) => {
             const stepMap = { dts: 'date_start', dte: 'date_end', rdy: 'ready_date' };
             const step = stepMap[prefix.slice(0,3)];
             s.data[step] = 'не указано';
-            const order = stepOrder;
+            const order = ['date_start', 'date_end', 'ready_date', 'address', 'place', 'floor', 'lift', 'lift_size', 'equipment', 'mount', 'demount', 'confirm'];
             const idx = order.indexOf(step);
             s.step = order[idx+1] || 'confirm';
             stateMap.set(chatId, s);
@@ -339,52 +338,132 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Простые кнопки (формат, уровень, персонал, место, лифт, монтаж, демонтаж)
-    const map = {
-        fmt_: { field: 'format', textField: 'format_text', valField: 'format_val', next: 'level' },
-        lvl_: { field: 'level', textField: 'level_text', valField: 'level_val', next: 'personnel' },
-        prs_: { field: 'personnel', textField: 'personnel_text', valField: 'personnel_val', next: 'date_start' },
-        plc_: { field: 'place', textField: 'place_text', valField: 'place_val', next: 'equipment' },
-        lft_: { field: 'lift', textField: 'lift_text', valField: 'lift_val', next: 'equipment' },
-        mnt_: { field: 'mount', textField: 'mount_text', valField: 'mount_val', next: 'demount' },
-        dmt_: { field: 'demount', textField: 'demount_text', valField: 'demount_val', next: 'confirm' }
-    };
-    for (const [key, cfg] of Object.entries(map)) {
-        if (data.startsWith(key)) {
-            await ctx.answerCbQuery();
-            await ctx.editMessageReplyMarkup(undefined);
-            const val = data.replace(key, '');
-            const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
-            s.data[cfg.field] = text;
-            s.data[cfg.valField || cfg.field] = val;
-            // Специальная обработка "другое" у персонала
-            if (cfg.field === 'personnel' && val === 'other') {
-                s.step = 'personnel_other';
-                stateMap.set(chatId, s);
-                await ctx.reply('Пожалуйста, опишите ваш вариант обслуживания:');
-                return;
-            }
-            // Специальная обработка монтажа/демонтажа с уточнением времени
-            if (cfg.field === 'mount' && val === 'night') {
-                s.awaitingTimeType = 'mount';
-                s.step = 'mount_detail';
-                stateMap.set(chatId, s);
-                await ctx.reply('До какого времени должен быть завершён монтаж? (введите время, например, 06:00)');
-                return;
-            }
-            if (cfg.field === 'demount' && val === 'deadline') {
-                s.awaitingTimeType = 'demount';
-                s.step = 'demount_detail';
-                stateMap.set(chatId, s);
-                await ctx.reply('До какого времени нужно демонтировать? (введите время)');
-                return;
-            }
-            s.step = cfg.next;
+    // Формат
+    if (data.startsWith('fmt_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('fmt_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        s.data.format = text;
+        s.data.format_val = val;
+        s.step = (val === 'concerts' || val === 'sports') ? 'level' : ((val === 'corporate') ? 'guests' : 'personnel');
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
+    }
+
+    // Уровень
+    if (data.startsWith('lvl_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || '';
+        s.data.level = text;
+        s.step = 'personnel';
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
+    }
+
+    // Персонал
+    if (data.startsWith('prs_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('prs_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        s.data.personnel = text;
+        if (val === 'other') {
+            s.step = 'personnel_other';
             stateMap.set(chatId, s);
-            await ctx.reply(text);
-            goNext(ctx, chatId);
+            await ctx.reply('Пожалуйста, опишите ваш вариант обслуживания:');
             return;
         }
+        s.step = 'date_start';
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
+    }
+
+    // Место
+    if (data.startsWith('plc_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('plc_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        s.data.place = text;
+        s.data.place_val = val;
+        if (val === 'indoor') {
+            s.step = 'floor';
+        } else {
+            s.step = 'equipment';
+        }
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
+    }
+
+    // Лифт
+    if (data.startsWith('lft_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('lft_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        s.data.lift = text;
+        s.data.lift_val = val;
+        if (val === 'yes') {
+            s.step = 'lift_size';
+        } else {
+            s.step = 'equipment';
+        }
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
+    }
+
+    // Монтаж
+    if (data.startsWith('mnt_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('mnt_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        s.data.mount = text;
+        if (val === 'night') {
+            s.awaitingTimeType = 'mount';
+            s.step = 'mount_detail';
+            stateMap.set(chatId, s);
+            await ctx.reply('До какого времени должен быть завершён монтаж? (введите время, например, 06:00)');
+            return;
+        }
+        s.step = 'demount';
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
+    }
+
+    // Демонтаж
+    if (data.startsWith('dmt_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('dmt_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        s.data.demount = text;
+        if (val === 'deadline') {
+            s.awaitingTimeType = 'demount';
+            s.step = 'demount_detail';
+            stateMap.set(chatId, s);
+            await ctx.reply('До какого времени нужно демонтировать? (введите время)');
+            return;
+        }
+        s.step = 'confirm';
+        stateMap.set(chatId, s);
+        await ctx.reply(text);
+        goNext(ctx, chatId);
+        return;
     }
 
     // Оборудование
@@ -416,22 +495,6 @@ bot.on('callback_query', async (ctx) => {
         stateMap.set(chatId, s);
         return;
     }
-
-    // Ответить админу
-    if (data.startsWith('reply_to_')) {
-        lastActiveClient[ADMIN_CHAT_ID] = data.replace('reply_to_', '');
-        await ctx.answerCbQuery('Теперь просто напишите /reply текст');
-        await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
-        return;
-    }
-    // Связаться с менеджером
-    if (data === 'contact_manager') {
-        manualMode[chatId] = true;
-        await ctx.answerCbQuery('Заявка отправлена!');
-        await ctx.reply('Спасибо! Менеджер скоро свяжется с вами.');
-        notifyAdmin(`📞 Клиент ${ctx.from.first_name} (@${ctx.from.username || 'нет'}, ID: ${chatId}) запросил менеджера.`);
-        return;
-    }
 });
 
 // ---------- Текстовые сообщения ----------
@@ -443,17 +506,15 @@ bot.on('text', async (ctx, next) => {
 
     const s = stateMap.get(chatId);
     if (!s) {
-        // Начинаем опрос
         stateMap.set(chatId, { step: 'format', data: {} });
         goNext(ctx, chatId);
         return;
     }
 
-    // Обработка уточняющих вопросов (монтаж/демонтаж детали, персонал другое)
     if (s.awaitingTimeType) {
         const type = s.awaitingTimeType;
         const field = type === 'mount' ? 'mount' : 'demount';
-        s.data[field] = `Ночью/рано утром, точное время: ${msg}`;
+        s.data[field] = `${s.data[field]}, точное время: ${msg}`;
         delete s.awaitingTimeType;
         s.step = type === 'mount' ? 'demount' : 'confirm';
         stateMap.set(chatId, s);
@@ -502,10 +563,10 @@ bot.on('text', async (ctx, next) => {
         goNext(ctx, chatId);
         return;
     }
-    // Игнорируем остальное (может быть вопрос про оборудование)
-    // Попробуем ответить через ИИ
+
+    // Остальное — вопрос к ИИ
     try {
-        const reply = await aiReply(chatId, msg, user.first_name);
+        const reply = await aiReply(msg);
         await ctx.reply(reply);
     } catch (e) { console.error(e); }
 });
@@ -522,7 +583,7 @@ bot.start((ctx) => {
     );
 });
 
-// ---------- Остальное (reply, resume, portfolio, файлы) ----------
+// Остальное (reply, resume, portfolio, файлы, сервер)
 const lastActiveClient = {};
 const manualMode = {};
 
@@ -553,11 +614,7 @@ bot.on('document', async (ctx) => {
     const doc = ctx.message.document;
     if (stateMap.get(chatId)?.step === 'files') {
         await ctx.reply('Спасибо! Файлы получены, я передаю их в отдел подготовки КП.');
-        try {
-            await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
-                caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
-            });
-        } catch (e) {}
+        try { await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, { caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})` }); } catch (e) {}
         stateMap.delete(chatId);
         return;
     }
@@ -578,7 +635,6 @@ http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(p
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
 process.on('unhandledRejection', (reason) => console.error('Unhandled:', reason));
 process.on('uncaughtException', (err) => { console.error('Fatal:', err.message); setTimeout(() => process.exit(1), 1000); });
 
