@@ -24,6 +24,9 @@ if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR);
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
+// Хранилище для ожидания точного времени монтажа/демонтажа
+const awaitingTime = new Map(); // chatId -> 'mount' | 'demount'
+
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
@@ -212,7 +215,7 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработка ответа ИИ (теги + fallback) ----------
+// ---------- Обработка ответа ИИ ----------
 async function handleAIReply(ctx, text, chatId) {
     const tagRegex = /\[(ask_\w+)\]/;
     const match = text.match(tagRegex);
@@ -237,7 +240,6 @@ async function handleAIReply(ctx, text, chatId) {
         };
         keyboardInfo = tagToKeyboard[tagName];
     } else {
-        // Fallback
         const lowerText = text.toLowerCase();
         if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
             keyboardInfo = { type: 'format' };
@@ -384,7 +386,7 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Оборудование (множественный выбор с галочками)
+    // Оборудование (множественный выбор)
     if (data.startsWith('equip_')) {
         if (!equipmentSelection.has(chatId)) equipmentSelection.set(chatId, new Set());
         const selSet = equipmentSelection.get(chatId);
@@ -436,26 +438,40 @@ bot.on('callback_query', async (ctx) => {
     }
 
     // Монтаж
-    if (data === 'mount_any' || data === 'mount_night') {
+    if (data === 'mount_any') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = data === 'mount_any' ? 'Монтаж: Любое по согласованию' : 'Монтаж: Нужно смонтировать ночью/рано утром';
+        const text = 'Монтаж: Любое по согласованию';
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
         await handleAIReply(ctx, reply, chatId);
         return;
     }
-
-    // Демонтаж
-    if (data === 'demount_any' || data === 'demount_deadline') {
+    if (data === 'mount_night') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = data === 'demount_any' ? 'Демонтаж: Любое по согласованию' : 'Демонтаж: Нужно демонтировать до определенного времени';
+        await ctx.reply('Монтаж: Нужно смонтировать ночью/рано утром. До какого времени? (введите время, например, «06:00»)');
+        awaitingTime.set(chatId, 'mount');
+        return;
+    }
+
+    // Демонтаж
+    if (data === 'demount_any') {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const text = 'Демонтаж: Любое по согласованию';
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
         await handleAIReply(ctx, reply, chatId);
+        return;
+    }
+    if (data === 'demount_deadline') {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        await ctx.reply('Демонтаж: Нужно демонтировать до определённого времени. До какого времени? (введите время)');
+        awaitingTime.set(chatId, 'demount');
         return;
     }
 
@@ -505,6 +521,18 @@ bot.on('text', async (ctx, next) => {
     notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`);
 
     if (manualMode[chatId]) return;
+
+    // Проверяем, ожидается ли точное время монтажа/демонтажа
+    const timeAwaiting = awaitingTime.get(chatId);
+    if (timeAwaiting) {
+        awaitingTime.delete(chatId);
+        const fullMessage = timeAwaiting === 'mount'
+            ? `Монтаж: Нужно смонтировать ночью/рано утром. Точное время: ${userMessage}`
+            : `Демонтаж: Нужно демонтировать до определённого времени. Точное время: ${userMessage}`;
+        const reply = await askDeepSeek(fullMessage, chatId, user.first_name);
+        await handleAIReply(ctx, reply, chatId);
+        return;
+    }
 
     const lowerMessage = userMessage.toLowerCase();
     const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
