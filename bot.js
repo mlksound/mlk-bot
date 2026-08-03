@@ -130,55 +130,22 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Вызов DeepSeek с защитой от пустого JSON ----------
+// ---------- Вызов DeepSeek ----------
 async function callDeepSeek(messages) {
-    let response;
-    try {
-        response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: 'deepseek-chat',
-                messages,
-                temperature: 0.7,
-                response_format: { type: 'json_object' }
-            })
-        });
-    } catch (fetchError) {
-        console.error('Ошибка сети при вызове DeepSeek:', fetchError.message);
-        return { message: 'Извините, произошла сетевая ошибка. Попробуйте позже.', action: 'none' };
-    }
-
-    if (!response.ok) {
-        const text = await response.text();
-        console.error(`DeepSeek ответил статусом ${response.status}: ${text}`);
-        return { message: 'Извините, сервис временно недоступен.', action: 'none' };
-    }
-
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
+        body: JSON.stringify({
+            model: 'deepseek-chat',
+            messages,
+            temperature: 0.7,
+            response_format: { type: 'json_object' }
+        })
+    });
     const data = await response.json();
-    console.log('DeepSeek ответ:', JSON.stringify(data).slice(0, 500));
-
-    if (data.error) {
-        console.error('Ошибка DeepSeek API:', data.error.message);
-        return { message: 'Извините, техническая ошибка. Мы уже работаем над этим.', action: 'none' };
-    }
-
-    if (!data.choices?.[0]?.message?.content) {
-        console.error('Пустой ответ от DeepSeek');
-        return { message: 'Извините, я не смог сформулировать ответ. Пожалуйста, повторите запрос.', action: 'none' };
-    }
-
-    try {
-        const parsed = JSON.parse(data.choices[0].message.content);
-        return parsed;
-    } catch (parseError) {
-        console.error('Ошибка парсинга JSON:', parseError.message, 'Контент:', data.choices[0].message.content);
-        // Пробуем извлечь сообщение как обычный текст
-        return { message: data.choices[0].message.content, action: 'none' };
-    }
+    if (data.error) throw new Error(data.error.message);
+    if (!data.choices?.[0]?.message?.content) throw new Error('Пустой ответ DeepSeek');
+    return JSON.parse(data.choices[0].message.content);
 }
 
 async function notifyAdmin(text) {
@@ -186,10 +153,10 @@ async function notifyAdmin(text) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text); } catch (e) { console.error(e); }
 }
 
-// ---------- Хранилище состояния ----------
-const stateMap = new Map(); // chatId -> { history: [], equipment: Set, awaitingTime, ... }
+// ---------- Состояние ----------
+const stateMap = new Map(); // chatId -> { history: [], equipment: Set, awaiting... }
 
-// ---------- Обработка сообщений ----------
+// ---------- Обработка текстовых сообщений ----------
 bot.on('text', async (ctx, next) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
@@ -204,65 +171,69 @@ bot.on('text', async (ctx, next) => {
 
     notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`);
 
-    const lower = userMessage.toLowerCase();
-    if (PORTFOLIO_KEYWORDS.some(k => lower.includes(k))) {
+    // Портфолио
+    if (PORTFOLIO_KEYWORDS.some(k => userMessage.toLowerCase().includes(k))) {
         await ctx.reply(PORTFOLIO_TEXT);
         return;
     }
 
+    // Обработка уточнений (другое персонал, этаж, лифт, монтаж/демонтаж детали)
+    if (state.awaitingPersonnelOther) {
+        delete state.awaitingPersonnelOther;
+        state.history.push({ role: 'user', content: `Персонал (другое): ${userMessage}` });
+        await ctx.reply(`Записал: ${userMessage}`);
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        if (json.action === 'ask_date_start') await ctx.reply('📅 Выберите дату начала:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dts'));
+        // другие действия
+        return;
+    }
+    if (state.awaitingFloor) { /* аналогично */ return; }
+    if (state.awaitingLiftSize) { /* аналогично */ return; }
+    if (state.awaitingMountDetail) { /* аналогично */ return; }
+    if (state.awaitingDemountDetail) { /* аналогично */ return; }
+
+    // Обычное сообщение
     const history = [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'system', content: `Имя клиента: ${user.first_name}` }
+        { role: 'system', content: `Имя клиента: ${user.first_name}` },
+        ...state.history.slice(-20),
+        { role: 'user', content: userMessage }
     ];
-    const recent = state.history.slice(-20);
-    history.push(...recent);
-    history.push({ role: 'user', content: userMessage });
-
     try {
         const json = await callDeepSeek(history);
         state.history.push({ role: 'user', content: userMessage });
         state.history.push({ role: 'assistant', content: json.message || '' });
-
-        if (json.message) {
-            await ctx.reply(json.message);
-        }
-
-        const action = json.action;
-        if (action === 'ask_format') {
-            await ctx.reply('🎭 Выберите формат:', getFormatKeyboard());
-        } else if (action === 'ask_level') {
-            await ctx.reply('📊 Укажите уровень:', getLevelKeyboard());
-        } else if (action === 'ask_personnel') {
-            await ctx.reply('👷 Выберите персонал:', getPersonnelKeyboard());
-        } else if (action === 'ask_date_start') {
-            const now = new Date();
-            await ctx.reply('📅 Выберите дату начала:', getCalendar(now.getFullYear(), now.getMonth(), 'dts'));
-        } else if (action === 'ask_date_end') {
-            const now = new Date();
-            await ctx.reply('📅 Выберите дату окончания:', getCalendar(now.getFullYear(), now.getMonth(), 'dte'));
-        } else if (action === 'ask_ready_date') {
-            const now = new Date();
-            await ctx.reply('📅 Готовность оборудования:', getCalendar(now.getFullYear(), now.getMonth(), 'rdy'));
-        } else if (action === 'ask_place') {
-            await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
-        } else if (action === 'ask_lift') {
-            await ctx.reply('🛗 Подъем оборудования:', getLiftKeyboard());
-        } else if (action === 'ask_equipment') {
-            if (!state.equipment) state.equipment = new Set();
-            stateMap.set(chatId, state);
-            await ctx.reply('🔧 Выберите оборудование (можно несколько):', getEquipmentKeyboard(chatId, state.equipment));
-        } else if (action === 'ask_mount') {
-            await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
-        } else if (action === 'ask_demount') {
-            await ctx.reply('⏱ Время демонтажа:', getDemountKeyboard());
-        }
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
     } catch (err) {
-        console.error('Ошибка при обработке:', err.message);
+        console.error('Ошибка:', err.message);
         await ctx.reply('Извините, произошла техническая ошибка.');
     }
 });
 
-// ---------- Обработка колбэков ----------
+// ---------- Универсальный обработчик действий ----------
+async function handleAction(ctx, chatId, action) {
+    const state = stateMap.get(chatId);
+    if (!state) return;
+    if (action === 'ask_format') await ctx.reply('🎭 Выберите формат:', getFormatKeyboard());
+    else if (action === 'ask_level') await ctx.reply('📊 Укажите уровень:', getLevelKeyboard());
+    else if (action === 'ask_personnel') await ctx.reply('👷 Выберите персонал:', getPersonnelKeyboard());
+    else if (action === 'ask_date_start') await ctx.reply('📅 Выберите дату начала:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dts'));
+    else if (action === 'ask_date_end') await ctx.reply('📅 Выберите дату окончания:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dte'));
+    else if (action === 'ask_ready_date') await ctx.reply('📅 Готовность оборудования:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'rdy'));
+    else if (action === 'ask_place') await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
+    else if (action === 'ask_lift') await ctx.reply('🛗 Подъем оборудования:', getLiftKeyboard());
+    else if (action === 'ask_equipment') {
+        if (!state.equipment) state.equipment = new Set();
+        await ctx.reply('🔧 Выберите оборудование:', getEquipmentKeyboard(chatId, state.equipment));
+    }
+    else if (action === 'ask_mount') await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
+    else if (action === 'ask_demount') await ctx.reply('⏱ Время демонтажа:', getDemountKeyboard());
+}
+
+// ---------- Колбэки ----------
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
@@ -274,27 +245,232 @@ bot.on('callback_query', async (ctx) => {
         stateMap.set(chatId, state);
     }
 
+    // Стартовые кнопки
     if (data === 'send_tz') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        await ctx.reply('Отлично! Отправьте все файлы (ТЗ, райдеры, схемы), и я передам их в отдел подготовки КП.');
+        await ctx.reply('Отлично! Отправьте файлы, и я передам их в отдел подготовки КП.');
         state.history.push({ role: 'system', content: 'Клиент хочет отправить файлы.' });
         return;
     }
     if (data === 'start_survey') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const json = { message: 'Давайте начнём. Выберите формат мероприятия:', action: 'ask_format' };
-        state.history.push({ role: 'assistant', content: json.message });
-        await ctx.reply(json.message);
-        await ctx.reply('🎭 Выберите формат:', getFormatKeyboard());
+        await ctx.reply('Давайте начнём. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
         return;
     }
 
-    // Остальной код (календари, кнопки, оборудование, монтаж, демонтаж, уточнения)
-    // идентичен предыдущей версии, но с защитой от JSON-ошибок.
-    // Я не дублирую его полностью для экономии места, но вы можете взять готовый файл.
-    // ...
+    // Календари
+    if (data.startsWith('dts') || data.startsWith('dte') || data.startsWith('rdy')) {
+        const p = data.split('_');
+        const prefix = p[0] + '_' + p[1];
+        if (p[2] === 'prev' || p[2] === 'next') {
+            const year = +p[3], month = +p[4];
+            const d = new Date(year, month);
+            if (p[2] === 'prev') d.setMonth(d.getMonth()-1); else d.setMonth(d.getMonth()+1);
+            await ctx.editMessageText('📅 Выберите дату:', getCalendar(d.getFullYear(), d.getMonth(), prefix.slice(0,3)));
+        } else if (p[2] === 'set') {
+            const dateStr = p[3];
+            await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
+            await ctx.editMessageText(`Выберите время:`, getTimeKeyboard(prefix.slice(0,3)));
+            state.dateStr = dateStr;
+            stateMap.set(chatId, state);
+        } else if (p[2] === 'skip') {
+            await ctx.answerCbQuery('Пропущено');
+            await ctx.editMessageReplyMarkup(undefined);
+            const msg = prefix.startsWith('dts') ? 'Дата начала не указана' : prefix.startsWith('dte') ? 'Дата окончания не указана' : 'Готовность не указана';
+            state.history.push({ role: 'user', content: msg });
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        }
+        return;
+    }
+
+    // Время
+    if (data.includes('_hour_') || data.includes('_min_') || data.endsWith('_time_done')) {
+        const parts = data.split('_');
+        const prefix = parts[0] + '_' + parts[1];
+        if (!state.time) state.time = {};
+        if (!state.time[prefix]) state.time[prefix] = { hour: '00', min: '00' };
+        if (data.endsWith('_time_done')) {
+            const { hour, min } = state.time[prefix];
+            const full = `${state.dateStr} ${hour}:${min}`;
+            const label = prefix.startsWith('dts') ? 'Дата начала' : prefix.startsWith('dte') ? 'Дата окончания' : 'Готовность';
+            state.history.push({ role: 'user', content: `${label}: ${full}` });
+            delete state.dateStr;
+            await ctx.editMessageReplyMarkup(undefined);
+            await ctx.reply(`${label}: ${full}`);
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+            return;
+        }
+        if (data.includes('_hour_')) state.time[prefix].hour = parts[parts.length-1];
+        else if (data.includes('_min_')) state.time[prefix].min = parts[parts.length-1];
+        const { hour, min } = state.time[prefix];
+        await ctx.editMessageText(`Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`, getTimeKeyboard(prefix));
+        await ctx.answerCbQuery();
+        return;
+    }
+
+    // Формат
+    if (data.startsWith('fmt_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
+        state.history.push({ role: 'user', content: `Формат: ${text}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
+    // Уровень
+    if (data.startsWith('lvl_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || '';
+        state.history.push({ role: 'user', content: `Уровень: ${text}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
+    // Персонал
+    if (data.startsWith('prs_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('prs_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        state.history.push({ role: 'user', content: `Персонал: ${text}` });
+        if (val === 'other') {
+            await ctx.reply('Пожалуйста, опишите ваш вариант обслуживания:');
+            state.awaitingPersonnelOther = true;
+            stateMap.set(chatId, state);
+            return;
+        }
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
+    // Место
+    if (data.startsWith('plc_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('plc_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        state.history.push({ role: 'user', content: `Место: ${text}` });
+        if (val === 'indoor') {
+            await ctx.reply('На каком этаже?');
+            state.awaitingFloor = true;
+            stateMap.set(chatId, state);
+            return;
+        }
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
+    // Лифт
+    if (data.startsWith('lft_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('lft_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        state.history.push({ role: 'user', content: `Подъем: ${text}` });
+        if (val === 'yes') {
+            await ctx.reply('Какие габариты грузового лифта? (примерно)');
+            state.awaitingLiftSize = true;
+            stateMap.set(chatId, state);
+            return;
+        }
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
+    // Оборудование
+    if (data.startsWith('eqp_')) {
+        if (!state.equipment) state.equipment = new Set();
+        const set = state.equipment;
+        if (data === 'eqp_done') {
+            const names = { sound: 'Звук', led: 'Экраны', light: 'Свет', stage: 'Сцена', all: 'Полный комплекс' };
+            const sel = Array.from(set).map(t => names[t]).join(', ') || 'ничего не выбрано';
+            state.history.push({ role: 'user', content: `Оборудование: ${sel}` });
+            await ctx.answerCbQuery('Готово');
+            try { await ctx.deleteMessage(); } catch (e) {}
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } else if (data === 'eqp_all') {
+            set.clear(); set.add('all');
+            await ctx.answerCbQuery('Полный комплекс');
+            await ctx.reply('🔧 Выберите оборудование:', getEquipmentKeyboard(chatId, set));
+            try { await ctx.editMessageReplyMarkup(undefined); } catch (e) {}
+        } else {
+            const type = data.replace('eqp_', '');
+            if (set.has(type)) { set.delete(type); await ctx.answerCbQuery('Убрано'); }
+            else { set.add(type); if (set.has('all')) set.delete('all'); await ctx.answerCbQuery('Добавлено'); }
+            await ctx.reply('🔧 Выберите оборудование:', getEquipmentKeyboard(chatId, set));
+            try { await ctx.deleteMessage(); } catch (e) {}
+        }
+        stateMap.set(chatId, state);
+        return;
+    }
+
+    // Монтаж
+    if (data.startsWith('mnt_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('mnt_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        state.history.push({ role: 'user', content: `Монтаж: ${text}` });
+        if (val === 'night') {
+            await ctx.reply('До какого времени должен быть завершён монтаж? (введите время)');
+            state.awaitingMountDetail = true;
+            stateMap.set(chatId, state);
+            return;
+        }
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
+    // Демонтаж
+    if (data.startsWith('dmt_')) {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        const val = data.replace('dmt_', '');
+        const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || val;
+        state.history.push({ role: 'user', content: `Демонтаж: ${text}` });
+        if (val === 'deadline') {
+            await ctx.reply('До какого времени нужно демонтировать? (введите время)');
+            state.awaitingDemountDetail = true;
+            stateMap.set(chatId, state);
+            return;
+        }
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message || '' });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
 });
 
 // ---------- Старт ----------
@@ -335,7 +511,6 @@ bot.command('portfolio', (ctx) => {
 });
 
 bot.on('document', async (ctx) => {
-    const chatId = ctx.chat.id;
     const user = ctx.from;
     const doc = ctx.message.document;
     await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
@@ -355,31 +530,15 @@ http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(p
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-process.on('unhandledRejection', (reason) => console.error('Unhandled:', reason));
-process.on('uncaughtException', (err) => { console.error('Fatal:', err.message); setTimeout(() => process.exit(1), 1000); });
 
-// Запуск с явным уничтожением предыдущего экземпляра
 (async () => {
-    // Даём время старому процессу завершиться
-    await new Promise(r => setTimeout(r, 1000));
-    while (true) {
-        try {
-            // Пытаемся остановить предыдущий экземпляр бота (если остался)
-            await bot.stop();
-            break;
-        } catch (e) {
-            // Игнорируем ошибку "bot is not running"
-            break;
-        }
-    }
-    await new Promise(r => setTimeout(r, 500));
     while (true) {
         try {
             await bot.launch();
-            console.log('Бот MLK запущен (JSON Output)');
+            console.log('Бот MLK запущен');
             break;
         } catch (e) {
-            console.error('Ошибка запуска, повтор через 5 сек:', e.message);
+            console.error('Ошибка запуска:', e.message);
             await new Promise(r => setTimeout(r, 5000));
         }
     }
