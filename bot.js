@@ -177,22 +177,68 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
-    // Обработка уточнений (другое персонал, этаж, лифт, монтаж/демонтаж детали)
+    // Обработка уточнений
     if (state.awaitingPersonnelOther) {
         delete state.awaitingPersonnelOther;
         state.history.push({ role: 'user', content: `Персонал (другое): ${userMessage}` });
         await ctx.reply(`Записал: ${userMessage}`);
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        if (json.action === 'ask_date_start') await ctx.reply('📅 Выберите дату начала:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dts'));
-        // другие действия
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
-    if (state.awaitingFloor) { /* аналогично */ return; }
-    if (state.awaitingLiftSize) { /* аналогично */ return; }
-    if (state.awaitingMountDetail) { /* аналогично */ return; }
-    if (state.awaitingDemountDetail) { /* аналогично */ return; }
+    if (state.awaitingFloor) {
+        delete state.awaitingFloor;
+        state.history.push({ role: 'user', content: `Этаж: ${userMessage}` });
+        stateMap.set(chatId, state);
+        if (parseInt(userMessage) > 2) {
+            await ctx.reply('Есть ли грузовой лифт?', getLiftKeyboard());
+        } else {
+            try {
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                state.history.push({ role: 'assistant', content: json.message || '' });
+                if (json.message) await ctx.reply(json.message);
+                handleAction(ctx, chatId, json.action);
+            } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
+        }
+        return;
+    }
+    if (state.awaitingLiftSize) {
+        delete state.awaitingLiftSize;
+        state.history.push({ role: 'user', content: `Габариты лифта: ${userMessage}` });
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
+        return;
+    }
+    if (state.awaitingMountDetail) {
+        delete state.awaitingMountDetail;
+        state.history.push({ role: 'user', content: `Монтаж (уточнение): ${userMessage}` });
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
+        return;
+    }
+    if (state.awaitingDemountDetail) {
+        delete state.awaitingDemountDetail;
+        state.history.push({ role: 'user', content: `Демонтаж (уточнение): ${userMessage}` });
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
+        return;
+    }
 
     // Обычное сообщение
     const history = [
@@ -245,7 +291,6 @@ bot.on('callback_query', async (ctx) => {
         stateMap.set(chatId, state);
     }
 
-    // Стартовые кнопки
     if (data === 'send_tz') {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
@@ -280,10 +325,12 @@ bot.on('callback_query', async (ctx) => {
             await ctx.editMessageReplyMarkup(undefined);
             const msg = prefix.startsWith('dts') ? 'Дата начала не указана' : prefix.startsWith('dte') ? 'Дата окончания не указана' : 'Готовность не указана';
             state.history.push({ role: 'user', content: msg });
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message || '' });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
+            try {
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                state.history.push({ role: 'assistant', content: json.message || '' });
+                if (json.message) await ctx.reply(json.message);
+                handleAction(ctx, chatId, json.action);
+            } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         }
         return;
     }
@@ -302,10 +349,12 @@ bot.on('callback_query', async (ctx) => {
             delete state.dateStr;
             await ctx.editMessageReplyMarkup(undefined);
             await ctx.reply(`${label}: ${full}`);
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message || '' });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
+            try {
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                state.history.push({ role: 'assistant', content: json.message || '' });
+                if (json.message) await ctx.reply(json.message);
+                handleAction(ctx, chatId, json.action);
+            } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
             return;
         }
         if (data.includes('_hour_')) state.time[prefix].hour = parts[parts.length-1];
@@ -322,10 +371,12 @@ bot.on('callback_query', async (ctx) => {
         await ctx.editMessageReplyMarkup(undefined);
         const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
         state.history.push({ role: 'user', content: `Формат: ${text}` });
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 
@@ -335,10 +386,12 @@ bot.on('callback_query', async (ctx) => {
         await ctx.editMessageReplyMarkup(undefined);
         const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || '';
         state.history.push({ role: 'user', content: `Уровень: ${text}` });
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 
@@ -355,10 +408,12 @@ bot.on('callback_query', async (ctx) => {
             stateMap.set(chatId, state);
             return;
         }
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 
@@ -375,10 +430,12 @@ bot.on('callback_query', async (ctx) => {
             stateMap.set(chatId, state);
             return;
         }
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 
@@ -395,10 +452,12 @@ bot.on('callback_query', async (ctx) => {
             stateMap.set(chatId, state);
             return;
         }
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 
@@ -412,10 +471,12 @@ bot.on('callback_query', async (ctx) => {
             state.history.push({ role: 'user', content: `Оборудование: ${sel}` });
             await ctx.answerCbQuery('Готово');
             try { await ctx.deleteMessage(); } catch (e) {}
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message || '' });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
+            try {
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                state.history.push({ role: 'assistant', content: json.message || '' });
+                if (json.message) await ctx.reply(json.message);
+                handleAction(ctx, chatId, json.action);
+            } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         } else if (data === 'eqp_all') {
             set.clear(); set.add('all');
             await ctx.answerCbQuery('Полный комплекс');
@@ -445,10 +506,12 @@ bot.on('callback_query', async (ctx) => {
             stateMap.set(chatId, state);
             return;
         }
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 
@@ -465,10 +528,12 @@ bot.on('callback_query', async (ctx) => {
             stateMap.set(chatId, state);
             return;
         }
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-        state.history.push({ role: 'assistant', content: json.message || '' });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        try {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message || '' });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        } catch (e) { await ctx.reply('Извините, техническая ошибка.'); }
         return;
     }
 });
@@ -531,14 +596,19 @@ http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(p
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
+// Запуск с гарантированным сбросом вебхука и ожиданием
 (async () => {
+    // Сбрасываем вебхук (на всякий случай)
+    try { await bot.telegram.deleteWebhook(); } catch (e) {}
+    // Даём время старым процессам завершиться
+    await new Promise(r => setTimeout(r, 3000));
     while (true) {
         try {
             await bot.launch({ dropPendingUpdates: true });
             console.log('Бот MLK запущен');
             break;
         } catch (e) {
-            console.error('Ошибка запуска:', e.message);
+            console.error('Ошибка запуска, повтор через 5 сек:', e.message);
             await new Promise(r => setTimeout(r, 5000));
         }
     }
