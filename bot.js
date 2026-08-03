@@ -534,7 +534,7 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 (async () => {
     while (true) {
         try {
-            await bot.launch();
+            await bot.launch({ dropPendingUpdates: true });
             console.log('Бот MLK запущен');
             break;
         } catch (e) {
