@@ -598,9 +598,7 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 // Запуск с гарантированным сбросом вебхука и ожиданием
 (async () => {
-    // Сбрасываем вебхук (на всякий случай)
     try { await bot.telegram.deleteWebhook(); } catch (e) {}
-    // Даём время старым процессам завершиться
     await new Promise(r => setTimeout(r, 3000));
     while (true) {
         try {
