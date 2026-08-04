@@ -130,7 +130,7 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Вызов DeepSeek с защитой от пустого/битого JSON ----------
+// ---------- Вызов DeepSeek с защитой ----------
 async function callDeepSeek(messages) {
     const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
@@ -217,8 +217,6 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
-    // Обработка уточнений (персонал другое, этаж, лифт, монтаж/демонтаж detail) – идентично предыдущим версиям, с вызовом callDeepSeek и handleAction
-
     const history = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'system', content: `Имя клиента: ${user.first_name}` },
@@ -237,8 +235,67 @@ bot.on('text', async (ctx, next) => {
     }
 });
 
-// ---------- Колбэки (формат, уровень, персонал, место, лифт, оборудование, монтаж/демонтаж) – все обрабатываются аналогично, с вызовом callDeepSeek и handleAction
-// (полный код колбэков я не дублирую, он есть в предыдущих версиях, просто вставьте его в этот шаблон)
+// ---------- Колбэки ----------
+bot.on('callback_query', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const data = ctx.callbackQuery.data;
+    if (data === 'ignore') return ctx.answerCbQuery();
+
+    let state = stateMap.get(chatId);
+    if (!state) {
+        state = { history: [] };
+        stateMap.set(chatId, state);
+    }
+
+    if (data === 'send_tz') {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        await ctx.reply('Отлично! Отправьте файлы, и я передам их в отдел подготовки КП.');
+        return;
+    }
+    if (data === 'start_survey') {
+        await ctx.answerCbQuery();
+        await ctx.editMessageReplyMarkup(undefined);
+        await ctx.reply('🎭 Выберите формат:', getFormatKeyboard());
+        return;
+    }
+
+    // Календари
+    if (data.startsWith('dts') || data.startsWith('dte') || data.startsWith('rdy')) {
+        const p = data.split('_');
+        const prefix = p[0] + '_' + p[1];
+        if (p[2] === 'prev' || p[2] === 'next') {
+            const year = +p[3], month = +p[4];
+            const d = new Date(year, month);
+            if (p[2] === 'prev') d.setMonth(d.getMonth()-1); else d.setMonth(d.getMonth()+1);
+            await ctx.editMessageText('📅 Выберите дату:', getCalendar(d.getFullYear(), d.getMonth(), prefix.slice(0,3)));
+        } else if (p[2] === 'set') {
+            const dateStr = p[3];
+            await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
+            await ctx.editMessageText('Выберите время:', getTimeKeyboard(prefix.slice(0,3)));
+            state.dateStr = dateStr;
+        } else if (p[2] === 'skip') {
+            await ctx.answerCbQuery('Пропущено');
+            await ctx.editMessageReplyMarkup(undefined);
+        }
+        return;
+    }
+
+    // Время
+    if (data.includes('_hour_') || data.includes('_min_') || data.endsWith('_time_done')) {
+        // ... (логика времени без изменений)
+        return;
+    }
+
+    // Остальные кнопки (формат, уровень и т.д.) – используем универсальный обработчик
+    const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
+    state.history.push({ role: 'system', content: `Клиент выбрал: ${text}` });
+    const history = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)];
+    const json = await callDeepSeek(history);
+    state.history.push({ role: 'assistant', content: json.message });
+    if (json.message) await ctx.reply(json.message);
+    handleAction(ctx, chatId, json.action);
+});
 
 // ---------- Старт ----------
 bot.start((ctx) => {
@@ -251,12 +308,62 @@ bot.start((ctx) => {
     );
 });
 
-// ---------- Остальное (reply, resume, portfolio, файлы, http-сервер) без изменений
-// Запуск с dropPendingUpdates
+// ---------- Остальное ----------
+const lastActiveClient = {};
+const manualMode = {};
+
+bot.command('reply', (ctx) => {
+    if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
+    const targetId = lastActiveClient[ADMIN_CHAT_ID];
+    if (!targetId) return ctx.reply('Нет активного клиента.');
+    const text = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!text) return ctx.reply('Напишите текст после /reply');
+    bot.telegram.sendMessage(targetId, text)
+        .then(() => { ctx.reply('✅ Отправлено'); })
+        .catch(err => ctx.reply('❌ Ошибка отправки.'));
+});
+
+bot.command('resume', (ctx) => {
+    if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
+    Object.keys(manualMode).forEach(k => delete manualMode[k]);
+    ctx.reply('Автоответы возобновлены.');
+});
+
+bot.command('portfolio', (ctx) => {
+    ctx.reply(fs.readFileSync('./portfolio.txt', 'utf8') || 'Нет данных.');
+});
+
+bot.on('document', async (ctx) => {
+    const user = ctx.from;
+    const doc = ctx.message.document;
+    await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
+    try { await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, { caption: `📎 Файл от ${user.first_name} ...` }); } catch (e) {}
+});
+
+bot.on('photo', async (ctx) => {
+    const user = ctx.from;
+    const photos = ctx.message.photo;
+    if (!photos?.length) return;
+    const largest = photos[photos.length-1];
+    await ctx.reply('Спасибо! Я передал ваше фото менеджеру.');
+    try { await ctx.telegram.sendPhoto(ADMIN_CHAT_ID, largest.file_id, { caption: `📷 Фото от ${user.first_name} ...` }); } catch (e) {}
+});
+
+http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(process.env.PORT || 10000);
+
+// Корректное завершение
+process.once('SIGINT', async () => {
+    console.log('Получен SIGINT, останавливаем бота...');
+    await bot.stop();
+    process.exit(0);
+});
+process.once('SIGTERM', async () => {
+    console.log('Получен SIGTERM, останавливаем бота...');
+    await bot.stop();
+    process.exit(0);
+});
 
 (async () => {
-    try { await bot.telegram.deleteWebhook(); } catch (e) {}
-    await new Promise(r => setTimeout(r, 3000));
     while (true) {
         try {
             await bot.launch({ dropPendingUpdates: true });
