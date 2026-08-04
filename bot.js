@@ -217,6 +217,59 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
+    // Уточнения
+    if (state.awaitingPersonnelOther) {
+        delete state.awaitingPersonnelOther;
+        state.history.push({ role: 'system', content: `Клиент выбрал персонал (другое): ${userMessage}` });
+        await ctx.reply(`Записал: ${userMessage}`);
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+    if (state.awaitingFloor) {
+        delete state.awaitingFloor;
+        state.history.push({ role: 'system', content: `Этаж: ${userMessage}` });
+        stateMap.set(chatId, state);
+        if (parseInt(userMessage) > 2) {
+            await ctx.reply('Есть ли грузовой лифт?', getLiftKeyboard());
+        } else {
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+        }
+        return;
+    }
+    if (state.awaitingLiftSize) {
+        delete state.awaitingLiftSize;
+        state.history.push({ role: 'system', content: `Габариты лифта: ${userMessage}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+    if (state.awaitingMountDetail) {
+        delete state.awaitingMountDetail;
+        state.history.push({ role: 'system', content: `Монтаж (уточнение): ${userMessage}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+    if (state.awaitingDemountDetail) {
+        delete state.awaitingDemountDetail;
+        state.history.push({ role: 'system', content: `Демонтаж (уточнение): ${userMessage}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+        return;
+    }
+
     const history = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'system', content: `Имя клиента: ${user.first_name}` },
@@ -283,18 +336,45 @@ bot.on('callback_query', async (ctx) => {
 
     // Время
     if (data.includes('_hour_') || data.includes('_min_') || data.endsWith('_time_done')) {
-        // ... (логика времени без изменений)
+        const parts = data.split('_');
+        const prefix = parts[0] + '_' + parts[1];
+        if (!state.time) state.time = {};
+        if (!state.time[prefix]) state.time[prefix] = { hour: '00', min: '00' };
+        if (data.endsWith('_time_done')) {
+            const { hour, min } = state.time[prefix];
+            const full = `${state.dateStr} ${hour}:${min}`;
+            const label = prefix.startsWith('dts') ? 'Дата начала' : prefix.startsWith('dte') ? 'Дата окончания' : 'Готовность';
+            state.history.push({ role: 'system', content: `${label}: ${full}` });
+            delete state.dateStr;
+            await ctx.editMessageReplyMarkup(undefined);
+            await ctx.reply(`${label}: ${full}`);
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+            return;
+        }
+        if (data.includes('_hour_')) state.time[prefix].hour = parts[parts.length-1];
+        else if (data.includes('_min_')) state.time[prefix].min = parts[parts.length-1];
+        const { hour, min } = state.time[prefix];
+        await ctx.editMessageText(`Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`, getTimeKeyboard(prefix));
+        await ctx.answerCbQuery();
         return;
     }
 
-    // Остальные кнопки (формат, уровень и т.д.) – используем универсальный обработчик
+    // Остальные кнопки
     const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
     state.history.push({ role: 'system', content: `Клиент выбрал: ${text}` });
     const history = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)];
-    const json = await callDeepSeek(history);
-    state.history.push({ role: 'assistant', content: json.message });
-    if (json.message) await ctx.reply(json.message);
-    handleAction(ctx, chatId, json.action);
+    try {
+        const json = await callDeepSeek(history);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
+    } catch (e) {
+        console.error('Ошибка:', e.message);
+        await ctx.reply('Извините, произошла техническая ошибка.');
+    }
 });
 
 // ---------- Старт ----------
@@ -363,7 +443,18 @@ process.once('SIGTERM', async () => {
     process.exit(0);
 });
 
+// Запуск с принудительным сбросом вебхука
 (async () => {
+    // На всякий случай удаляем вебхук, чтобы не было конфликтов
+    try {
+        await bot.telegram.deleteWebhook();
+        console.log('Вебхук удалён.');
+    } catch (e) {
+        console.error('Не удалось удалить вебхук:', e.message);
+    }
+    // Ждём, чтобы старые соединения точно закрылись
+    await new Promise(r => setTimeout(r, 3000));
+
     while (true) {
         try {
             await bot.launch({ dropPendingUpdates: true });
