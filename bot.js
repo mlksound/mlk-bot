@@ -13,6 +13,15 @@ if (!BOT_TOKEN || !DEEPSEEK_API_KEY) {
     process.exit(1);
 }
 
+// ---------- HTTP-сервер (должен быть создан до долгих операций) ----------
+http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('OK');
+}).listen(process.env.PORT || 10000, () => {
+    console.log('HTTP health check server is listening on port', process.env.PORT || 10000);
+});
+
+// ---------- Остальной код ----------
 const bot = new Telegraf(BOT_TOKEN);
 const SYSTEM_PROMPT = fs.readFileSync('./promt.txt', 'utf8');
 const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
@@ -429,30 +438,26 @@ bot.on('photo', async (ctx) => {
     try { await ctx.telegram.sendPhoto(ADMIN_CHAT_ID, largest.file_id, { caption: `📷 Фото от ${user.first_name} ...` }); } catch (e) {}
 });
 
-http.createServer((req, res) => { res.writeHead(200); res.end('OK'); }).listen(process.env.PORT || 10000);
-
-// Корректное завершение
+// Корректное завершение (без ошибок, если бот не запущен)
 process.once('SIGINT', async () => {
-    console.log('Получен SIGINT, останавливаем бота...');
-    await bot.stop();
+    console.log('Получен SIGINT, останавливаем...');
+    try { await bot.stop(); } catch (e) {}
     process.exit(0);
 });
 process.once('SIGTERM', async () => {
-    console.log('Получен SIGTERM, останавливаем бота...');
-    await bot.stop();
+    console.log('Получен SIGTERM, останавливаем...');
+    try { await bot.stop(); } catch (e) {}
     process.exit(0);
 });
 
 // Запуск с принудительным сбросом вебхука
 (async () => {
-    // На всякий случай удаляем вебхук, чтобы не было конфликтов
     try {
         await bot.telegram.deleteWebhook();
         console.log('Вебхук удалён.');
     } catch (e) {
         console.error('Не удалось удалить вебхук:', e.message);
     }
-    // Ждём, чтобы старые соединения точно закрылись
     await new Promise(r => setTimeout(r, 3000));
 
     while (true) {
