@@ -441,6 +441,7 @@ const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
         console.log(`Вебхук установлен на ${WEBHOOK_URL}`);
     } catch (e) {
         console.error('Ошибка при настройке вебхука:', e.message);
+        process.exit(1);
     }
 
     http.createServer(async (req, res) => {
