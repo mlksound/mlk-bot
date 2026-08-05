@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
-const path = require('path');
 const http = require('http');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -9,7 +8,7 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 
 if (!BOT_TOKEN || !DEEPSEEK_API_KEY) {
-    console.error('Ошибка: не заданы BOT_TOKEN или DEEPSEEK_API_KEY');
+    console.error('❌ Ошибка: не заданы BOT_TOKEN или DEEPSEEK_API_KEY');
     process.exit(1);
 }
 
@@ -19,7 +18,7 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
-// ---------- Клавиатуры ----------
+// ---------- Клавиатуры (все функции без изменений) ----------
 function getFormatKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Концерты & Фестивали', 'fmt_concerts')],
@@ -130,47 +129,52 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Вызов DeepSeek ----------
+// ---------- Вызов DeepSeek (улучшен) ----------
 async function callDeepSeek(messages) {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
-        body: JSON.stringify({
-            model: 'deepseek-chat',
-            messages,
-            temperature: 0.7,
-            response_format: { type: 'json_object' }
-        })
-    });
-    const data = await response.json();
-    if (data.error) throw new Error(data.error.message);
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) throw new Error('Пустой ответ DeepSeek');
-
-    let parsed;
     try {
-        parsed = JSON.parse(content);
-    } catch (e) {
-        console.error('Ошибка парсинга JSON:', content);
-        const match = content.match(/\{[\s\S]*\}/);
-        if (match) {
-            try { parsed = JSON.parse(match[0]); } catch (e2) {}
-        }
-        if (!parsed) {
-            return { message: 'Извините, произошла техническая ошибка.', action: 'none' };
-        }
-    }
+        const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
+            body: JSON.stringify({
+                model: 'deepseek-chat',
+                messages,
+                temperature: 0.7,
+                response_format: { type: 'json_object' }
+            })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message);
+        const content = data.choices?.[0]?.message?.content;
+        if (!content) throw new Error('Пустой ответ DeepSeek');
 
-    return {
-        message: parsed.message || 'Извините, я не понял.',
-        action: parsed.action || 'none',
-        options: parsed.options || []
-    };
+        let parsed;
+        try {
+            parsed = JSON.parse(content);
+        } catch (e) {
+            console.error('❌ Ошибка парсинга JSON:', content);
+            const match = content.match(/\{[\s\S]*\}/);
+            if (match) {
+                try { parsed = JSON.parse(match[0]); } catch (e2) { /* игнорируем */ }
+            }
+            if (!parsed) {
+                return { message: 'Извините, произошла техническая ошибка.', action: 'none' };
+            }
+        }
+
+        return {
+            message: parsed.message || 'Извините, я не понял.',
+            action: parsed.action || 'none',
+            options: parsed.options || []
+        };
+    } catch (err) {
+        console.error('❌ Ошибка в callDeepSeek:', err.message);
+        return { message: 'Извините, сервис временно недоступен.', action: 'none' };
+    }
 }
 
 async function notifyAdmin(text) {
     if (!ADMIN_CHAT_ID) return;
-    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text); } catch (e) { console.error(e); }
+    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text); } catch (e) { /* игнорируем */ }
 }
 
 // ---------- Состояние ----------
@@ -198,11 +202,13 @@ async function handleAction(ctx, chatId, action) {
 }
 
 // ---------- Обработка текстовых сообщений ----------
-bot.on('text', async (ctx, next) => {
+bot.on('text', async (ctx) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
     const user = ctx.from;
-    if (String(user.id) === String(ADMIN_CHAT_ID)) return next();
+
+    // Если это администратор – пропускаем (для команд)
+    if (String(user.id) === String(ADMIN_CHAT_ID)) return;
 
     let state = stateMap.get(chatId);
     if (!state) {
@@ -217,7 +223,7 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
-    // Уточнения
+    // Уточнения (ожидание ввода)
     if (state.awaitingPersonnelOther) {
         delete state.awaitingPersonnelOther;
         state.history.push({ role: 'system', content: `Клиент выбрал персонал (другое): ${userMessage}` });
@@ -270,6 +276,7 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
+    // Обычное сообщение
     const history = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'system', content: `Имя клиента: ${user.first_name}` },
@@ -283,7 +290,7 @@ bot.on('text', async (ctx, next) => {
         if (json.message) await ctx.reply(json.message);
         handleAction(ctx, chatId, json.action);
     } catch (err) {
-        console.error('Ошибка:', err.message);
+        console.error('❌ Ошибка в текстовом обработчике:', err.message);
         await ctx.reply('Извините, произошла техническая ошибка.');
     }
 });
@@ -327,9 +334,18 @@ bot.on('callback_query', async (ctx) => {
             await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
             await ctx.editMessageText('Выберите время:', getTimeKeyboard(prefix.slice(0,3)));
             state.dateStr = dateStr;
+            stateMap.set(chatId, state);
         } else if (p[2] === 'skip') {
             await ctx.answerCbQuery('Пропущено');
             await ctx.editMessageReplyMarkup(undefined);
+            // Добавляем в историю пропуск
+            const label = prefix.startsWith('dts') ? 'Дата начала' : prefix.startsWith('dte') ? 'Дата окончания' : 'Готовность';
+            state.history.push({ role: 'system', content: `${label} не указана` });
+            // Вызываем DeepSeek для продолжения
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
         }
         return;
     }
@@ -362,22 +378,52 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Остальные кнопки
+    // Оборудование (особая логика)
+    if (data.startsWith('eqp_')) {
+        if (!state.equipment) state.equipment = new Set();
+        const set = state.equipment;
+        if (data === 'eqp_done') {
+            const names = { sound: 'Звук', led: 'Экраны', light: 'Свет', stage: 'Сцена', all: 'Полный комплекс' };
+            const sel = Array.from(set).map(t => names[t]).join(', ') || 'ничего не выбрано';
+            state.history.push({ role: 'system', content: `Оборудование: ${sel}` });
+            await ctx.answerCbQuery('Готово');
+            await ctx.deleteMessage().catch(() => {});
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+            state.history.push({ role: 'assistant', content: json.message });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
+            return;
+        } else if (data === 'eqp_all') {
+            set.clear(); set.add('all');
+            await ctx.answerCbQuery('Полный комплекс');
+            await ctx.reply('🔧 Выберите оборудование:', getEquipmentKeyboard(chatId, set));
+            await ctx.deleteMessage().catch(() => {});
+            return;
+        } else {
+            const type = data.replace('eqp_', '');
+            if (set.has(type)) { set.delete(type); await ctx.answerCbQuery('Убрано'); }
+            else { set.add(type); if (set.has('all')) set.delete('all'); await ctx.answerCbQuery('Добавлено'); }
+            await ctx.reply('🔧 Выберите оборудование:', getEquipmentKeyboard(chatId, set));
+            await ctx.deleteMessage().catch(() => {});
+            stateMap.set(chatId, state);
+            return;
+        }
+    }
+
+    // Все остальные кнопки (формат, уровень, персонал, место, лифт, монтаж, демонтаж)
     const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
     state.history.push({ role: 'system', content: `Клиент выбрал: ${text}` });
-    const history = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)];
-    try {
-        const json = await callDeepSeek(history);
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
-    } catch (e) {
-        console.error('Ошибка:', e.message);
-        await ctx.reply('Извините, произошла техническая ошибка.');
-    }
+    await ctx.answerCbQuery();
+    await ctx.deleteMessage().catch(() => {});
+
+    // Особые случаи: если выбрано "Другое" в персонале, "Помещение" в месте, "Есть лифт" и т.д. – они обрабатываются в текстовых сообщениях, но здесь мы просто передаём управление DeepSeek
+    const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+    state.history.push({ role: 'assistant', content: json.message });
+    if (json.message) await ctx.reply(json.message);
+    handleAction(ctx, chatId, json.action);
 });
 
-// ---------- Старт ----------
+// ---------- Команды ----------
 bot.start((ctx) => {
     ctx.reply(
         'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
@@ -388,7 +434,6 @@ bot.start((ctx) => {
     );
 });
 
-// ---------- Остальное ----------
 const lastActiveClient = {};
 const manualMode = {};
 
@@ -429,40 +474,91 @@ bot.on('photo', async (ctx) => {
     try { await ctx.telegram.sendPhoto(ADMIN_CHAT_ID, largest.file_id, { caption: `📷 Фото от ${user.first_name} ...` }); } catch (e) {}
 });
 
-// ---------- Настройка вебхука и сервера ----------
+// ---------- Настройка вебхука и сервера (ГЛАВНОЕ ИСПРАВЛЕНИЕ) ----------
 const PORT = process.env.PORT || 10000;
 const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
 
-(async () => {
+async function setupWebhook() {
     try {
+        // Проверяем текущий webhook
+        const info = await bot.telegram.getWebhookInfo();
+        if (info.url === WEBHOOK_URL) {
+            console.log('✅ Вебхук уже установлен на правильный URL, повторная установка не требуется.');
+            return true;
+        }
+
+        // Удаляем старый
         await bot.telegram.deleteWebhook();
-        console.log('Старый вебхук удалён.');
+        console.log('✅ Старый вебхук удалён.');
+
+        // Устанавливаем новый
         await bot.telegram.setWebhook(WEBHOOK_URL);
-        console.log(`Вебхук установлен на ${WEBHOOK_URL}`);
+        console.log(`✅ Вебхук установлен на ${WEBHOOK_URL}`);
+        return true;
     } catch (e) {
-        console.error('Ошибка при настройке вебхука:', e.message);
+        console.error('❌ Ошибка при настройке вебхука:', e.message);
+        return false;
+    }
+}
+
+// Создаём HTTP-сервер
+const server = http.createServer(async (req, res) => {
+    // Health check для Render
+    if (req.url === '/' || req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('OK');
+        return;
+    }
+
+    // Обработка вебхука от Telegram
+    if (req.url === '/telegram-webhook' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const update = JSON.parse(body);
+                await bot.handleUpdate(update);
+                res.writeHead(200);
+                res.end('OK');
+            } catch (e) {
+                console.error('❌ Ошибка обработки вебхука:', e.message);
+                res.writeHead(200); // всегда отвечаем 200, чтобы Telegram не пересылал повторно
+                res.end('OK');
+            }
+        });
+    } else {
+        // Любой другой запрос — просто OK
+        res.writeHead(200);
+        res.end('OK');
+    }
+});
+
+// Запуск
+(async () => {
+    const success = await setupWebhook();
+    if (!success) {
+        console.error('❌ Не удалось настроить вебхук. Завершаем процесс.');
         process.exit(1);
     }
 
-    http.createServer(async (req, res) => {
-        if (req.url === '/telegram-webhook' && req.method === 'POST') {
-            let body = '';
-            req.on('data', chunk => body += chunk);
-            req.on('end', async () => {
-                try {
-                    const update = JSON.parse(body);
-                    await bot.handleUpdate(update);
-                } catch (e) {
-                    console.error('Ошибка обработки вебхука:', e.message);
-                }
-                res.writeHead(200);
-                res.end('OK');
-            });
-        } else {
-            res.writeHead(200);
-            res.end('OK');
-        }
-    }).listen(PORT, () => {
-        console.log(`Сервер запущен на порту ${PORT}`);
+    server.listen(PORT, () => {
+        console.log(`🚀 Сервер запущен на порту ${PORT}`);
+        console.log(`🌐 Вебхук URL: ${WEBHOOK_URL}`);
+    });
+
+    // Обработка завершения (graceful shutdown)
+    process.once('SIGINT', () => {
+        console.log('🛑 Получен SIGINT, завершаем...');
+        server.close(() => {
+            console.log('✅ Сервер закрыт.');
+            process.exit(0);
+        });
+    });
+    process.once('SIGTERM', () => {
+        console.log('🛑 Получен SIGTERM, завершаем...');
+        server.close(() => {
+            console.log('✅ Сервер закрыт.');
+            process.exit(0);
+        });
     });
 })();
