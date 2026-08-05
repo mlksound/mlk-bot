@@ -19,7 +19,7 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
-// ---------- Клавиатуры (без изменений) ----------
+// ---------- Клавиатуры ----------
 function getFormatKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Концерты & Фестивали', 'fmt_concerts')],
@@ -130,7 +130,7 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Вызов DeepSeek (как раньше, с защитой) ----------
+// ---------- Вызов DeepSeek ----------
 async function callDeepSeek(messages) {
     const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
         method: 'POST',
@@ -157,7 +157,7 @@ async function callDeepSeek(messages) {
             try { parsed = JSON.parse(match[0]); } catch (e2) {}
         }
         if (!parsed) {
-            return { message: 'Извините, произошla техническая ошибка.', action: 'none' };
+            return { message: 'Извините, произошла техническая ошибка.', action: 'none' };
         }
     }
 
@@ -217,7 +217,7 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
-    // Уточнения (аналогично предыдущим версиям)
+    // Уточнения
     if (state.awaitingPersonnelOther) {
         delete state.awaitingPersonnelOther;
         state.history.push({ role: 'system', content: `Клиент выбрал персонал (другое): ${userMessage}` });
@@ -388,7 +388,7 @@ bot.start((ctx) => {
     );
 });
 
-// ---------- Остальные команды ----------
+// ---------- Остальное ----------
 const lastActiveClient = {};
 const manualMode = {};
 
@@ -429,13 +429,11 @@ bot.on('photo', async (ctx) => {
     try { await ctx.telegram.sendPhoto(ADMIN_CHAT_ID, largest.file_id, { caption: `📷 Фото от ${user.first_name} ...` }); } catch (e) {}
 });
 
-// ---------- Настройка вебхука вместо long polling ----------
+// ---------- Настройка вебхука и сервера ----------
 const PORT = process.env.PORT || 10000;
 const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
 
-// Запуск сервера с вебхуком
 (async () => {
-    // Удаляем старый вебхук и устанавливаем новый
     try {
         await bot.telegram.deleteWebhook();
         console.log('Старый вебхук удалён.');
@@ -445,7 +443,6 @@ const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
         console.error('Ошибка при настройке вебхука:', e.message);
     }
 
-    // Запускаем HTTP-сервер, который будет принимать обновления от Telegram
     http.createServer(async (req, res) => {
         if (req.url === '/telegram-webhook' && req.method === 'POST') {
             let body = '';
@@ -467,8 +464,4 @@ const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
     }).listen(PORT, () => {
         console.log(`Сервер запущен на порту ${PORT}`);
     });
-
-    // Запускаем бота (без long polling)
-    await bot.launch({ webhook: true });
-    console.log('Бот MLK запущен с вебхуком');
 })();
