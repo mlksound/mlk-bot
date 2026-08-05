@@ -18,7 +18,7 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
-// ---------- Клавиатуры (без изменений) ----------
+// ---------- Клавиатуры (все без изменений) ----------
 function getFormatKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Концерты & Фестивали', 'fmt_concerts')],
@@ -129,7 +129,7 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Вызов DeepSeek (улучшен) ----------
+// ---------- Вызов DeepSeek (без JSON, с маркерами) ----------
 async function callDeepSeek(messages) {
     try {
         const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
@@ -139,42 +139,41 @@ async function callDeepSeek(messages) {
                 model: 'deepseek-chat',
                 messages,
                 temperature: 0.7,
-                response_format: { type: 'json_object' }
+                // Убираем response_format, чтобы модель могла свободно отвечать
             })
         });
         const data = await response.json();
-        if (data.error) {
-            console.error('❌ DeepSeek API ошибка:', data.error.message);
-            return { message: 'Извините, сервис временно недоступен.', action: 'none' };
-        }
+        if (data.error) throw new Error(data.error.message);
         const content = data.choices?.[0]?.message?.content;
-        if (!content) {
-            console.error('❌ Пустой ответ DeepSeek');
-            return { message: 'Извините, я не смог обработать запрос.', action: 'none' };
+        if (!content) throw new Error('Пустой ответ');
+
+        // Извлекаем маркер действия
+        let action = 'none';
+        let cleanMessage = content;
+        const actionMatch = content.match(/###ACTION:\s*(\w+)###/);
+        if (actionMatch) {
+            action = actionMatch[1].trim();
+            cleanMessage = content.replace(/###ACTION:\s*\w+###/, '').trim();
         }
 
-        let parsed;
-        try {
-            parsed = JSON.parse(content);
-        } catch (e) {
-            console.error('❌ Ошибка парсинга JSON. Содержимое:', content);
-            const match = content.match(/\{[\s\S]*\}/);
-            if (match) {
-                try {
-                    parsed = JSON.parse(match[0]);
-                } catch (e2) {
-                    console.error('❌ Не удалось извлечь JSON из ответа.');
-                    return { message: 'Извините, произошла техническая ошибка.', action: 'none' };
-                }
-            } else {
-                return { message: 'Извините, произошла техническая ошибка.', action: 'none' };
-            }
+        // Если маркера нет, пробуем найти в тексте ключевые слова (запасной вариант)
+        if (action === 'none') {
+            if (cleanMessage.includes('формат')) action = 'ask_format';
+            else if (cleanMessage.includes('уровень')) action = 'ask_level';
+            else if (cleanMessage.includes('персонал')) action = 'ask_personnel';
+            else if (cleanMessage.includes('дата начала')) action = 'ask_date_start';
+            else if (cleanMessage.includes('дата окончания')) action = 'ask_date_end';
+            else if (cleanMessage.includes('готовность')) action = 'ask_ready_date';
+            else if (cleanMessage.includes('место')) action = 'ask_place';
+            else if (cleanMessage.includes('лифт')) action = 'ask_lift';
+            else if (cleanMessage.includes('оборудование')) action = 'ask_equipment';
+            else if (cleanMessage.includes('монтаж')) action = 'ask_mount';
+            else if (cleanMessage.includes('демонтаж')) action = 'ask_demount';
         }
 
         return {
-            message: parsed.message || 'Извините, я не понял.',
-            action: parsed.action || 'none',
-            options: parsed.options || []
+            message: cleanMessage || 'Извините, я не понял.',
+            action: action
         };
     } catch (err) {
         console.error('❌ Ошибка в callDeepSeek:', err.message);
@@ -184,7 +183,9 @@ async function callDeepSeek(messages) {
 
 async function notifyAdmin(text) {
     if (!ADMIN_CHAT_ID) return;
-    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text); } catch (e) { /* игнорируем */ }
+    try {
+        await bot.telegram.sendMessage(ADMIN_CHAT_ID, text);
+    } catch (e) { console.error('Ошибка уведомления админа:', e.message); }
 }
 
 // ---------- Состояние ----------
@@ -221,7 +222,7 @@ bot.on('text', async (ctx) => {
     const userMessage = ctx.message.text;
     const user = ctx.from;
 
-    // Если это администратор – пропускаем (для команд)
+    // Если это администратор – обрабатываем команды, но не как клиента
     if (String(user.id) === String(ADMIN_CHAT_ID)) return;
 
     let state = stateMap.get(chatId);
@@ -230,88 +231,69 @@ bot.on('text', async (ctx) => {
         stateMap.set(chatId, state);
     }
 
-    notifyAdmin(`📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`);
+    // Отправляем админу
+    const adminText = `📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`;
+    notifyAdmin(adminText);
 
+    // Сохраняем последнего активного клиента для /reply
+    global.lastActiveClient = chatId;
+
+    // Портфолио
     if (PORTFOLIO_KEYWORDS.some(k => userMessage.toLowerCase().includes(k))) {
         await ctx.reply(PORTFOLIO_TEXT);
         return;
     }
 
-    // Уточнения (ожидание ввода)
+    // Обработка уточнений (ожидание ввода)
     if (state.awaitingPersonnelOther) {
         delete state.awaitingPersonnelOther;
-        state.history.push({ role: 'system', content: `Клиент выбрал персонал (другое): ${userMessage}` });
+        state.history.push({ role: 'user', content: `Персонал (другое): ${userMessage}` });
         await ctx.reply(`Записал: ${userMessage}`);
-        try {
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
-        } catch (err) {
-            console.error('❌ Ошибка:', err.message);
-            await ctx.reply('Извините, произошла техническая ошибка.');
-        }
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
         return;
     }
     if (state.awaitingFloor) {
         delete state.awaitingFloor;
-        state.history.push({ role: 'system', content: `Этаж: ${userMessage}` });
+        state.history.push({ role: 'user', content: `Этаж: ${userMessage}` });
         stateMap.set(chatId, state);
         if (parseInt(userMessage) > 2) {
             await ctx.reply('Есть ли грузовой лифт?', getLiftKeyboard());
         } else {
-            try {
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-                state.history.push({ role: 'assistant', content: json.message });
-                if (json.message) await ctx.reply(json.message);
-                handleAction(ctx, chatId, json.action);
-            } catch (err) {
-                console.error('❌ Ошибка:', err.message);
-                await ctx.reply('Извините, произошла техническая ошибка.');
-            }
+            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+            state.history.push({ role: 'assistant', content: json.message });
+            if (json.message) await ctx.reply(json.message);
+            handleAction(ctx, chatId, json.action);
         }
         return;
     }
     if (state.awaitingLiftSize) {
         delete state.awaitingLiftSize;
-        state.history.push({ role: 'system', content: `Габариты лифта: ${userMessage}` });
-        try {
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
-        } catch (err) {
-            console.error('❌ Ошибка:', err.message);
-            await ctx.reply('Извините, произошла техническая ошибка.');
-        }
+        state.history.push({ role: 'user', content: `Габариты лифта: ${userMessage}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
         return;
     }
     if (state.awaitingMountDetail) {
         delete state.awaitingMountDetail;
-        state.history.push({ role: 'system', content: `Монтаж (уточнение): ${userMessage}` });
-        try {
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
-        } catch (err) {
-            console.error('❌ Ошибка:', err.message);
-            await ctx.reply('Извините, произошла техническая ошибка.');
-        }
+        state.history.push({ role: 'user', content: `Монтаж (уточнение): ${userMessage}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
         return;
     }
     if (state.awaitingDemountDetail) {
         delete state.awaitingDemountDetail;
-        state.history.push({ role: 'system', content: `Демонтаж (уточнение): ${userMessage}` });
-        try {
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
-            state.history.push({ role: 'assistant', content: json.message });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
-        } catch (err) {
-            console.error('❌ Ошибка:', err.message);
-            await ctx.reply('Извините, произошла техническая ошибка.');
-        }
+        state.history.push({ role: 'user', content: `Демонтаж (уточнение): ${userMessage}` });
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        state.history.push({ role: 'assistant', content: json.message });
+        if (json.message) await ctx.reply(json.message);
+        handleAction(ctx, chatId, json.action);
         return;
     }
 
@@ -319,7 +301,7 @@ bot.on('text', async (ctx) => {
     const history = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'system', content: `Имя клиента: ${user.first_name}` },
-        ...state.history.slice(-20),
+        ...state.history.slice(-10),
         { role: 'user', content: userMessage }
     ];
     try {
@@ -379,8 +361,8 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.answerCbQuery('Пропущено');
                 await ctx.editMessageReplyMarkup(undefined);
                 const label = prefix.startsWith('dts') ? 'Дата начала' : prefix.startsWith('dte') ? 'Дата окончания' : 'Готовность';
-                state.history.push({ role: 'system', content: `${label} не указана` });
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                state.history.push({ role: 'user', content: `${label} не указана` });
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
                 state.history.push({ role: 'assistant', content: json.message });
                 if (json.message) await ctx.reply(json.message);
                 handleAction(ctx, chatId, json.action);
@@ -398,11 +380,11 @@ bot.on('callback_query', async (ctx) => {
                 const { hour, min } = state.time[prefix];
                 const full = `${state.dateStr} ${hour}:${min}`;
                 const label = prefix.startsWith('dts') ? 'Дата начала' : prefix.startsWith('dte') ? 'Дата окончания' : 'Готовность';
-                state.history.push({ role: 'system', content: `${label}: ${full}` });
+                state.history.push({ role: 'user', content: `${label}: ${full}` });
                 delete state.dateStr;
                 await ctx.editMessageReplyMarkup(undefined);
                 await ctx.reply(`${label}: ${full}`);
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
                 state.history.push({ role: 'assistant', content: json.message });
                 if (json.message) await ctx.reply(json.message);
                 handleAction(ctx, chatId, json.action);
@@ -423,10 +405,10 @@ bot.on('callback_query', async (ctx) => {
             if (data === 'eqp_done') {
                 const names = { sound: 'Звук', led: 'Экраны', light: 'Свет', stage: 'Сцена', all: 'Полный комплекс' };
                 const sel = Array.from(set).map(t => names[t]).join(', ') || 'ничего не выбрано';
-                state.history.push({ role: 'system', content: `Оборудование: ${sel}` });
+                state.history.push({ role: 'user', content: `Оборудование: ${sel}` });
                 await ctx.answerCbQuery('Готово');
                 await ctx.deleteMessage().catch(() => {});
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
                 state.history.push({ role: 'assistant', content: json.message });
                 if (json.message) await ctx.reply(json.message);
                 handleAction(ctx, chatId, json.action);
@@ -450,11 +432,11 @@ bot.on('callback_query', async (ctx) => {
 
         // Все остальные кнопки (формат, уровень, персонал, место, лифт, монтаж, демонтаж)
         const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
-        state.history.push({ role: 'system', content: `Клиент выбрал: ${text}` });
+        state.history.push({ role: 'user', content: `Клиент выбрал: ${text}` });
         await ctx.answerCbQuery();
         await ctx.deleteMessage().catch(() => {});
 
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-20)]);
+        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
         state.history.push({ role: 'assistant', content: json.message });
         if (json.message) await ctx.reply(json.message);
         handleAction(ctx, chatId, json.action);
@@ -472,11 +454,7 @@ bot.start((ctx) => {
         state = { history: [], started: false };
         stateMap.set(chatId, state);
     }
-    // Если уже был старт, не дублируем приветствие
-    if (state.started) {
-        // Можно просто ответить "Вы уже начали диалог" или ничего не делать
-        return;
-    }
+    if (state.started) return; // не дублируем
     state.started = true;
     ctx.reply(
         'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
@@ -487,30 +465,28 @@ bot.start((ctx) => {
     );
 });
 
-const lastActiveClient = {};
-const manualMode = {};
-
+// Команда для админа: ответить клиенту
 bot.command('reply', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
-    const targetId = lastActiveClient[ADMIN_CHAT_ID];
+    const targetId = global.lastActiveClient;
     if (!targetId) return ctx.reply('Нет активного клиента.');
     const text = ctx.message.text.split(' ').slice(1).join(' ');
     if (!text) return ctx.reply('Напишите текст после /reply');
     bot.telegram.sendMessage(targetId, text)
-        .then(() => { ctx.reply('✅ Отправлено'); })
-        .catch(err => ctx.reply('❌ Ошибка отправки.'));
+        .then(() => ctx.reply('✅ Отправлено'))
+        .catch(err => ctx.reply('❌ Ошибка отправки: ' + err.message));
 });
 
 bot.command('resume', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
-    Object.keys(manualMode).forEach(k => delete manualMode[k]);
     ctx.reply('Автоответы возобновлены.');
 });
 
 bot.command('portfolio', (ctx) => {
-    ctx.reply(fs.readFileSync('./portfolio.txt', 'utf8') || 'Нет данных.');
+    ctx.reply(PORTFOLIO_TEXT);
 });
 
+// Файлы и фото
 bot.on('document', async (ctx) => {
     const user = ctx.from;
     const doc = ctx.message.document;
@@ -533,21 +509,14 @@ const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
 
 async function setupWebhook() {
     try {
-        // Проверяем текущий webhook
         const info = await bot.telegram.getWebhookInfo();
         if (info.url === WEBHOOK_URL) {
             console.log('✅ Вебхук уже установлен на правильный URL, повторная установка не требуется.');
             return true;
         }
-
-        // Удаляем старый
         await bot.telegram.deleteWebhook();
         console.log('✅ Старый вебхук удалён.');
-
-        // Устанавливаем новый с очисткой старых обновлений
-        await bot.telegram.setWebhook(WEBHOOK_URL, {
-            drop_pending_updates: true
-        });
+        await bot.telegram.setWebhook(WEBHOOK_URL, { drop_pending_updates: true });
         console.log(`✅ Вебхук установлен на ${WEBHOOK_URL} (старые обновления сброшены)`);
         return true;
     } catch (e) {
@@ -556,16 +525,12 @@ async function setupWebhook() {
     }
 }
 
-// Создаём HTTP-сервер
 const server = http.createServer(async (req, res) => {
-    // Health check для Render
     if (req.url === '/' || req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         res.end('OK');
         return;
     }
-
-    // Обработка вебхука от Telegram
     if (req.url === '/telegram-webhook' && req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -587,31 +552,23 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
-// Запуск
 (async () => {
     const success = await setupWebhook();
     if (!success) {
         console.error('❌ Не удалось настроить вебхук. Завершаем процесс.');
         process.exit(1);
     }
-
     server.listen(PORT, () => {
         console.log(`🚀 Сервер запущен на порту ${PORT}`);
         console.log(`🌐 Вебхук URL: ${WEBHOOK_URL}`);
     });
-
-    process.once('SIGINT', () => {
-        console.log('🛑 Получен SIGINT, завершаем...');
-        server.close(() => {
-            console.log('✅ Сервер закрыт.');
-            process.exit(0);
-        });
-    });
-    process.once('SIGTERM', () => {
-        console.log('🛑 Получен SIGTERM, завершаем...');
-        server.close(() => {
-            console.log('✅ Сервер закрыт.');
-            process.exit(0);
-        });
-    });
 })();
+
+process.once('SIGINT', () => {
+    console.log('🛑 Получен SIGINT, завершаем...');
+    server.close(() => process.exit(0));
+});
+process.once('SIGTERM', () => {
+    console.log('🛑 Получен SIGTERM, завершаем...');
+    server.close(() => process.exit(0));
+});
