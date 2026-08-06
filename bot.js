@@ -129,7 +129,7 @@ function getTimeKeyboard(prefix) {
     return Markup.inlineKeyboard(btns);
 }
 
-// ---------- Вызов DeepSeek (без JSON, с маркерами) ----------
+// ---------- Вызов DeepSeek (без JSON, только текст) ----------
 async function callDeepSeek(messages) {
     try {
         const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
@@ -139,80 +139,76 @@ async function callDeepSeek(messages) {
                 model: 'deepseek-chat',
                 messages,
                 temperature: 0.7,
-                // Убираем response_format, чтобы модель могла свободно отвечать
             })
         });
         const data = await response.json();
         if (data.error) throw new Error(data.error.message);
         const content = data.choices?.[0]?.message?.content;
         if (!content) throw new Error('Пустой ответ');
-
-        // Извлекаем маркер действия
-        let action = 'none';
-        let cleanMessage = content;
-        const actionMatch = content.match(/###ACTION:\s*(\w+)###/);
-        if (actionMatch) {
-            action = actionMatch[1].trim();
-            cleanMessage = content.replace(/###ACTION:\s*\w+###/, '').trim();
-        }
-
-        // Если маркера нет, пробуем найти в тексте ключевые слова (запасной вариант)
-        if (action === 'none') {
-            if (cleanMessage.includes('формат')) action = 'ask_format';
-            else if (cleanMessage.includes('уровень')) action = 'ask_level';
-            else if (cleanMessage.includes('персонал')) action = 'ask_personnel';
-            else if (cleanMessage.includes('дата начала')) action = 'ask_date_start';
-            else if (cleanMessage.includes('дата окончания')) action = 'ask_date_end';
-            else if (cleanMessage.includes('готовность')) action = 'ask_ready_date';
-            else if (cleanMessage.includes('место')) action = 'ask_place';
-            else if (cleanMessage.includes('лифт')) action = 'ask_lift';
-            else if (cleanMessage.includes('оборудование')) action = 'ask_equipment';
-            else if (cleanMessage.includes('монтаж')) action = 'ask_mount';
-            else if (cleanMessage.includes('демонтаж')) action = 'ask_demount';
-        }
-
-        return {
-            message: cleanMessage || 'Извините, я не понял.',
-            action: action
-        };
+        return content;
     } catch (err) {
         console.error('❌ Ошибка в callDeepSeek:', err.message);
-        return { message: 'Извините, сервис временно недоступен.', action: 'none' };
+        return null;
     }
+}
+
+// ---------- Извлечение тега из ответа ----------
+function extractTag(text) {
+    if (!text) return { clean: text, tag: null };
+    // Ищем тег вида [ask_xxx]
+    const match = text.match(/\[ask_(\w+)\]/);
+    if (match) {
+        const tag = match[1];
+        const clean = text.replace(/\[ask_\w+\]/, '').trim();
+        return { clean, tag };
+    }
+    // Запасной вариант: ищем ключевые слова
+    const lower = text.toLowerCase();
+    if (lower.includes('формат')) return { clean: text, tag: 'format' };
+    if (lower.includes('уровень')) return { clean: text, tag: 'level' };
+    if (lower.includes('персонал')) return { clean: text, tag: 'personnel' };
+    if (lower.includes('дата начала')) return { clean: text, tag: 'date_start' };
+    if (lower.includes('дата окончания')) return { clean: text, tag: 'date_end' };
+    if (lower.includes('готовность')) return { clean: text, tag: 'ready_date' };
+    if (lower.includes('место')) return { clean: text, tag: 'place' };
+    if (lower.includes('лифт')) return { clean: text, tag: 'lift' };
+    if (lower.includes('оборудование')) return { clean: text, tag: 'equipment' };
+    if (lower.includes('монтаж')) return { clean: text, tag: 'mount' };
+    if (lower.includes('демонтаж')) return { clean: text, tag: 'demount' };
+    return { clean: text, tag: null };
 }
 
 async function notifyAdmin(text) {
     if (!ADMIN_CHAT_ID) return;
-    try {
-        await bot.telegram.sendMessage(ADMIN_CHAT_ID, text);
-    } catch (e) { console.error('Ошибка уведомления админа:', e.message); }
+    try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text); } catch (e) {}
 }
 
 // ---------- Состояние ----------
 const stateMap = new Map();
+let lastActiveClient = null;
 
-// ---------- Обработка действий ----------
-async function handleAction(ctx, chatId, action) {
+// ---------- Обработка действий по тегу ----------
+async function handleTag(ctx, chatId, tag) {
     const state = stateMap.get(chatId);
     if (!state) return;
-    if (action === 'none' || !action) return;
+    if (!tag) return;
     try {
-        if (action === 'ask_format') await ctx.reply('🎭 Выберите формат:', getFormatKeyboard());
-        else if (action === 'ask_level') await ctx.reply('📊 Укажите уровень:', getLevelKeyboard());
-        else if (action === 'ask_personnel') await ctx.reply('👷 Выберите персонал:', getPersonnelKeyboard());
-        else if (action === 'ask_date_start') await ctx.reply('📅 Выберите дату начала:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dts'));
-        else if (action === 'ask_date_end') await ctx.reply('📅 Выберите дату окончания:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dte'));
-        else if (action === 'ask_ready_date') await ctx.reply('📅 Готовность оборудования:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'rdy'));
-        else if (action === 'ask_place') await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
-        else if (action === 'ask_lift') await ctx.reply('🛗 Подъем оборудования:', getLiftKeyboard());
-        else if (action === 'ask_equipment') {
+        if (tag === 'format') await ctx.reply('🎭 Выберите формат:', getFormatKeyboard());
+        else if (tag === 'level') await ctx.reply('📊 Укажите уровень:', getLevelKeyboard());
+        else if (tag === 'personnel') await ctx.reply('👷 Выберите персонал:', getPersonnelKeyboard());
+        else if (tag === 'date_start') await ctx.reply('📅 Выберите дату начала:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dts'));
+        else if (tag === 'date_end') await ctx.reply('📅 Выберите дату окончания:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'dte'));
+        else if (tag === 'ready_date') await ctx.reply('📅 Готовность оборудования:', getCalendar(new Date().getFullYear(), new Date().getMonth(), 'rdy'));
+        else if (tag === 'place') await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
+        else if (tag === 'lift') await ctx.reply('🛗 Подъем оборудования:', getLiftKeyboard());
+        else if (tag === 'equipment') {
             if (!state.equipment) state.equipment = new Set();
             await ctx.reply('🔧 Выберите оборудование:', getEquipmentKeyboard(chatId, state.equipment));
         }
-        else if (action === 'ask_mount') await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
-        else if (action === 'ask_demount') await ctx.reply('⏱ Время демонтажа:', getDemountKeyboard());
+        else if (tag === 'mount') await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
+        else if (tag === 'demount') await ctx.reply('⏱ Время демонтажа:', getDemountKeyboard());
     } catch (err) {
-        console.error('❌ Ошибка в handleAction:', err.message);
+        console.error('❌ Ошибка в handleTag:', err.message);
     }
 }
 
@@ -222,7 +218,6 @@ bot.on('text', async (ctx) => {
     const userMessage = ctx.message.text;
     const user = ctx.from;
 
-    // Если это администратор – обрабатываем команды, но не как клиента
     if (String(user.id) === String(ADMIN_CHAT_ID)) return;
 
     let state = stateMap.get(chatId);
@@ -231,12 +226,10 @@ bot.on('text', async (ctx) => {
         stateMap.set(chatId, state);
     }
 
-    // Отправляем админу
-    const adminText = `📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`;
-    notifyAdmin(adminText);
-
-    // Сохраняем последнего активного клиента для /reply
-    global.lastActiveClient = chatId;
+    // Уведомление админу
+    const adminMsg = `📩 Сообщение от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id}):\n\n${userMessage}`;
+    notifyAdmin(adminMsg);
+    lastActiveClient = chatId;
 
     // Портфолио
     if (PORTFOLIO_KEYWORDS.some(k => userMessage.toLowerCase().includes(k))) {
@@ -249,10 +242,15 @@ bot.on('text', async (ctx) => {
         delete state.awaitingPersonnelOther;
         state.history.push({ role: 'user', content: `Персонал (другое): ${userMessage}` });
         await ctx.reply(`Записал: ${userMessage}`);
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        if (answer) {
+            const { clean, tag } = extractTag(answer);
+            state.history.push({ role: 'assistant', content: clean });
+            if (clean) await ctx.reply(clean);
+            await handleTag(ctx, chatId, tag);
+        } else {
+            await ctx.reply('Извините, произошла ошибка.');
+        }
         return;
     }
     if (state.awaitingFloor) {
@@ -262,38 +260,58 @@ bot.on('text', async (ctx) => {
         if (parseInt(userMessage) > 2) {
             await ctx.reply('Есть ли грузовой лифт?', getLiftKeyboard());
         } else {
-            const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-            state.history.push({ role: 'assistant', content: json.message });
-            if (json.message) await ctx.reply(json.message);
-            handleAction(ctx, chatId, json.action);
+            const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+            if (answer) {
+                const { clean, tag } = extractTag(answer);
+                state.history.push({ role: 'assistant', content: clean });
+                if (clean) await ctx.reply(clean);
+                await handleTag(ctx, chatId, tag);
+            } else {
+                await ctx.reply('Извините, ошибка.');
+            }
         }
         return;
     }
     if (state.awaitingLiftSize) {
         delete state.awaitingLiftSize;
         state.history.push({ role: 'user', content: `Габариты лифта: ${userMessage}` });
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        if (answer) {
+            const { clean, tag } = extractTag(answer);
+            state.history.push({ role: 'assistant', content: clean });
+            if (clean) await ctx.reply(clean);
+            await handleTag(ctx, chatId, tag);
+        } else {
+            await ctx.reply('Ошибка.');
+        }
         return;
     }
     if (state.awaitingMountDetail) {
         delete state.awaitingMountDetail;
         state.history.push({ role: 'user', content: `Монтаж (уточнение): ${userMessage}` });
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        if (answer) {
+            const { clean, tag } = extractTag(answer);
+            state.history.push({ role: 'assistant', content: clean });
+            if (clean) await ctx.reply(clean);
+            await handleTag(ctx, chatId, tag);
+        } else {
+            await ctx.reply('Ошибка.');
+        }
         return;
     }
     if (state.awaitingDemountDetail) {
         delete state.awaitingDemountDetail;
         state.history.push({ role: 'user', content: `Демонтаж (уточнение): ${userMessage}` });
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        if (answer) {
+            const { clean, tag } = extractTag(answer);
+            state.history.push({ role: 'assistant', content: clean });
+            if (clean) await ctx.reply(clean);
+            await handleTag(ctx, chatId, tag);
+        } else {
+            await ctx.reply('Ошибка.');
+        }
         return;
     }
 
@@ -304,14 +322,14 @@ bot.on('text', async (ctx) => {
         ...state.history.slice(-10),
         { role: 'user', content: userMessage }
     ];
-    try {
-        const json = await callDeepSeek(history);
+    const answer = await callDeepSeek(history);
+    if (answer) {
+        const { clean, tag } = extractTag(answer);
         state.history.push({ role: 'user', content: userMessage });
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
-    } catch (err) {
-        console.error('❌ Ошибка в текстовом обработчике:', err.message);
+        state.history.push({ role: 'assistant', content: clean });
+        if (clean) await ctx.reply(clean);
+        await handleTag(ctx, chatId, tag);
+    } else {
         await ctx.reply('Извините, произошла техническая ошибка.');
     }
 });
@@ -351,6 +369,7 @@ bot.on('callback_query', async (ctx) => {
                 const d = new Date(year, month);
                 if (p[2] === 'prev') d.setMonth(d.getMonth()-1); else d.setMonth(d.getMonth()+1);
                 await ctx.editMessageText('📅 Выберите дату:', getCalendar(d.getFullYear(), d.getMonth(), prefix.slice(0,3)));
+                await ctx.answerCbQuery();
             } else if (p[2] === 'set') {
                 const dateStr = p[3];
                 await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
@@ -362,10 +381,15 @@ bot.on('callback_query', async (ctx) => {
                 await ctx.editMessageReplyMarkup(undefined);
                 const label = prefix.startsWith('dts') ? 'Дата начала' : prefix.startsWith('dte') ? 'Дата окончания' : 'Готовность';
                 state.history.push({ role: 'user', content: `${label} не указана` });
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-                state.history.push({ role: 'assistant', content: json.message });
-                if (json.message) await ctx.reply(json.message);
-                handleAction(ctx, chatId, json.action);
+                const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+                if (answer) {
+                    const { clean, tag } = extractTag(answer);
+                    state.history.push({ role: 'assistant', content: clean });
+                    if (clean) await ctx.reply(clean);
+                    await handleTag(ctx, chatId, tag);
+                } else {
+                    await ctx.reply('Ошибка.');
+                }
             }
             return;
         }
@@ -384,10 +408,16 @@ bot.on('callback_query', async (ctx) => {
                 delete state.dateStr;
                 await ctx.editMessageReplyMarkup(undefined);
                 await ctx.reply(`${label}: ${full}`);
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-                state.history.push({ role: 'assistant', content: json.message });
-                if (json.message) await ctx.reply(json.message);
-                handleAction(ctx, chatId, json.action);
+                const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+                if (answer) {
+                    const { clean, tag } = extractTag(answer);
+                    state.history.push({ role: 'assistant', content: clean });
+                    if (clean) await ctx.reply(clean);
+                    await handleTag(ctx, chatId, tag);
+                } else {
+                    await ctx.reply('Ошибка.');
+                }
+                await ctx.answerCbQuery();
                 return;
             }
             if (data.includes('_hour_')) state.time[prefix].hour = parts[parts.length-1];
@@ -408,10 +438,15 @@ bot.on('callback_query', async (ctx) => {
                 state.history.push({ role: 'user', content: `Оборудование: ${sel}` });
                 await ctx.answerCbQuery('Готово');
                 await ctx.deleteMessage().catch(() => {});
-                const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-                state.history.push({ role: 'assistant', content: json.message });
-                if (json.message) await ctx.reply(json.message);
-                handleAction(ctx, chatId, json.action);
+                const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+                if (answer) {
+                    const { clean, tag } = extractTag(answer);
+                    state.history.push({ role: 'assistant', content: clean });
+                    if (clean) await ctx.reply(clean);
+                    await handleTag(ctx, chatId, tag);
+                } else {
+                    await ctx.reply('Ошибка.');
+                }
                 return;
             } else if (data === 'eqp_all') {
                 set.clear(); set.add('all');
@@ -430,19 +465,24 @@ bot.on('callback_query', async (ctx) => {
             }
         }
 
-        // Все остальные кнопки (формат, уровень, персонал, место, лифт, монтаж, демонтаж)
+        // Все остальные кнопки
         const text = ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data;
         state.history.push({ role: 'user', content: `Клиент выбрал: ${text}` });
         await ctx.answerCbQuery();
         await ctx.deleteMessage().catch(() => {});
 
-        const json = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
-        state.history.push({ role: 'assistant', content: json.message });
-        if (json.message) await ctx.reply(json.message);
-        handleAction(ctx, chatId, json.action);
+        const answer = await callDeepSeek([{ role: 'system', content: SYSTEM_PROMPT }, ...state.history.slice(-10)]);
+        if (answer) {
+            const { clean, tag } = extractTag(answer);
+            state.history.push({ role: 'assistant', content: clean });
+            if (clean) await ctx.reply(clean);
+            await handleTag(ctx, chatId, tag);
+        } else {
+            await ctx.reply('Ошибка.');
+        }
     } catch (err) {
         console.error('❌ Ошибка в колбэке:', err.message);
-        await ctx.reply('Извините, произошла техническая ошибка.');
+        // Не отправляем сообщение об ошибке, чтобы не раздражать клиента
     }
 });
 
@@ -454,10 +494,13 @@ bot.start((ctx) => {
         state = { history: [], started: false };
         stateMap.set(chatId, state);
     }
-    if (state.started) return; // не дублируем
+    if (state.started) return;
     state.started = true;
     ctx.reply(
-        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
+        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».' +
+        '\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.' +
+        '\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.' +
+        '\n\nС чего начнём?',
         Markup.inlineKeyboard([
             [Markup.button.callback('📎 Отправить файлы', 'send_tz')],
             [Markup.button.callback('💬 Продолжить диалог', 'start_survey')]
@@ -465,10 +508,9 @@ bot.start((ctx) => {
     );
 });
 
-// Команда для админа: ответить клиенту
 bot.command('reply', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
-    const targetId = global.lastActiveClient;
+    const targetId = lastActiveClient;
     if (!targetId) return ctx.reply('Нет активного клиента.');
     const text = ctx.message.text.split(' ').slice(1).join(' ');
     if (!text) return ctx.reply('Напишите текст после /reply');
@@ -477,16 +519,10 @@ bot.command('reply', (ctx) => {
         .catch(err => ctx.reply('❌ Ошибка отправки: ' + err.message));
 });
 
-bot.command('resume', (ctx) => {
-    if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
-    ctx.reply('Автоответы возобновлены.');
-});
-
 bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT);
 });
 
-// Файлы и фото
 bot.on('document', async (ctx) => {
     const user = ctx.from;
     const doc = ctx.message.document;
@@ -511,23 +547,22 @@ async function setupWebhook() {
     try {
         const info = await bot.telegram.getWebhookInfo();
         if (info.url === WEBHOOK_URL) {
-            console.log('✅ Вебхук уже установлен на правильный URL, повторная установка не требуется.');
+            console.log('✅ Вебхук уже установлен.');
             return true;
         }
         await bot.telegram.deleteWebhook();
-        console.log('✅ Старый вебхук удалён.');
         await bot.telegram.setWebhook(WEBHOOK_URL, { drop_pending_updates: true });
-        console.log(`✅ Вебхук установлен на ${WEBHOOK_URL} (старые обновления сброшены)`);
+        console.log(`✅ Вебхук установлен на ${WEBHOOK_URL}`);
         return true;
     } catch (e) {
-        console.error('❌ Ошибка при настройке вебхука:', e.message);
+        console.error('❌ Ошибка настройки вебхука:', e.message);
         return false;
     }
 }
 
 const server = http.createServer(async (req, res) => {
     if (req.url === '/' || req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.writeHead(200);
         res.end('OK');
         return;
     }
@@ -553,22 +588,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 (async () => {
-    const success = await setupWebhook();
-    if (!success) {
-        console.error('❌ Не удалось настроить вебхук. Завершаем процесс.');
-        process.exit(1);
-    }
+    const ok = await setupWebhook();
+    if (!ok) process.exit(1);
     server.listen(PORT, () => {
         console.log(`🚀 Сервер запущен на порту ${PORT}`);
-        console.log(`🌐 Вебхук URL: ${WEBHOOK_URL}`);
     });
 })();
-
-process.once('SIGINT', () => {
-    console.log('🛑 Получен SIGINT, завершаем...');
-    server.close(() => process.exit(0));
-});
-process.once('SIGTERM', () => {
-    console.log('🛑 Получен SIGTERM, завершаем...');
-    server.close(() => process.exit(0));
-});
