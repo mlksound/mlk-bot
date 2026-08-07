@@ -9,7 +9,7 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 
 if (!BOT_TOKEN || !DEEPSEEK_API_KEY) {
-    console.error('Ошибка: не заданы BOT_TOKEN или DEEPSEEK_API_KEY');
+    console.error('❌ Ошибка: не заданы BOT_TOKEN или DEEPSEEK_API_KEY');
     process.exit(1);
 }
 
@@ -19,16 +19,21 @@ const PORTFOLIO_TEXT = fs.readFileSync('./portfolio.txt', 'utf8');
 
 const PORTFOLIO_KEYWORDS = ['опыт', 'портфолио', 'делали ли вы', 'пример', 'кейс', 'проект', 'объект', 'работали', 'участвовали', 'проводили'];
 
+// ---------- Сессии ----------
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR);
 const sessions = {};
 const SESSION_TTL = 90 * 24 * 60 * 60 * 1000;
 
-// Ожидание точного времени монтажа/демонтажа
-const awaitingTime = new Map(); // chatId -> 'mount' | 'demount'
-// Ожидание ввода времени после выбора даты (chatId -> {prefix, dateStr})
-const awaitingDateTime = new Map();
+// ---------- Состояния ----------
+const awaitingTime = new Map();          // chatId -> 'mount' | 'demount'
+const awaitingDateTime = new Map();      // chatId -> { dateStr, date_start: {hour,min}, ... }
+const manualMode = {};
+const lastActiveClient = {};
+const equipmentSelection = new Map();    // chatId -> Set
+const collectedData = new Map();         // chatId -> { format, level, personnel, date_start, date_end, ready_date, place, lift, equipment, mount, demount }
 
+// ---------- Загрузка и сохранение сессий ----------
 function loadSessions() {
     const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
@@ -47,7 +52,7 @@ function loadSessions() {
             loadedCount++;
         } catch (e) { console.error('Ошибка чтения сессии:', e.message); }
     }
-    console.log(`Загружено сессий: ${loadedCount}`);
+    console.log(`✅ Загружено сессий: ${loadedCount}`);
 }
 
 function saveSession(chatId, messages) {
@@ -63,9 +68,17 @@ function ensureSession(chatId) {
     }
 }
 
-const manualMode = {};
-const lastActiveClient = {};
-const equipmentSelection = new Map();
+// ---------- Вспомогательные функции для collectedData ----------
+function isCollected(chatId, field) {
+    const data = collectedData.get(chatId) || {};
+    return !!data[field];
+}
+
+function markCollected(chatId, field, value) {
+    const data = collectedData.get(chatId) || {};
+    data[field] = value || true;
+    collectedData.set(chatId, data);
+}
 
 // ---------- Клавиатуры ----------
 function getFormatKeyboard() {
@@ -172,22 +185,19 @@ function getCalendar(year, month, prefix) {
     return Markup.inlineKeyboard(buttons);
 }
 
-// Клавиатура выбора времени (часы:минуты)
 function getTimeKeyboard(prefix) {
     const hours = Array.from({length: 24}, (_, i) => i.toString().padStart(2, '0'));
     const minutes = ['00', '15', '30', '45'];
     const buttons = [];
-    // часы в 4 ряда по 6
     for (let i = 0; i < hours.length; i += 6) {
         buttons.push(hours.slice(i, i + 6).map(h => Markup.button.callback(h, `${prefix}_hour_${h}`)));
     }
-    // минуты отдельным рядом
     buttons.push(minutes.map(m => Markup.button.callback(m, `${prefix}_min_${m}`)));
     buttons.push([Markup.button.callback('Подтвердить', `${prefix}_time_done`)]);
     return Markup.inlineKeyboard(buttons);
 }
 
-// ---------- ИИ ----------
+// ---------- Вызов DeepSeek ----------
 async function askDeepSeek(userMessage, chatId, userFirstName, addPortfolio = false) {
     ensureSession(chatId);
     let finalMessage = userMessage;
@@ -232,7 +242,7 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработка ответа ИИ ----------
+// ---------- Обработка ответа ИИ (без fallback по ключевым словам) ----------
 async function handleAIReply(ctx, text, chatId) {
     const tagRegex = /\[(ask_\w+)\]/;
     const match = text.match(tagRegex);
@@ -256,49 +266,66 @@ async function handleAIReply(ctx, text, chatId) {
             'ask_ready_date': { type: 'calendar', prefix: 'ready_date', text: '📅 Готовность оборудования:' }
         };
         keyboardInfo = tagToKeyboard[tagName];
-    } else {
-        const lowerText = text.toLowerCase();
-        if (lowerText.includes('формат') && (lowerText.includes('выберите') || lowerText.includes('какой'))) {
-            keyboardInfo = { type: 'format' };
-        } else if (lowerText.includes('уровень') && lowerText.includes('мероприятия')) {
-            keyboardInfo = { type: 'level' };
-        } else if (lowerText.includes('персонал')) {
-            keyboardInfo = { type: 'personnel' };
-        } else if (lowerText.includes('место') && lowerText.includes('проходит')) {
-            keyboardInfo = { type: 'place' };
-        } else if (lowerText.includes('лифт') || lowerText.includes('подъем')) {
-            keyboardInfo = { type: 'lift' };
-        } else if (lowerText.includes('оборудование') && (lowerText.includes('выберите') || lowerText.includes('какое'))) {
-            keyboardInfo = { type: 'equipment' };
-        } else if (lowerText.includes('монтаж') && !lowerText.includes('демонтаж')) {
-            keyboardInfo = { type: 'mount' };
-        } else if (lowerText.includes('демонтаж')) {
-            keyboardInfo = { type: 'demount' };
-        }
     }
 
+    // Отправляем сообщение (даже если пустое — не отправляем)
     if (finalText.length > 0) await ctx.reply(finalText);
 
+    // Если тег есть и он соответствует действию, проверяем, не собран ли уже этот пункт
     if (keyboardInfo) {
-        if (keyboardInfo.type === 'format') await ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
-        else if (keyboardInfo.type === 'level') await ctx.reply('📊 Укажите уровень мероприятия:', getLevelKeyboard());
-        else if (keyboardInfo.type === 'personnel') await ctx.reply('👷 Выберите обслуживающий персонал:', getPersonnelKeyboard());
-        else if (keyboardInfo.type === 'place') await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
-        else if (keyboardInfo.type === 'lift') await ctx.reply('🛗 Подъем оборудования:', getLiftKeyboard());
-        else if (keyboardInfo.type === 'equipment') {
-            equipmentSelection.set(ctx.chat.id, new Set());
-            await ctx.reply('🔧 Какое оборудование необходимо? (можно выбрать несколько)', getEquipmentKeyboard(ctx.chat.id));
+        const fieldMap = {
+            'format': 'format',
+            'level': 'level',
+            'personnel': 'personnel',
+            'place': 'place',
+            'lift': 'lift',
+            'equipment': 'equipment',
+            'mount': 'mount',
+            'demount': 'demount',
+            'calendar': 'date'  // для календарей проверим по префиксу отдельно
+        };
+        const field = fieldMap[keyboardInfo.type];
+        let alreadyCollected = false;
+        if (keyboardInfo.type === 'calendar') {
+            const prefix = keyboardInfo.prefix;
+            if (prefix === 'date_start' && isCollected(chatId, 'date_start')) alreadyCollected = true;
+            else if (prefix === 'date_end' && isCollected(chatId, 'date_end')) alreadyCollected = true;
+            else if (prefix === 'ready_date' && isCollected(chatId, 'ready_date')) alreadyCollected = true;
+        } else {
+            if (field && isCollected(chatId, field)) alreadyCollected = true;
         }
-        else if (keyboardInfo.type === 'mount') await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
-        else if (keyboardInfo.type === 'demount') await ctx.reply('⏱ Время демонтажа:', getDemountKeyboard());
-        else if (keyboardInfo.type === 'calendar') {
+
+        if (alreadyCollected) {
+            // Пункт уже собран — не показываем клавиатуру повторно
+            return;
+        }
+
+        // Показываем соответствующую клавиатуру
+        if (keyboardInfo.type === 'format') {
+            await ctx.reply('🎭 Выберите формат мероприятия:', getFormatKeyboard());
+        } else if (keyboardInfo.type === 'level') {
+            await ctx.reply('📊 Укажите уровень мероприятия:', getLevelKeyboard());
+        } else if (keyboardInfo.type === 'personnel') {
+            await ctx.reply('👷 Выберите обслуживающий персонал:', getPersonnelKeyboard());
+        } else if (keyboardInfo.type === 'place') {
+            await ctx.reply('📍 Где проходит мероприятие?', getPlaceKeyboard());
+        } else if (keyboardInfo.type === 'lift') {
+            await ctx.reply('🛗 Подъем оборудования:', getLiftKeyboard());
+        } else if (keyboardInfo.type === 'equipment') {
+            equipmentSelection.set(chatId, new Set());
+            await ctx.reply('🔧 Какое оборудование необходимо? (можно выбрать несколько)', getEquipmentKeyboard(chatId));
+        } else if (keyboardInfo.type === 'mount') {
+            await ctx.reply('⏱ Время монтажа:', getMountKeyboard());
+        } else if (keyboardInfo.type === 'demount') {
+            await ctx.reply('⏱ Время демонтажа:', getDemountKeyboard());
+        } else if (keyboardInfo.type === 'calendar') {
             const now = new Date();
             await ctx.reply(keyboardInfo.text, getCalendar(now.getFullYear(), now.getMonth(), keyboardInfo.prefix));
         }
     }
 }
 
-// ---------- Callback-обработчики ----------
+// ---------- Обработка callback-запросов ----------
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
@@ -323,6 +350,9 @@ bot.on('callback_query', async (ctx) => {
             };
             await ctx.editMessageReplyMarkup(undefined);
             await ctx.reply(`${labelMap[prefix]}: ${fullDate}`);
+            // Помечаем как собранное
+            const collectedField = prefix; // date_start, date_end, ready_date
+            markCollected(chatId, collectedField, fullDate);
             const user = ctx.from;
             const reply = await askDeepSeek(`${labelMap[prefix]}: ${fullDate}`, chatId, user.first_name);
             await handleAIReply(ctx, reply, chatId);
@@ -334,7 +364,6 @@ bot.on('callback_query', async (ctx) => {
             timeData[prefix].min = parts[parts.length - 1];
         }
         awaitingDateTime.set(chatId, timeData);
-        // Обновляем сообщение с выбранным временем
         const { hour, min } = timeData[prefix];
         await ctx.editMessageText(`Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`, getTimeKeyboard(prefix));
         await ctx.answerCbQuery();
@@ -353,10 +382,10 @@ bot.on('callback_query', async (ctx) => {
                 if (parts[2] === 'prev') newDate.setMonth(newDate.getMonth() - 1);
                 else newDate.setMonth(newDate.getMonth() + 1);
                 await ctx.editMessageText('📅 Выберите дату:', getCalendar(newDate.getFullYear(), newDate.getMonth(), prefix));
+                await ctx.answerCbQuery();
             } else if (parts[2] === 'set') {
                 const dateStr = parts[3];
                 await ctx.answerCbQuery(`Выбрано: ${dateStr}`);
-                // Переходим к выбору времени
                 const timeData = awaitingDateTime.get(chatId) || {};
                 timeData.dateStr = dateStr;
                 timeData[prefix] = { hour: '00', min: '00' };
@@ -369,6 +398,8 @@ bot.on('callback_query', async (ctx) => {
                                 prefix === 'date_end'   ? 'Дата окончания не указана' :
                                 'Готовность не указана';
                 await ctx.reply(skipMsg);
+                // Помечаем как пропущенное (но не блокируем повтор)
+                // Не помечаем как собранное, чтобы при необходимости можно было спросить позже
                 const user = ctx.from;
                 const reply = await askDeepSeek(skipMsg, chatId, user.first_name);
                 await handleAIReply(ctx, reply, chatId);
@@ -381,7 +412,8 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('format_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = `Формат: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = `Формат: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data}`;
+        markCollected(chatId, 'format', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -393,7 +425,8 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('level_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = `Уровень: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = `Уровень: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data}`;
+        markCollected(chatId, 'level', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -405,7 +438,8 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('personnel_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = `Персонал: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = `Персонал: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data}`;
+        markCollected(chatId, 'personnel', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -417,7 +451,8 @@ bot.on('callback_query', async (ctx) => {
     if (data.startsWith('place_')) {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
-        const text = `Место: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.find(b => b[0].callback_data === data)[0].text}`;
+        const text = `Место: ${ctx.callbackQuery.message.reply_markup.inline_keyboard.flat().find(b => b.callback_data === data)?.text || data}`;
+        markCollected(chatId, 'place', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -430,6 +465,7 @@ bot.on('callback_query', async (ctx) => {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         const text = data === 'lift_yes' ? 'Подъем: Есть грузовой лифт' : 'Подъем: Нужно носить по лестнице';
+        markCollected(chatId, 'lift', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -455,6 +491,7 @@ bot.on('callback_query', async (ctx) => {
             await ctx.answerCbQuery('Готово');
             try { await ctx.deleteMessage(); } catch (e) {}
             equipmentSelection.delete(chatId);
+            markCollected(chatId, 'equipment', messageText);
             await ctx.reply(messageText);
             const user = ctx.from;
             const reply = await askDeepSeek(messageText, chatId, user.first_name);
@@ -493,6 +530,7 @@ bot.on('callback_query', async (ctx) => {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         const text = 'Монтаж: Любое по согласованию';
+        markCollected(chatId, 'mount', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -512,6 +550,7 @@ bot.on('callback_query', async (ctx) => {
         await ctx.answerCbQuery();
         await ctx.editMessageReplyMarkup(undefined);
         const text = 'Демонтаж: Любое по согласованию';
+        markCollected(chatId, 'demount', text);
         await ctx.reply(text);
         const user = ctx.from;
         const reply = await askDeepSeek(text, chatId, user.first_name);
@@ -526,15 +565,7 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
-    // Ответить админу
-    if (data.startsWith('reply_to_')) {
-        lastActiveClient[ADMIN_CHAT_ID] = data.replace('reply_to_', '');
-        await ctx.answerCbQuery('Теперь просто напишите /reply текст');
-        await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
-        return;
-    }
-
-    // Связаться с менеджером
+    // Кнопка "Связаться с менеджером" (если есть)
     if (data === 'contact_manager') {
         manualMode[chatId] = true;
         await ctx.answerCbQuery('Заявка отправлена!');
@@ -561,6 +592,14 @@ bot.on('callback_query', async (ctx) => {
         await ctx.reply('Хорошо, давайте обсудим ваше мероприятие. 🎭 Выберите формат мероприятия:', getFormatKeyboard());
         return;
     }
+
+    // Ответить админу (для /reply)
+    if (data.startsWith('reply_to_')) {
+        lastActiveClient[ADMIN_CHAT_ID] = data.replace('reply_to_', '');
+        await ctx.answerCbQuery('Теперь просто напишите /reply текст');
+        await ctx.reply(`Активный клиент: ${lastActiveClient[ADMIN_CHAT_ID]}. Используйте /reply текст.`);
+        return;
+    }
 });
 
 // ---------- Текстовые сообщения ----------
@@ -582,11 +621,14 @@ bot.on('text', async (ctx, next) => {
         const fullMessage = timeAwaiting === 'mount'
             ? `Монтаж: Ночью/рано утром, точное время: ${userMessage}`
             : `Демонтаж: До определённого времени, точное время: ${userMessage}`;
+        if (timeAwaiting === 'mount') markCollected(chatId, 'mount', fullMessage);
+        else markCollected(chatId, 'demount', fullMessage);
         const reply = await askDeepSeek(fullMessage, chatId, user.first_name);
         await handleAIReply(ctx, reply, chatId);
         return;
     }
 
+    // Если пользователь вводит адрес или другие уточнения — ИИ сам разберётся
     const lowerMessage = userMessage.toLowerCase();
     const addPortfolio = PORTFOLIO_KEYWORDS.some(keyword => lowerMessage.includes(keyword));
 
@@ -604,7 +646,10 @@ bot.on('text', async (ctx, next) => {
 bot.start((ctx) => {
     const chatId = ctx.chat.id;
     ctx.reply(
-        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».\n\nЕсли у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\nИли мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\nС чего начнём?',
+        'Здравствуйте! Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».\n\n' +
+        'Если у вас есть готовые файлы с полной информацией по мероприятию (ТЗ, райдеры, даты, любые другие файлы), вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.\n\n' +
+        'Или мы можем обсудить ваше мероприятие, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.\n\n' +
+        'С чего начнём?',
         Markup.inlineKeyboard([
             [Markup.button.callback('📎 Отправить файлы', 'send_tz')],
             [Markup.button.callback('💬 Продолжить диалог', 'start_survey')]
@@ -620,7 +665,7 @@ bot.command('reply', (ctx) => {
     if (!text) return ctx.reply('Напишите текст после /reply');
     bot.telegram.sendMessage(targetId, text)
         .then(() => { ctx.reply('✅ Отправлено'); })
-        .catch(err => ctx.reply('❌ Ошибка отправки.'));
+        .catch(err => ctx.reply('❌ Ошибка отправки: ' + err.message));
 });
 
 bot.command('resume', (ctx) => {
@@ -636,24 +681,12 @@ bot.command('portfolio', (ctx) => {
 // ---------- Пересылка файлов ----------
 bot.on('document', async (ctx) => {
     const chatId = ctx.chat.id;
-    if (sessions[chatId] && sessions[chatId].some(m => m.content === 'Клиент хочет отправить файлы.')) {
-        const user = ctx.from;
-        const doc = ctx.message.document;
-        await ctx.reply('Спасибо! Файлы получены, я передаю их в отдел подготовки КП.');
-        try {
-            await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
-                caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
-            });
-        } catch (err) { console.error('Ошибка пересылки:', err.message); }
-        sessions[chatId] = sessions[chatId].filter(m => m.content !== 'Клиент хочет отправить файлы.');
-        return;
-    }
     const user = ctx.from;
     const doc = ctx.message.document;
     await ctx.reply('Спасибо! Я передал ваш файл менеджеру.');
     try {
         await ctx.telegram.sendDocument(ADMIN_CHAT_ID, doc.file_id, {
-            caption: `📎 Документ от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
+            caption: `📎 Файл от ${user.first_name} (@${user.username || 'нет'}, ID: ${user.id})\nИмя файла: ${doc.file_name || 'неизвестно'}`
         });
     } catch (err) { console.error('Ошибка пересылки:', err.message); }
 });
@@ -671,37 +704,74 @@ bot.on('photo', async (ctx) => {
     } catch (err) { console.error('Ошибка пересылки:', err.message); }
 });
 
-// ---------- HTTP сервер ----------
-http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('OK');
-}).listen(process.env.PORT || 10000);
+// ---------- Webhook и сервер (вместо bot.launch) ----------
+const PORT = process.env.PORT || 10000;
+const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
 
-// ---------- Защита от падений ----------
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-process.on('unhandledRejection', (reason) => {
-    console.error('Необработанная ошибка:', reason);
-});
-process.on('uncaughtException', (err) => {
-    console.error('Фатальная ошибка:', err.message);
-    setTimeout(() => process.exit(1), 1000);
-});
-
-async function launchBot() {
-    loadSessions();
-    while (true) {
-        try {
-            await bot.launch();
-            console.log('Бот MLK запущен');
-            notifyAdmin('✅ Бот запущен и работает');
-            break;
-        } catch (err) {
-            console.error('Ошибка запуска, повтор через 5 сек:', err.message);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+async function setupWebhook() {
+    try {
+        const info = await bot.telegram.getWebhookInfo();
+        if (info.url === WEBHOOK_URL) {
+            console.log('✅ Вебхук уже установлен на правильный URL, повторная установка не требуется.');
+            return true;
         }
+        await bot.telegram.deleteWebhook();
+        console.log('✅ Старый вебхук удалён.');
+        await bot.telegram.setWebhook(WEBHOOK_URL, { drop_pending_updates: true });
+        console.log(`✅ Вебхук установлен на ${WEBHOOK_URL} (старые обновления сброшены)`);
+        return true;
+    } catch (e) {
+        console.error('❌ Ошибка при настройке вебхука:', e.message);
+        return false;
     }
 }
 
-launchBot();
+const server = http.createServer(async (req, res) => {
+    if (req.url === '/' || req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('OK');
+        return;
+    }
+    if (req.url === '/telegram-webhook' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+            try {
+                const update = JSON.parse(body);
+                await bot.handleUpdate(update);
+                res.writeHead(200);
+                res.end('OK');
+            } catch (e) {
+                console.error('❌ Ошибка обработки вебхука:', e.message);
+                res.writeHead(200);
+                res.end('OK');
+            }
+        });
+    } else {
+        res.writeHead(200);
+        res.end('OK');
+    }
+});
+
+(async () => {
+    loadSessions();
+    const success = await setupWebhook();
+    if (!success) {
+        console.error('❌ Не удалось настроить вебхук. Завершаем процесс.');
+        process.exit(1);
+    }
+    server.listen(PORT, () => {
+        console.log(`🚀 Сервер запущен на порту ${PORT}`);
+        console.log(`🌐 Вебхук URL: ${WEBHOOK_URL}`);
+        notifyAdmin('✅ Бот запущен и работает через webhook');
+    });
+})();
+
+process.once('SIGINT', () => {
+    console.log('🛑 Получен SIGINT, завершаем...');
+    server.close(() => process.exit(0));
+});
+process.once('SIGTERM', () => {
+    console.log('🛑 Получен SIGTERM, завершаем...');
+    server.close(() => process.exit(0));
+});
