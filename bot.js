@@ -350,14 +350,16 @@ bot.on('callback_query', async (ctx) => {
             };
             await ctx.editMessageReplyMarkup(undefined);
             await ctx.reply(`${labelMap[prefix]}: ${fullDate}`);
-            // Помечаем как собранное
-            const collectedField = prefix; // date_start, date_end, ready_date
+            const collectedField = prefix;
             markCollected(chatId, collectedField, fullDate);
             const user = ctx.from;
             const reply = await askDeepSeek(`${labelMap[prefix]}: ${fullDate}`, chatId, user.first_name);
             await handleAIReply(ctx, reply, chatId);
             return;
         }
+        // Обновление времени (час или минута)
+        const oldHour = timeData[prefix].hour;
+        const oldMin = timeData[prefix].min;
         if (data.includes('_hour_')) {
             timeData[prefix].hour = parts[parts.length - 1];
         } else if (data.includes('_min_')) {
@@ -365,7 +367,10 @@ bot.on('callback_query', async (ctx) => {
         }
         awaitingDateTime.set(chatId, timeData);
         const { hour, min } = timeData[prefix];
-        await ctx.editMessageText(`Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`, getTimeKeyboard(prefix));
+        // Проверяем, изменилось ли что-то, чтобы не вызывать ошибку "message is not modified"
+        if (oldHour !== hour || oldMin !== min) {
+            await ctx.editMessageText(`Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`, getTimeKeyboard(prefix));
+        }
         await ctx.answerCbQuery();
         return;
     }
@@ -398,8 +403,6 @@ bot.on('callback_query', async (ctx) => {
                                 prefix === 'date_end'   ? 'Дата окончания не указана' :
                                 'Готовность не указана';
                 await ctx.reply(skipMsg);
-                // Помечаем как пропущенное (но не блокируем повтор)
-                // Не помечаем как собранное, чтобы при необходимости можно было спросить позже
                 const user = ctx.from;
                 const reply = await askDeepSeek(skipMsg, chatId, user.first_name);
                 await handleAIReply(ctx, reply, chatId);
@@ -704,7 +707,7 @@ bot.on('photo', async (ctx) => {
     } catch (err) { console.error('Ошибка пересылки:', err.message); }
 });
 
-// ---------- Webhook и сервер (вместо bot.launch) ----------
+// ---------- Webhook и сервер (без bot.launch) ----------
 const PORT = process.env.PORT || 10000;
 const WEBHOOK_URL = `https://mlk-bot.onrender.com/telegram-webhook`;
 
@@ -715,6 +718,7 @@ async function setupWebhook() {
             console.log('✅ Вебхук уже установлен на правильный URL, повторная установка не требуется.');
             return true;
         }
+        // Если URL другой, удаляем и устанавливаем новый
         await bot.telegram.deleteWebhook();
         console.log('✅ Старый вебхук удалён.');
         await bot.telegram.setWebhook(WEBHOOK_URL, { drop_pending_updates: true });
