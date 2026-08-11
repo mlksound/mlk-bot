@@ -4,6 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
+// Подключаем калькулятор
+const calculator = require('./calculator');
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
@@ -80,7 +83,7 @@ function markCollected(chatId, field, value) {
     collectedData.set(chatId, data);
 }
 
-// ---------- Клавиатуры (все как раньше, без изменений) ----------
+// ---------- Клавиатуры (все как раньше) ----------
 function getFormatKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('Концерты & Фестивали', 'format_concerts')],
@@ -242,8 +245,72 @@ async function notifyAdmin(text, extra = {}) {
     try { await bot.telegram.sendMessage(ADMIN_CHAT_ID, text, extra); } catch (err) { console.error('Ошибка уведомления:', err.message); }
 }
 
-// ---------- Обработка ответа ИИ ----------
+// ---------- ФОРМАТИРОВАНИЕ РЕЗУЛЬТАТА РАСЧЁТА ----------
+function formatPriceResult(result) {
+    let lines = [];
+    lines.push('🧾 *Расчёт стоимости:*\n');
+
+    lines.push('📦 *Оборудование:*');
+    if (result.equipment.items.length === 0) {
+        lines.push('  (не выбрано)');
+    } else {
+        for (const item of result.equipment.items) {
+            lines.push(`  • ${item.name} (${item.model}) — ${item.qty} шт × ${item.days} дн = ${item.total.toFixed(2)} руб`);
+        }
+        lines.push(`  *Итого оборудование:* ${result.equipment.adjusted.toFixed(2)} руб (с учётом коэффициентов)`);
+    }
+
+    lines.push('\n👷 *Персонал:*');
+    lines.push(`  Монтаж/демонтаж: ${result.personnel.md.toFixed(2)} руб`);
+    lines.push(`  Обслуживание: ${result.personnel.service.toFixed(2)} руб`);
+    lines.push(`  Командировочные: ${result.personnel.travel.toFixed(2)} руб`);
+    lines.push(`  *Итого персонал:* ${result.personnel.total.toFixed(2)} руб`);
+
+    lines.push('\n🚚 *Услуги:*');
+    lines.push(`  Грузовой транспорт: ${result.services.cargo.toFixed(2)} руб`);
+    lines.push(`  Транспорт персонала: ${result.services.staff.toFixed(2)} руб`);
+    lines.push(`  Прочие услуги: ${result.services.other.toFixed(2)} руб`);
+    lines.push(`  *Итого услуги:* ${result.services.total.toFixed(2)} руб`);
+
+    lines.push('\n💰 *Итог:*');
+    lines.push(`  Сумма без налогов: ${result.subtotal.toFixed(2)} руб`);
+    if (result.discountPercent > 0) {
+        lines.push(`  Скидка ${result.discountPercent}%: -${(result.subtotal - result.revenue).toFixed(2)} руб`);
+    }
+    lines.push(`  Доход после скидки: ${result.revenue.toFixed(2)} руб`);
+    lines.push(`  Налоги (УСН + ФСЗН): ${result.taxes.total.toFixed(2)} руб`);
+    lines.push(`  *ИТОГО К ОПЛАТЕ:* ${result.grandTotal.toFixed(2)} руб`);
+
+    lines.push('\n📌 Коэффициенты, применённые к оборудованию:');
+    const c = result.coefficients;
+    lines.push(`  формат=${c.format.toFixed(2)}, уровень=${c.level.toFixed(2)}, вид услуги=${c.service.toFixed(2)}, условия=${c.location.toFixed(2)}, длительность=${c.duration.toFixed(2)} → итог = ${c.total.toFixed(2)}`);
+
+    return lines.join('\n');
+}
+
+// ---------- Обработка ответа ИИ (с поддержкой JSON-расчёта) ----------
 async function handleAIReply(ctx, text, chatId) {
+    // 1. Проверяем, не является ли ответ JSON-запросом на расчёт
+    let calculated = false;
+    try {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (parsed.action === 'calculate' && parsed.params) {
+                // Вызываем калькулятор
+                const result = calculator.calcPrice(parsed.params);
+                const response = formatPriceResult(result);
+                await ctx.reply(response, { parse_mode: 'Markdown' });
+                calculated = true;
+                // Не показываем исходный текст ИИ и не обрабатываем теги
+                return;
+            }
+        }
+    } catch (e) {
+        // невалидный JSON — игнорируем
+    }
+
+    // 2. Если не расчёт — обычная обработка (теги)
     const tagRegex = /\[(ask_\w+)\]/;
     const match = text.match(tagRegex);
     let finalText = text;
@@ -319,7 +386,7 @@ async function handleAIReply(ctx, text, chatId) {
     }
 }
 
-// ---------- Обработка callback-запросов ----------
+// ---------- Обработка callback-запросов (без изменений) ----------
 bot.on('callback_query', async (ctx) => {
     const chatId = ctx.chat.id;
     const data = ctx.callbackQuery.data;
@@ -360,12 +427,10 @@ bot.on('callback_query', async (ctx) => {
             awaitingDateTime.set(chatId, timeData);
             const { hour, min } = timeData[prefix];
             const newText = `Выбрано: ${hour}:${min}. Нажмите "Подтвердить"`;
-            // Проверяем, изменился ли текст, чтобы избежать ошибки 400
             const currentText = ctx.callbackQuery.message.text;
             if (currentText !== newText) {
                 await ctx.editMessageText(newText, getTimeKeyboard(prefix));
             } else {
-                // Если не изменился, просто отвечаем на callback
                 await ctx.answerCbQuery();
             }
             return;
@@ -564,7 +629,7 @@ bot.on('callback_query', async (ctx) => {
             return;
         }
 
-        // Другие кнопки (contact_manager, send_tz, start_survey, reply_to_...)
+        // Другие кнопки
         if (data === 'contact_manager') {
             manualMode[chatId] = true;
             await ctx.answerCbQuery('Заявка отправлена!');
@@ -597,12 +662,10 @@ bot.on('callback_query', async (ctx) => {
             return;
         }
 
-        // Если ничего не подошло, просто отвечаем на callback
         await ctx.answerCbQuery();
 
     } catch (err) {
         console.error('❌ Ошибка в колбэке:', err.message);
-        // Если ошибка 400 "message is not modified" — игнорируем, она не критична
         if (err.message && err.message.includes('message is not modified')) {
             await ctx.answerCbQuery().catch(() => {});
             return;
@@ -683,6 +746,12 @@ bot.command('resume', (ctx) => {
 
 bot.command('portfolio', (ctx) => {
     ctx.reply(PORTFOLIO_TEXT || 'Портфолио временно недоступно.');
+});
+
+// Для теста расчёта можно добавить команду /price (по желанию)
+bot.command('price', async (ctx) => {
+    // Пример тестового вызова — можно убрать
+    ctx.reply('Для расчёта стоимости просто опишите ваше мероприятие или спросите цену. Я сам определю, что нужно посчитать.');
 });
 
 // ---------- Пересылка файлов ----------
@@ -774,7 +843,7 @@ const server = http.createServer(async (req, res) => {
     });
 })();
 
-// Обработка завершения (graceful shutdown)
+// Обработка завершения
 process.once('SIGINT', () => {
     console.log('🛑 Получен SIGINT, завершаем...');
     server.close(() => {
