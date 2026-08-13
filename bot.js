@@ -1,9 +1,11 @@
 require("dotenv").config();
 
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
 // ============================================================
-// MLK AI BOT — BITRIX24 OPENLINE TEST BRIDGE
+// MLK AI BOT — BITRIX24 FETCH TEST
 // ============================================================
 //
 // ЦЕЛЬ ЭТОЙ ВЕРСИИ:
@@ -12,21 +14,26 @@ const http = require("http");
 //    ↓
 // Bitrix24 Contact Center / Open Line
 //    ↓
-// Bitrix24 Chatbot 2.0
+// Chatbot 2.0 "Дмитрий MLK"
+//    ↓
+// imbot.v2.Event.get
 //    ↓
 // Render
 //    ↓
-// этот файл
+// обработка события
 //    ↓
-// Bitrix24 API
+// imbot.v2.Chat.Message.send
+//    ↓
+// Bitrix24
 //    ↓
 // Telegram
 //
-// Пока НЕ используем DeepSeek.
-// Пока НЕ создаём сделки.
-// Пока НЕ трогаем CRM.
+// DeepSeek пока НЕ используется.
+// CRM пока НЕ используется.
 //
-// Наша задача сейчас — проверить транспорт.
+// Задача:
+// доказать, что Bitrix24 отдаёт сообщения нашего бота
+// через FETCH.
 // ============================================================
 
 
@@ -40,12 +47,6 @@ const BITRIX_WEBHOOK_URL =
 const BITRIX_BOT_TOKEN =
   (process.env.BITRIX_BOT_TOKEN || "").trim();
 
-const BITRIX_HANDLER_URL =
-  (
-    process.env.BITRIX_HANDLER_URL ||
-    "https://mlk-bot.onrender.com/bitrix-webhook"
-  ).trim();
-
 const BOT_CODE =
   (
     process.env.BITRIX_BOT_CODE ||
@@ -56,42 +57,89 @@ const PORT =
   Number(process.env.PORT || 10000);
 
 
-// ============================================================
-// BOT ID
-// ============================================================
+// Наш уже существующий бот.
+const EXPECTED_BOT_ID = 1787;
 
-// Мы уже знаем настоящий Bot ID из Bitrix24:
+
+// Интервал опроса Bitrix24.
+// 5 секунд достаточно для теста.
+const POLL_INTERVAL_MS = 5000;
+
+
+// Максимальное количество событий за один запрос.
+const EVENT_LIMIT = 100;
+
+
+// ============================================================
+// OFFSET
+// ============================================================
 //
-// Дмитрий MLK
-// ID = 1787
+// Bitrix24 использует nextOffset:
 //
-// Если Bitrix24 вернёт другой ID — код автоматически его использует.
+// первый запрос:
+//   без offset
+//
+// последующие:
+//   offset = предыдущий nextOffset
+//
+// Это позволяет подтверждать уже обработанные события.
+//
+// Для тестовой версии сохраняем offset в файл.
+//
+// ВАЖНО:
+// Render может удалить локальный файл при новом deploy.
+// Для полноценного production позже перенесём offset
+// в постоянное хранилище / БД.
+// ============================================================
 
-let BOT_ID = null;
+const DATA_DIR =
+  path.join(__dirname, "data");
+
+const OFFSET_FILE =
+  path.join(
+    DATA_DIR,
+    "bitrix-offset.json"
+  );
 
 
 // ============================================================
-// STARTUP CHECK
+// STATE
+// ============================================================
+
+let BOT_ID =
+  EXPECTED_BOT_ID;
+
+let offset =
+  null;
+
+let polling =
+  false;
+
+let stopping =
+  false;
+
+
+// ============================================================
+// STARTUP
 // ============================================================
 
 console.log("");
 console.log("========================================");
-console.log("MLK BITRIX24 TEST BRIDGE");
+console.log("MLK BITRIX24 FETCH TEST BRIDGE");
 console.log("========================================");
 
 console.log(
   "BITRIX_WEBHOOK_URL:",
-  BITRIX_WEBHOOK_URL ? "OK" : "MISSING"
+  BITRIX_WEBHOOK_URL
+    ? "OK"
+    : "MISSING"
 );
 
 console.log(
   "BITRIX_BOT_TOKEN:",
-  BITRIX_BOT_TOKEN ? "OK" : "MISSING"
-);
-
-console.log(
-  "BITRIX_HANDLER_URL:",
-  BITRIX_HANDLER_URL
+  BITRIX_BOT_TOKEN
+    ? "OK"
+    : "MISSING"
 );
 
 console.log(
@@ -100,24 +148,49 @@ console.log(
 );
 
 console.log(
+  "EXPECTED_BOT_ID:",
+  EXPECTED_BOT_ID
+);
+
+console.log(
   "PORT:",
   PORT
 );
 
-console.log("========================================");
+console.log(
+  "POLL_INTERVAL_MS:",
+  POLL_INTERVAL_MS
+);
+
+console.log(
+  "========================================"
+);
 
 
 if (!BITRIX_WEBHOOK_URL) {
-  console.error("❌ BITRIX_WEBHOOK_URL не задан");
+
+  console.error(
+    "❌ BITRIX_WEBHOOK_URL не задан."
+  );
+
   process.exit(1);
 }
+
 
 if (!BITRIX_BOT_TOKEN) {
-  console.error("❌ BITRIX_BOT_TOKEN не задан");
+
+  console.error(
+    "❌ BITRIX_BOT_TOKEN не задан."
+  );
+
   process.exit(1);
 }
 
-if (BITRIX_BOT_TOKEN.length > 40) {
+
+if (
+  BITRIX_BOT_TOKEN.length > 40
+) {
+
   console.error(
     "❌ BITRIX_BOT_TOKEN длиннее 40 символов."
   );
@@ -127,79 +200,280 @@ if (BITRIX_BOT_TOKEN.length > 40) {
 
 
 // ============================================================
-// BITRIX REST
+// OFFSET LOAD
 // ============================================================
 
-async function bitrixCall(method, params = {}) {
+function loadOffset() {
+
+  try {
+
+    if (
+      !fs.existsSync(
+        DATA_DIR
+      )
+    ) {
+
+      fs.mkdirSync(
+        DATA_DIR,
+        {
+          recursive: true
+        }
+      );
+
+    }
+
+
+    if (
+      !fs.existsSync(
+        OFFSET_FILE
+      )
+    ) {
+
+      console.log(
+        "ℹ️ Offset-файл отсутствует."
+      );
+
+      console.log(
+        "ℹ️ Первый запрос Event.get будет выполнен без offset."
+      );
+
+      offset = null;
+
+      return;
+
+    }
+
+
+    const raw =
+      fs.readFileSync(
+        OFFSET_FILE,
+        "utf8"
+      );
+
+
+    const data =
+      JSON.parse(raw);
+
+
+    if (
+      data &&
+      Number.isInteger(
+        data.offset
+      )
+    ) {
+
+      offset =
+        data.offset;
+
+      console.log(
+        "✅ Загружен сохранённый offset:",
+        offset
+      );
+
+    } else {
+
+      offset = null;
+
+      console.log(
+        "⚠️ Offset-файл некорректен."
+      );
+
+    }
+
+  } catch (error) {
+
+    console.error(
+      "❌ Ошибка загрузки offset:",
+      error.message
+    );
+
+    offset = null;
+
+  }
+
+}
+
+
+// ============================================================
+// OFFSET SAVE
+// ============================================================
+
+function saveOffset(
+  newOffset
+) {
+
+  try {
+
+    if (
+      !fs.existsSync(
+        DATA_DIR
+      )
+    ) {
+
+      fs.mkdirSync(
+        DATA_DIR,
+        {
+          recursive: true
+        }
+      );
+
+    }
+
+
+    fs.writeFileSync(
+      OFFSET_FILE,
+
+      JSON.stringify(
+        {
+          offset:
+            newOffset,
+
+          savedAt:
+            new Date().toISOString()
+
+        },
+
+        null,
+
+        2
+      )
+    );
+
+
+    console.log(
+      "💾 Offset сохранён:",
+      newOffset
+    );
+
+  } catch (error) {
+
+    console.error(
+      "❌ Ошибка сохранения offset:",
+      error.message
+    );
+
+  }
+
+}
+
+
+// ============================================================
+// BITRIX REST CALL
+// ============================================================
+
+async function bitrixCall(
+  method,
+  params = {}
+) {
 
   const base =
-    BITRIX_WEBHOOK_URL.replace(/\/+$/, "");
+    BITRIX_WEBHOOK_URL
+      .replace(/\/+$/, "");
+
 
   const url =
     `${base}/${method}`;
 
+
   console.log("");
-  console.log("➡️ BITRIX API:", method);
+  console.log(
+    "➡️ BITRIX API:",
+    method
+  );
+
 
   try {
 
-    const response = await fetch(url, {
+    const response =
+      await fetch(
+        url,
+        {
 
-      method: "POST",
+          method:
+            "POST",
 
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      },
+          headers:
+            {
+              "Content-Type":
+                "application/json",
 
-      body: JSON.stringify(params)
+              "Accept":
+                "application/json"
 
-    });
+            },
+
+          body:
+            JSON.stringify(
+              params
+            )
+
+        }
+      );
+
 
     const text =
       await response.text();
+
 
     console.log(
       "⬅️ HTTP:",
       response.status
     );
 
+
     console.log(
       "⬅️ RESPONSE:",
       text
     );
 
+
     let data;
+
 
     try {
 
       data =
-        JSON.parse(text);
+        JSON.parse(
+          text
+        );
 
     } catch (error) {
 
       throw new Error(
-        `Bitrix вернул не JSON: ${text.substring(0, 1000)}`
+        "Bitrix вернул не JSON: " +
+        text.substring(
+          0,
+          1000
+        )
       );
 
     }
 
-    if (data.error) {
+
+    if (
+      data.error
+    ) {
 
       throw new Error(
         `${data.error}: ${
-          data.error_description || ""
+          data.error_description ||
+          ""
         }`
       );
 
     }
 
+
     return data.result;
 
   } catch (error) {
 
+    console.error("");
     console.error(
-      "❌ BITRIX API ERROR:",
+      "❌ BITRIX API ERROR"
+    );
+
+    console.error(
       error.message
     );
 
@@ -211,299 +485,139 @@ async function bitrixCall(method, params = {}) {
 
 
 // ============================================================
-// PARSE BITRIX WEBHOOK
-// ============================================================
-//
-// Bitrix24 webhook может прийти как:
-//
-// application/x-www-form-urlencoded
-//
-// например:
-//
-// event=ONIMBOTV2MESSAGEADD
-// &data[bot][id]=1787
-// &data[message][text]=Привет
-//
-// Но для диагностики также поддерживаем JSON.
+// CHECK BOT
 // ============================================================
 
-function parseBitrixBody(body, contentType) {
-
-  if (!body) {
-    return {};
-  }
-
-
-  // ----------------------------------------------------------
-  // JSON
-  // ----------------------------------------------------------
-
-  if (
-    contentType &&
-    contentType.toLowerCase().includes("application/json")
-  ) {
-
-    try {
-
-      return JSON.parse(body);
-
-    } catch (error) {
-
-      console.error(
-        "❌ JSON parse error:",
-        error.message
-      );
-
-      return {};
-    }
-
-  }
-
-
-  // ----------------------------------------------------------
-  // FORM DATA
-  // ----------------------------------------------------------
-
-  const params =
-    new URLSearchParams(body);
-
-  const result = {};
-
-
-  for (const [key, value] of params.entries()) {
-
-    const parts =
-      key.match(/[^\[\]]+/g);
-
-    if (!parts || !parts.length) {
-      continue;
-    }
-
-    let target =
-      result;
-
-
-    for (
-      let i = 0;
-      i < parts.length - 1;
-      i++
-    ) {
-
-      if (
-        !target[parts[i]] ||
-        typeof target[parts[i]] !== "object"
-      ) {
-
-        target[parts[i]] = {};
-
-      }
-
-      target =
-        target[parts[i]];
-
-    }
-
-
-    target[
-      parts[parts.length - 1]
-    ] = value;
-
-  }
-
-
-  return result;
-}
-
-
-// ============================================================
-// READ HTTP BODY
-// ============================================================
-
-function readBody(req) {
-
-  return new Promise(
-    (resolve, reject) => {
-
-      let body = "";
-
-      req.on(
-        "data",
-        chunk => {
-
-          body +=
-            chunk.toString();
-
-          if (
-            body.length >
-            5 * 1024 * 1024
-          ) {
-
-            reject(
-              new Error(
-                "Request body too large"
-              )
-            );
-
-            req.destroy();
-
-          }
-
-        }
-      );
-
-
-      req.on(
-        "end",
-        () => resolve(body)
-      );
-
-
-      req.on(
-        "error",
-        reject
-      );
-
-    }
-  );
-
-}
-
-
-// ============================================================
-// FIND BOT
-// ============================================================
-//
-// ВАЖНО:
-//
-// Мы НЕ пытаемся каждый раз создавать нового бота.
-//
-// Бот уже существует:
-//
-// ID = 1787
-//
-// Поэтому сначала получаем список ботов.
-// ============================================================
-
-async function findBot() {
+async function checkBot() {
 
   console.log("");
-  console.log("🤖 Проверяем бота Bitrix24...");
-
-
-  const bots =
-    await bitrixCall(
-      "imbot.bot.list",
-      {}
-    );
-
+  console.log(
+    "========================================"
+  );
 
   console.log(
-    "📋 Список ботов получен."
+    "🤖 ПРОВЕРЯЕМ БОТА"
+  );
+
+  console.log(
+    "========================================"
   );
 
 
-  if (!bots) {
+  const result =
+    await bitrixCall(
+      "imbot.v2.Bot.get",
+      {
 
-    throw new Error(
-      "Bitrix24 не вернул список ботов."
+        botId:
+          EXPECTED_BOT_ID,
+
+        botToken:
+          BITRIX_BOT_TOKEN
+
+      }
     );
 
-  }
 
+  console.log("");
+  console.log(
+    "✅ BOT.GET RESULT:"
+  );
 
-  // ----------------------------------------------------------
-  // Bitrix может вернуть объект вида:
-//
-// {
-//   "5": {...},
-//   "1787": {...}
-// }
-//
-// или массив.
-// ----------------------------------------------------------
-
-  let list = [];
-
-
-  if (Array.isArray(bots)) {
-
-    list = bots;
-
-  } else {
-
-    list =
-      Object.values(bots);
-
-  }
+  console.log(
+    JSON.stringify(
+      result,
+      null,
+      2
+    )
+  );
 
 
   const bot =
-    list.find(
-      item =>
-        String(item.ID || item.id) === "1787"
-    )
-    ||
-    list.find(
-      item =>
-        String(item.CODE || item.code) === BOT_CODE
+    result &&
+    (
+      result.bot ||
+      result
     );
 
 
-  if (!bot) {
+  if (
+    bot &&
+    bot.id
+  ) {
 
-    console.error(
-      "❌ Наш бот не найден."
-    );
-
-    console.log(
-      "Доступные боты:",
-      JSON.stringify(
-        list,
-        null,
-        2
-      )
-    );
-
-    throw new Error(
-      "Бот MLK / Дмитрий не найден."
-    );
+    BOT_ID =
+      Number(
+        bot.id
+      );
 
   }
 
 
-  BOT_ID =
-    Number(
-      bot.ID ||
-      bot.id
-    );
-
-
   console.log("");
-  console.log(
-    "✅ НАШ БОТ НАЙДЕН"
-  );
-
   console.log(
     "Bot ID:",
     BOT_ID
   );
 
   console.log(
-    "Bot NAME:",
-    bot.NAME ||
-    bot.name
+    "Bot CODE:",
+    bot?.code
   );
 
   console.log(
-    "Bot CODE:",
-    bot.CODE ||
-    bot.code
+    "Bot TYPE:",
+    bot?.type
   );
 
   console.log(
     "OpenLine:",
-    bot.OPENLINE
+    bot?.isSupportOpenline
   );
+
+  console.log(
+    "Event mode:",
+    bot?.eventMode
+  );
+
+
+  if (
+    BOT_ID !== EXPECTED_BOT_ID
+  ) {
+
+    throw new Error(
+      `Ожидался Bot ID ${EXPECTED_BOT_ID}, ` +
+      `но получен ${BOT_ID}`
+    );
+
+  }
+
+
+  // ----------------------------------------------------------
+  // Для этой версии обязательно FETCH.
+  // ----------------------------------------------------------
+
+  if (
+    bot &&
+    bot.eventMode &&
+    bot.eventMode !== "fetch"
+  ) {
+
+    console.log("");
+    console.log(
+      "⚠️ ВНИМАНИЕ:"
+    );
+
+    console.log(
+      "Bitrix24 пока показывает eventMode:",
+      bot.eventMode
+    );
+
+    console.log(
+      "Переводим бота в FETCH..."
+    );
+
+  }
 
 
   return bot;
@@ -512,31 +626,30 @@ async function findBot() {
 
 
 // ============================================================
-// UPDATE BOT
+// SWITCH BOT TO FETCH
 // ============================================================
 //
-// Здесь мы НЕ регистрируем нового бота.
+// ВАЖНО:
 //
-// Мы обновляем уже существующего.
+// При смене webhook → fetch Bitrix24 удаляет webhook-подписки.
+// После этого события доступны через Event.get.
 //
-// Bitrix24 автоматически подписывает Chatbot 2.0
-// на события ONIMBOTV2* при eventMode=webhook.
+// Это штатное поведение Bitrix24.
 // ============================================================
 
-async function updateBot() {
-
-  if (!BOT_ID) {
-
-    throw new Error(
-      "BOT_ID отсутствует."
-    );
-
-  }
-
+async function switchToFetch() {
 
   console.log("");
   console.log(
-    "🔧 Обновляем настройки Chatbot 2.0..."
+    "========================================"
+  );
+
+  console.log(
+    "🔄 ПЕРЕКЛЮЧАЕМ БОТА В FETCH MODE"
+  );
+
+  console.log(
+    "========================================"
   );
 
 
@@ -553,34 +666,13 @@ async function updateBot() {
           botToken:
             BITRIX_BOT_TOKEN,
 
-          fields: {
+          fields:
+            {
 
-            eventMode:
-              "webhook",
-
-            webhookUrl:
-              BITRIX_HANDLER_URL,
-
-            isSupportOpenline:
-              true,
-
-            properties: {
-
-              name:
-                "Дмитрий",
-
-              lastName:
-                "MLK",
-
-              workPosition:
-                "AI-консультант MLK",
-
-              gender:
-                "M"
+              eventMode:
+                "fetch"
 
             }
-
-          }
 
         }
       );
@@ -588,7 +680,7 @@ async function updateBot() {
 
     console.log("");
     console.log(
-      "✅ BOT UPDATE УСПЕШНО"
+      "✅ BOT UPDATE OK"
     );
 
     console.log(
@@ -600,26 +692,33 @@ async function updateBot() {
     );
 
 
+    const bot =
+      result?.bot;
+
+
+    if (
+      bot?.eventMode
+    ) {
+
+      console.log(
+        "Event mode:",
+        bot.eventMode
+      );
+
+    }
+
+
     return result;
 
   } catch (error) {
 
     console.error("");
     console.error(
-      "❌ BOT UPDATE ERROR:"
+      "❌ НЕ УДАЛОСЬ ПЕРЕКЛЮЧИТЬ БОТА В FETCH"
     );
 
     console.error(
       error.message
-    );
-
-    console.error("");
-    console.error(
-      "Если здесь будет BOT_OWNERSHIP_ERROR,"
-    );
-
-    console.error(
-      "значит BITRIX_BOT_TOKEN не является токеном владельца этого бота."
     );
 
     throw error;
@@ -630,35 +729,53 @@ async function updateBot() {
 
 
 // ============================================================
-// SEND MESSAGE TO BITRIX
+// GET EVENTS
 // ============================================================
 
-async function sendBitrixMessage(
-  dialogId,
-  message
-) {
+async function getEvents() {
 
-  if (!BOT_ID) {
+  const params =
+    {
 
-    throw new Error(
-      "BOT_ID не установлен."
-    );
+      botId:
+        BOT_ID,
 
-  }
+      botToken:
+        BITRIX_BOT_TOKEN,
+
+      limit:
+        EVENT_LIMIT
+
+    };
 
 
-  if (!dialogId) {
+  // ----------------------------------------------------------
+  // offset добавляем только если он уже известен.
+  //
+  // Первый запрос должен идти БЕЗ offset.
+  // ----------------------------------------------------------
 
-    throw new Error(
-      "dialogId отсутствует."
-    );
+  if (
+    offset !== null
+  ) {
+
+    params.offset =
+      offset;
 
   }
 
 
   console.log("");
   console.log(
-    "📤 ОТПРАВЛЯЕМ СООБЩЕНИЕ В BITRIX"
+    "========================================"
+  );
+
+  console.log(
+    "🔄 BITRIX EVENT POLL"
+  );
+
+  console.log(
+    "========================================"
   );
 
   console.log(
@@ -667,56 +784,18 @@ async function sendBitrixMessage(
   );
 
   console.log(
-    "Dialog ID:",
-    dialogId
-  );
-
-  console.log(
-    "Message:",
-    message
+    "Current offset:",
+    offset === null
+      ? "NONE / FIRST REQUEST"
+      : offset
   );
 
 
   const result =
     await bitrixCall(
-      "imbot.v2.Chat.Message.send",
-      {
-
-        botId:
-          BOT_ID,
-
-        botToken:
-          BITRIX_BOT_TOKEN,
-
-        dialogId:
-          String(dialogId),
-
-        fields: {
-
-          message:
-            message,
-
-          urlPreview:
-            true
-
-        }
-
-      }
+      "imbot.v2.Event.get",
+      params
     );
-
-
-  console.log("");
-  console.log(
-    "✅ СООБЩЕНИЕ ОТПРАВЛЕНО В BITRIX"
-  );
-
-  console.log(
-    JSON.stringify(
-      result,
-      null,
-      2
-    )
-  );
 
 
   return result;
@@ -725,13 +804,59 @@ async function sendBitrixMessage(
 
 
 // ============================================================
-// EXTRACT MESSAGE FROM EVENT
+// HANDLE ONE EVENT
 // ============================================================
 
-function extractEventData(event) {
+async function handleEvent(
+  event
+) {
+
+  console.log("");
+  console.log(
+    "########################################"
+  );
+
+  console.log(
+    "📩 НОВОЕ СОБЫТИЕ BITRIX24"
+  );
+
+  console.log(
+    "########################################"
+  );
+
+
+  console.log(
+    "EVENT ID:",
+    event.eventId
+  );
+
+  console.log(
+    "TYPE:",
+    event.type
+  );
+
+  console.log(
+    "DATE:",
+    event.date
+  );
+
+
+  console.log("");
+  console.log(
+    "FULL EVENT DATA:"
+  );
+
+  console.log(
+    JSON.stringify(
+      event.data,
+      null,
+      2
+    )
+  );
+
 
   const data =
-    event?.data || {};
+    event.data || {};
 
 
   const bot =
@@ -750,70 +875,79 @@ function extractEventData(event) {
     data.user || {};
 
 
-  return {
-
-    bot,
-
-    message,
-
-    chat,
-
-    user
-
-  };
-
-}
-
-
-// ============================================================
-// HANDLE BITRIX EVENT
-// ============================================================
-
-async function handleBitrixEvent(event) {
-
   console.log("");
   console.log(
-    "========================================"
-  );
-
-  console.log(
-    "📩 BITRIX EVENT RECEIVED"
-  );
-
-  console.log(
-    "========================================"
+    "========== EXTRACTED DATA =========="
   );
 
 
   console.log(
-    "EVENT:",
-    event?.event
-  );
-
-
-  console.log(
-    "FULL EVENT:"
+    "BOT ID:",
+    bot.id
   );
 
   console.log(
-    JSON.stringify(
-      event,
-      null,
-      2
-    )
+    "BOT CODE:",
+    bot.code
+  );
+
+  console.log(
+    "USER ID:",
+    user.id
+  );
+
+  console.log(
+    "USER NAME:",
+    user.name
+  );
+
+  console.log(
+    "USER FIRST NAME:",
+    user.firstName
+  );
+
+  console.log(
+    "CHAT ID:",
+    chat.id
+  );
+
+  console.log(
+    "DIALOG ID:",
+    chat.dialogId
+  );
+
+  console.log(
+    "MESSAGE ID:",
+    message.id
+  );
+
+  console.log(
+    "MESSAGE CHAT ID:",
+    message.chatId
+  );
+
+  console.log(
+    "MESSAGE AUTHOR ID:",
+    message.authorId
+  );
+
+  console.log(
+    "MESSAGE TEXT:",
+    message.text
   );
 
 
-  // ----------------------------------------------------------
-  // TEST
-  // ----------------------------------------------------------
+  // ==========================================================
+  // MESSAGE
+  // ==========================================================
 
   if (
-    event?.event === "TEST"
+    event.type ===
+    "ONIMBOTV2MESSAGEADD"
   ) {
 
-    console.log(
-      "ℹ️ Это тестовый запрос Bitrix."
+    await handleIncomingMessage(
+      data
     );
 
     return;
@@ -821,24 +955,96 @@ async function handleBitrixEvent(event) {
   }
 
 
-  const {
-    bot,
-    message,
-    chat,
-    user
-  } =
-    extractEventData(event);
+  // ==========================================================
+  // JOIN CHAT
+  // ==========================================================
+
+  if (
+    event.type ===
+    "ONIMBOTV2JOINCHAT"
+  ) {
+
+    console.log(
+      "👋 БОТ БЫЛ ДОБАВЛЕН В ЧАТ."
+    );
+
+    return;
+
+  }
+
+
+  // ==========================================================
+  // DELETE
+  // ==========================================================
+
+  if (
+    event.type ===
+    "ONIMBOTV2DELETE"
+  ) {
+
+    console.log(
+      "⚠️ БОТ УДАЛЁН ИЗ BITRIX24."
+    );
+
+    return;
+
+  }
+
+
+  // ==========================================================
+  // OTHER
+  // ==========================================================
+
+  console.log(
+    "ℹ️ Событие получено, но для теста отдельная обработка не нужна."
+  );
+
+}
+
+
+// ============================================================
+// HANDLE INCOMING MESSAGE
+// ============================================================
+
+async function handleIncomingMessage(
+  data
+) {
+
+  const message =
+    data.message || {};
+
+  const chat =
+    data.chat || {};
+
+  const user =
+    data.user || {};
+
+
+  const text =
+    String(
+      message.text || ""
+    ).trim();
 
 
   console.log("");
   console.log(
-    "Bot ID:",
-    bot.id
+    "========================================"
   );
 
   console.log(
-    "Bot CODE:",
-    bot.code
+    "💬 ПОЛУЧЕНО СООБЩЕНИЕ КЛИЕНТА"
+  );
+
+  console.log(
+    "========================================"
+  );
+
+
+  console.log(
+    "Клиент:",
+    user.name ||
+    user.firstName ||
+    "Без имени"
   );
 
   console.log(
@@ -847,59 +1053,20 @@ async function handleBitrixEvent(event) {
   );
 
   console.log(
-    "User:",
-    user.name ||
-    user.firstName ||
-    ""
-  );
-
-  console.log(
-    "Chat ID:",
-    chat.id ||
-    message.chatId ||
-    ""
-  );
-
-  console.log(
     "Dialog ID:",
-    chat.dialogId ||
-    ""
+    chat.dialogId
   );
 
   console.log(
-    "Entity Type:",
-    chat.entityType ||
-    ""
-  );
-
-  console.log(
-    "Message ID:",
-    message.id ||
-    message.messageId ||
-    ""
-  );
-
-  console.log(
-    "Message:",
-    message.text ||
-    message.message ||
-    ""
+    "Text:",
+    text
   );
 
 
-  // ----------------------------------------------------------
-  // Проверяем Bot ID
-  // ----------------------------------------------------------
+  if (!text) {
 
-  if (
-    bot.id &&
-    BOT_ID &&
-    String(bot.id) !== String(BOT_ID)
-  ) {
-
-    console.warn(
-      `⚠️ Событие относится к другому боту. ` +
-      `Получен ${bot.id}, ожидается ${BOT_ID}.`
+    console.log(
+      "ℹ️ В сообщении нет текста."
     );
 
     return;
@@ -907,88 +1074,10 @@ async function handleBitrixEvent(event) {
   }
 
 
-  // ----------------------------------------------------------
-  // Нас интересует новое сообщение
-  // ----------------------------------------------------------
-
-  const eventName =
-    String(
-      event?.event ||
-      ""
-    ).toUpperCase();
-
-
-  if (
-    eventName !==
-    "ONIMBOTV2MESSAGEADD"
-  ) {
-
-    console.log(
-      "ℹ️ Это не ONIMBOTV2MESSAGEADD."
-    );
-
-    console.log(
-      "Событие:",
-      eventName
-    );
-
-    return;
-
-  }
-
-
-  // ----------------------------------------------------------
-  // Получаем текст
-  // ----------------------------------------------------------
-
-  const clientText =
-    String(
-      message.text ||
-      message.message ||
-      ""
-    ).trim();
-
-
-  if (!clientText) {
-
-    console.log(
-      "ℹ️ Сообщение не содержит текста."
-    );
-
-    return;
-
-  }
-
-
-  // ----------------------------------------------------------
-  // Получаем dialogId
-  // ----------------------------------------------------------
-
-  let dialogId =
-    chat.dialogId;
-
-
-  if (!dialogId) {
-
-    const chatId =
-      message.chatId ||
-      chat.id;
-
-
-    if (chatId) {
-
-      dialogId =
-        `chat${chatId}`;
-
-    }
-
-  }
-
-
-  if (!dialogId) {
+  if (!chat.dialogId) {
 
     console.error(
-      "❌ НЕ УДАЛОСЬ ОПРЕДЕЛИТЬ dialogId"
+      "❌ Нет chat.dialogId."
     );
 
     return;
@@ -996,57 +1085,377 @@ async function handleBitrixEvent(event) {
   }
 
 
-  console.log("");
-  console.log(
-    "🎯 ДИАЛОГ:",
-    dialogId
-  );
-
-
-  // ----------------------------------------------------------
-  // Имя клиента
-  // ----------------------------------------------------------
-
-  const firstName =
-    user.firstName ||
-    user.name ||
-    "клиент";
-
-
-  // ----------------------------------------------------------
-  // ПОКА ФИКСИРОВАННЫЙ ОТВЕТ
-  // ----------------------------------------------------------
+  // ==========================================================
+  // ПОКА НЕ DEEPSEEK
+  // ==========================================================
+  //
+  // Возвращаем простой тестовый ответ.
+  //
+  // Если этот ответ придёт клиенту в Telegram —
+  // значит вся связка Bitrix24 ↔ Render работает.
+  // ==========================================================
 
   const reply =
-    `Здравствуйте, ${firstName}! 👋\n\n` +
-
-    `Это тестовый AI-консультант MLK.\n\n` +
+    `Здравствуйте${
+      user.firstName
+        ? ", " + user.firstName
+        : ""
+    }! 👋\n\n` +
 
     `Я получил ваше сообщение через Битрикс24.\n\n` +
 
     `Ваше сообщение:\n` +
 
-    `«${clientText.slice(0, 1000)}»\n\n` +
+    `«${text.substring(
+      0,
+      1000
+    )}»\n\n` +
 
-    `Если вы видите этот ответ в Telegram — ` +
+    `Это тестовая версия интеграции MLK.\n` +
 
-    `связка Telegram → Битрикс24 → Render → Битрикс24 работает.`;
+    `Связка FETCH работает. ` +
 
+    `Следующим этапом подключим ИИ-консультанта.`;
 
-
-  // ----------------------------------------------------------
-  // ОТПРАВЛЯЕМ ОТВЕТ
-  // ----------------------------------------------------------
 
   await sendBitrixMessage(
-    dialogId,
+    chat.dialogId,
     reply
   );
+
+}
+
+
+// ============================================================
+// SEND MESSAGE
+// ============================================================
+
+async function sendBitrixMessage(
+  dialogId,
+  text
+) {
+
+  console.log("");
+  console.log(
+    "========================================"
+  );
+
+  console.log(
+    "📤 ОТПРАВКА ОТВЕТА В BITRIX24"
+  );
+
+  console.log(
+    "========================================"
+  );
+
+
+  console.log(
+    "Bot ID:",
+    BOT_ID
+  );
+
+  console.log(
+    "Dialog ID:",
+    dialogId
+  );
+
+  console.log(
+    "Text:",
+    text
+  );
+
+
+  const result =
+    await bitrixCall(
+      "imbot.v2.Chat.Message.send",
+      {
+
+        botId:
+          BOT_ID,
+
+        botToken:
+          BITRIX_BOT_TOKEN,
+
+        dialogId:
+          String(dialogId),
+
+        fields:
+          {
+
+            message:
+              text,
+
+            urlPreview:
+              true
+
+          }
+
+      }
+    );
 
 
   console.log("");
   console.log(
-    "🎉 ПОЛНЫЙ ТЕСТОВЫЙ ЦИКЛ ЗАВЕРШЁН"
+    "✅ ОТВЕТ ОТПРАВЛЕН"
+  );
+
+  console.log(
+    JSON.stringify(
+      result,
+      null,
+      2
+    )
+  );
+
+
+  return result;
+
+}
+
+
+// ============================================================
+// POLLING LOOP
+// ============================================================
+
+async function pollBitrix() {
+
+  if (
+    stopping
+  ) {
+
+    return;
+
+  }
+
+
+  if (
+    polling
+  ) {
+
+    console.log(
+      "⚠️ Предыдущий polling ещё работает. Пропускаем цикл."
+    );
+
+    return;
+
+  }
+
+
+  polling =
+    true;
+
+
+  try {
+
+    const result =
+      await getEvents();
+
+
+    if (!result) {
+
+      console.log(
+        "⚠️ Bitrix24 не вернул result."
+      );
+
+      return;
+
+    }
+
+
+    const events =
+      Array.isArray(
+        result.events
+      )
+        ? result.events
+        : [];
+
+
+    const nextOffset =
+      Number(
+        result.nextOffset
+      );
+
+
+    const hasMore =
+      Boolean(
+        result.hasMore
+      );
+
+
+    console.log("");
+    console.log(
+      "========== EVENT RESPONSE =========="
+    );
+
+    console.log(
+      "Events:",
+      events.length
+    );
+
+    console.log(
+      "Current offset:",
+      offset
+    );
+
+    console.log(
+      "Next offset:",
+      nextOffset
+    );
+
+    console.log(
+      "Has more:",
+      hasMore
+    );
+
+
+    // --------------------------------------------------------
+    // Обрабатываем события
+    // --------------------------------------------------------
+
+    for (
+      const event
+      of events
+    ) {
+
+      try {
+
+        await handleEvent(
+          event
+        );
+
+      } catch (error) {
+
+        console.error("");
+        console.error(
+          "❌ ОШИБКА ОБРАБОТКИ СОБЫТИЯ"
+        );
+
+        console.error(
+          error.stack ||
+          error.message
+        );
+
+        // ----------------------------------------------------
+        // ВАЖНО:
+        //
+        // Не падаем всем процессом из-за одного события.
+        // ----------------------------------------------------
+
+      }
+
+    }
+
+
+    // --------------------------------------------------------
+    // Подтверждаем события.
+    //
+    // Bitrix24 требует передавать nextOffset
+    // в следующем запросе.
+    // --------------------------------------------------------
+
+    if (
+      Number.isInteger(
+        nextOffset
+      )
+    ) {
+
+      offset =
+        nextOffset;
+
+      saveOffset(
+        offset
+      );
+
+    }
+
+
+    // --------------------------------------------------------
+    // Если есть ещё события,
+    // обработаем их немедленно.
+    // --------------------------------------------------------
+
+    if (
+      hasMore
+    ) {
+
+      console.log(
+        "📚 Есть ещё события. Получаем следующую пачку..."
+      );
+
+      // Сразу запускаем следующий цикл.
+      setImmediate(
+        pollBitrix
+      );
+
+    }
+
+  } catch (error) {
+
+    console.error("");
+    console.error(
+      "❌ POLLING ERROR"
+    );
+
+    console.error(
+      error.stack ||
+      error.message
+    );
+
+  } finally {
+
+    polling =
+      false;
+
+  }
+
+}
+
+
+// ============================================================
+// START POLLING
+// ============================================================
+
+function startPolling() {
+
+  console.log("");
+  console.log(
+    "========================================"
+  );
+
+  console.log(
+    "🔄 FETCH POLLING STARTED"
+  );
+
+  console.log(
+    "========================================"
+  );
+
+  console.log(
+    `Каждые ${POLL_INTERVAL_MS / 1000} секунд`
+  );
+
+  console.log(
+    "Bitrix method: imbot.v2.Event.get"
+  );
+
+  console.log(
+    "Bot ID:",
+    BOT_ID
+  );
+
+  console.log(
+    "========================================"
+  );
+
+
+  // Первый запрос сразу.
+  pollBitrix();
+
+
+  // Затем регулярно.
+  setInterval(
+    pollBitrix,
+    POLL_INTERVAL_MS
   );
 
 }
@@ -1055,10 +1464,21 @@ async function handleBitrixEvent(event) {
 // ============================================================
 // HTTP SERVER
 // ============================================================
+//
+// Render требует открытый порт.
+// Webhook от Bitrix здесь НЕ используется.
+//
+// HTTP нужен только для:
+// - Render health check
+// - проверки состояния сервиса
+// ============================================================
 
 const server =
   http.createServer(
-    async (req, res) => {
+    async (
+      req,
+      res
+    ) => {
 
       try {
 
@@ -1080,7 +1500,7 @@ const server =
           );
 
           res.end(
-            "MLK Bitrix24 AI Bot is running"
+            "MLK Bitrix24 FETCH Bot is running"
           );
 
           return;
@@ -1105,148 +1525,40 @@ const server =
             }
           );
 
+
           res.end(
-            JSON.stringify({
-
-              ok:
-                true,
-
-              botId:
-                BOT_ID,
-
-              botCode:
-                BOT_CODE,
-
-              handler:
-                BITRIX_HANDLER_URL,
-
-              time:
-                new Date().toISOString()
-
-            })
-          );
-
-          return;
-
-        }
-
-
-        // ======================================================
-        // BITRIX WEBHOOK
-        // ======================================================
-
-        if (
-          req.method === "POST" &&
-          req.url.startsWith(
-            "/bitrix-webhook"
-          )
-        ) {
-
-          console.log("");
-          console.log(
-            "========================================"
-          );
-
-          console.log(
-            "🌐 HTTP POST /bitrix-webhook"
-          );
-
-          console.log(
-            "Time:",
-            new Date().toISOString()
-          );
-
-          console.log(
-            "Content-Type:",
-            req.headers["content-type"]
-          );
-
-          console.log(
-            "========================================"
-          );
-
-
-          const body =
-            await readBody(req);
-
-
-          console.log("");
-          console.log(
-            "RAW BODY:"
-          );
-
-          console.log(
-            body.substring(
-              0,
-              10000
-            )
-          );
-
-
-          const event =
-            parseBitrixBody(
-              body,
-              req.headers["content-type"]
-            );
-
-
-          console.log("");
-          console.log(
-            "PARSED EVENT:"
-          );
-
-          console.log(
             JSON.stringify(
-              event,
+              {
+
+                ok:
+                  true,
+
+                botId:
+                  BOT_ID,
+
+                botCode:
+                  BOT_CODE,
+
+                mode:
+                  "fetch",
+
+                offset:
+                  offset,
+
+                polling:
+                  polling,
+
+                time:
+                  new Date().toISOString()
+
+              },
+
               null,
+
               2
+
             )
           );
-
-
-          // ----------------------------------------------------
-          // Сразу отвечаем Bitrix
-          // ----------------------------------------------------
-
-          res.writeHead(
-            200,
-            {
-              "Content-Type":
-                "application/json; charset=utf-8"
-            }
-          );
-
-          res.end(
-            JSON.stringify({
-              ok:
-                true
-            })
-          );
-
-
-          // ----------------------------------------------------
-          // Потом обрабатываем событие
-          // ----------------------------------------------------
-
-          handleBitrixEvent(
-            event
-          ).catch(
-            error => {
-
-              console.error("");
-
-              console.error(
-                "❌ EVENT HANDLER ERROR:"
-              );
-
-              console.error(
-                error.stack ||
-                error.message
-              );
-
-            }
-          );
-
 
           return;
 
@@ -1272,13 +1584,8 @@ const server =
 
       } catch (error) {
 
-        console.error("");
-
         console.error(
-          "❌ HTTP SERVER ERROR:"
-        );
-
-        console.error(
+          "HTTP ERROR:",
           error.stack ||
           error.message
         );
@@ -1289,22 +1596,11 @@ const server =
         ) {
 
           res.writeHead(
-            500,
-            {
-              "Content-Type":
-                "application/json; charset=utf-8"
-            }
+            500
           );
 
           res.end(
-            JSON.stringify({
-              ok:
-                false,
-
-              error:
-                error.message
-
-            })
+            "Internal Server Error"
           );
 
         }
@@ -1329,17 +1625,12 @@ server.listen(
     );
 
     console.log(
-      "🚀 SERVER STARTED"
+      "🚀 HTTP SERVER STARTED"
     );
 
     console.log(
       "PORT:",
       PORT
-    );
-
-    console.log(
-      "HANDLER:",
-      BITRIX_HANDLER_URL
     );
 
     console.log(
@@ -1350,17 +1641,51 @@ server.listen(
     try {
 
       // --------------------------------------------------------
-      // Находим уже существующего бота
+      // Загружаем offset
       // --------------------------------------------------------
 
-      await findBot();
+      loadOffset();
 
 
       // --------------------------------------------------------
-      // Настраиваем webhook
+      // Проверяем существующего бота
       // --------------------------------------------------------
 
-      await updateBot();
+      const bot =
+        await checkBot();
+
+
+      // --------------------------------------------------------
+      // Если бот ещё в webhook — переводим в fetch.
+      // --------------------------------------------------------
+
+      if (
+        !bot ||
+        bot.eventMode !== "fetch"
+      ) {
+
+        await switchToFetch();
+
+        // ------------------------------------------------------
+        // После изменения режима ещё раз проверяем.
+        // ------------------------------------------------------
+
+        console.log("");
+        console.log(
+          "🔎 Повторно проверяем режим бота..."
+        );
+
+        await new Promise(
+          resolve =>
+            setTimeout(
+              resolve,
+              1000
+            )
+        );
+
+        await checkBot();
+
+      }
 
 
       console.log("");
@@ -1369,7 +1694,11 @@ server.listen(
       );
 
       console.log(
-        "🎉 BITRIX BOT READY"
+        "🎉 BITRIX FETCH BOT READY"
+      );
+
+      console.log(
+        "========================================"
       );
 
       console.log(
@@ -1383,18 +1712,25 @@ server.listen(
       );
 
       console.log(
-        "WEBHOOK:",
-        BITRIX_HANDLER_URL
+        "MODE: FETCH"
+      );
+
+      console.log(
+        "POLL:",
+        `${POLL_INTERVAL_MS / 1000}s`
       );
 
       console.log(
         "========================================"
       );
 
-      console.log("");
-      console.log(
-        "Теперь можно отправить тестовое сообщение клиентом."
-      );
+
+      // --------------------------------------------------------
+      // Запускаем polling.
+      // --------------------------------------------------------
+
+      startPolling();
+
 
     } catch (error) {
 
@@ -1404,7 +1740,7 @@ server.listen(
       );
 
       console.error(
-        "❌ BITRIX BOT START ERROR"
+        "❌ STARTUP ERROR"
       );
 
       console.error(
@@ -1423,7 +1759,7 @@ server.listen(
 
 
 // ============================================================
-// ERROR HANDLERS
+// PROCESS ERRORS
 // ============================================================
 
 process.on(
@@ -1457,33 +1793,66 @@ process.on(
 // GRACEFUL SHUTDOWN
 // ============================================================
 
+function shutdown(
+  signal
+) {
+
+  console.log("");
+  console.log(
+    `🛑 ${signal} — завершаем работу...`
+  );
+
+
+  stopping =
+    true;
+
+
+  server.close(
+    () => {
+
+      console.log(
+        "✅ HTTP server closed."
+      );
+
+      process.exit(
+        0
+      );
+
+    }
+  );
+
+
+  setTimeout(
+    () => {
+
+      console.log(
+        "⚠️ Принудительное завершение."
+      );
+
+      process.exit(
+        0
+      );
+
+    },
+    5000
+  );
+
+}
+
+
 process.once(
   "SIGTERM",
-  () => {
-
-    console.log(
-      "🛑 SIGTERM — завершаем работу..."
-    );
-
-    server.close(
-      () => process.exit(0)
-    );
-
-  }
+  () =>
+    shutdown(
+      "SIGTERM"
+    )
 );
 
 
 process.once(
   "SIGINT",
-  () => {
-
-    console.log(
-      "🛑 SIGINT — завершаем работу..."
-    );
-
-    server.close(
-      () => process.exit(0)
-    );
-
-  }
+  () =>
+    shutdown(
+      "SIGINT"
+    )
 );
