@@ -1,14 +1,10 @@
-// ============================================================
-// MLK BITRIX24 BOT
-// FETCH -> EVENT.GET -> CHAT.MESSAGE.SEND
-// Без DeepSeek
-// ============================================================
-
 const http = require("http");
 
 // ============================================================
-// ENV
+// CONFIG
 // ============================================================
+
+const PORT = process.env.PORT || 10000;
 
 const BITRIX_WEBHOOK_URL = process.env.BITRIX_WEBHOOK_URL;
 const BITRIX_BOT_TOKEN = process.env.BITRIX_BOT_TOKEN;
@@ -17,14 +13,22 @@ const BOT_ID = Number(process.env.BOT_ID || 1787);
 const BOT_CODE =
   process.env.BOT_CODE || "mlk_ai_consultant_v2";
 
-const PORT = Number(process.env.PORT || 10000);
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+
+// Актуальный endpoint DeepSeek
+const DEEPSEEK_URL =
+  "https://api.deepseek.com/chat/completions";
+
+// Для минимального теста используем быструю модель
+const DEEPSEEK_MODEL =
+  process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 
 // ============================================================
-// ПРОВЕРКА ENV
+// VALIDATION
 // ============================================================
 
 console.log("========================================");
-console.log("MLK BITRIX FETCH -> MESSAGE SEND");
+console.log("MLK BITRIX FETCH -> DEEPSEEK TEST");
 console.log("========================================");
 
 console.log(
@@ -37,15 +41,17 @@ console.log(
   BITRIX_BOT_TOKEN ? "OK" : "MISSING"
 );
 
+console.log(
+  "DEEPSEEK_API_KEY:",
+  DEEPSEEK_API_KEY ? "OK" : "MISSING"
+);
+
 console.log("BOT_ID:", BOT_ID);
 console.log("BOT_CODE:", BOT_CODE);
+console.log("DEEPSEEK_MODEL:", DEEPSEEK_MODEL);
 console.log("PORT:", PORT);
 
 console.log("========================================");
-
-// ============================================================
-// ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПЕРЕМЕННЫХ
-// ============================================================
 
 if (!BITRIX_WEBHOOK_URL) {
   console.error("❌ BITRIX_WEBHOOK_URL не установлен");
@@ -57,25 +63,55 @@ if (!BITRIX_BOT_TOKEN) {
   process.exit(1);
 }
 
-if (!BOT_ID) {
-  console.error("❌ BOT_ID не установлен");
+if (!DEEPSEEK_API_KEY) {
+  console.error("❌ DEEPSEEK_API_KEY не установлен");
   process.exit(1);
 }
 
 // ============================================================
-// BITRIX REST
+// HTTP SERVER
 // ============================================================
 
-async function bitrixCall(method, params = {}) {
+const server = http.createServer((req, res) => {
+  if (req.url === "/" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+
+    res.end("MLK Bitrix FETCH + DeepSeek is running\n");
+    return;
+  }
+
+  res.writeHead(404);
+  res.end("Not found");
+});
+
+server.listen(PORT, () => {
+  console.log("🚀 SERVER STARTED");
+  console.log("PORT:", PORT);
+  console.log("MODE: FETCH");
+  console.log("BOT ID:", BOT_ID);
+  console.log("BOT CODE:", BOT_CODE);
+  console.log("DEEPSEEK:", DEEPSEEK_MODEL);
+  console.log("========================================");
+
+  startFetch();
+});
+
+// ============================================================
+// BITRIX API
+// ============================================================
+
+async function bitrixCall(method, params) {
   const url =
-    `${BITRIX_WEBHOOK_URL.replace(/\/$/, "")}/${method}`;
+    `${BITRIX_WEBHOOK_URL.replace(/\/$/, "")}/${method}.json`;
 
   console.log("----------------------------------------");
   console.log("➡️ BITRIX API:", method);
 
-  // Никогда не печатаем настоящий botToken в лог
+  // Никогда не выводим настоящий botToken в лог
   const safeParams = {
-    ...params
+    ...params,
   };
 
   if (safeParams.botToken) {
@@ -93,10 +129,9 @@ async function bitrixCall(method, params = {}) {
 
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/json"
       },
 
-      body: JSON.stringify(params)
+      body: JSON.stringify(params),
     });
 
     const text = await response.text();
@@ -108,9 +143,14 @@ async function bitrixCall(method, params = {}) {
 
     try {
       data = JSON.parse(text);
-    } catch (e) {
+    } catch (error) {
       console.error("❌ Bitrix вернул не JSON");
-      return null;
+
+      return {
+        ok: false,
+        httpStatus: response.status,
+        raw: text,
+      };
     }
 
     if (data.error) {
@@ -121,11 +161,132 @@ async function bitrixCall(method, params = {}) {
       );
     }
 
-    return data;
-
+    return {
+      ok: response.ok && !data.error,
+      httpStatus: response.status,
+      data,
+    };
   } catch (error) {
     console.error(
-      "❌ Ошибка HTTP-запроса к Bitrix:",
+      "❌ Ошибка запроса к Bitrix:",
+      error.message
+    );
+
+    return {
+      ok: false,
+      error: error.message,
+    };
+  }
+}
+
+// ============================================================
+// DEEPSEEK
+// ============================================================
+
+async function askDeepSeek(userMessage) {
+  console.log("");
+  console.log("========================================");
+  console.log("🧠 DEEPSEEK REQUEST");
+  console.log("========================================");
+
+  console.log("MODEL:", DEEPSEEK_MODEL);
+  console.log("USER MESSAGE:", userMessage);
+
+  const body = {
+    model: DEEPSEEK_MODEL,
+
+    messages: [
+      {
+        role: "system",
+        content:
+          "Ты ИИ-консультант компании MLK. " +
+          "Отвечай кратко, понятно и по существу. " +
+          "Для теста просто отвечай на сообщение пользователя.",
+      },
+
+      {
+        role: "user",
+        content: userMessage,
+      },
+    ],
+
+    stream: false,
+
+    // Для первого теста ограничиваем длину ответа
+    max_tokens: 500,
+  };
+
+  console.log(
+    "📤 DEEPSEEK BODY:",
+    JSON.stringify(body, null, 2)
+  );
+
+  try {
+    const response = await fetch(DEEPSEEK_URL, {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+
+        Authorization:
+          `Bearer ${DEEPSEEK_API_KEY}`,
+      },
+
+      body: JSON.stringify(body),
+    });
+
+    const text = await response.text();
+
+    console.log("⬅️ DEEPSEEK HTTP:", response.status);
+
+    console.log(
+      "⬅️ DEEPSEEK RESPONSE:",
+      text
+    );
+
+    if (!response.ok) {
+      console.error(
+        "❌ DeepSeek HTTP ERROR:",
+        response.status
+      );
+
+      return null;
+    }
+
+    let data;
+
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      console.error(
+        "❌ DeepSeek вернул не JSON"
+      );
+
+      return null;
+    }
+
+    const answer =
+      data?.choices?.[0]?.message?.content;
+
+    if (!answer) {
+      console.error(
+        "❌ В ответе DeepSeek нет choices[0].message.content"
+      );
+
+      return null;
+    }
+
+    console.log("");
+    console.log("========================================");
+    console.log("🧠 DEEPSEEK ANSWER");
+    console.log("========================================");
+    console.log(answer);
+    console.log("========================================");
+
+    return answer.trim();
+  } catch (error) {
+    console.error(
+      "❌ Ошибка запроса к DeepSeek:",
       error.message
     );
 
@@ -134,43 +295,77 @@ async function bitrixCall(method, params = {}) {
 }
 
 // ============================================================
-// FETCH OFFSET
+// SEND MESSAGE TO BITRIX
 // ============================================================
 
-// ВАЖНО:
-// Bitrix возвращает nextOffset.
-// Его необходимо сохранять между запросами.
-//
-// Пока процесс Render живёт — храним в памяти.
-//
-// При перезапуске Render начинаем с 0.
-// Это нормально для нашего диагностического теста,
-// но после успешной проверки можно сделать
-// постоянное хранение offset.
+async function sendBitrixMessage(dialogId, message) {
+  console.log("");
+  console.log("========================================");
+  console.log("📤 ОТПРАВЛЯЕМ ОТВЕТ В BITRIX");
+  console.log("========================================");
+
+  console.log("BOT_ID:", BOT_ID);
+  console.log("DIALOG_ID:", dialogId);
+  console.log("MESSAGE:", message);
+
+  const result = await bitrixCall(
+    "imbot.v2.Chat.Message.send",
+    {
+      botId: BOT_ID,
+
+      botToken: BITRIX_BOT_TOKEN,
+
+      dialogId: String(dialogId),
+
+      fields: {
+        message: message,
+
+        urlPreview: false,
+      },
+    }
+  );
+
+  if (!result.ok) {
+    console.error(
+      "❌ Не удалось отправить сообщение в Bitrix"
+    );
+
+    return false;
+  }
+
+  console.log("");
+  console.log(
+    "🎉🎉🎉 ОТВЕТ УСПЕШНО ОТПРАВЛЕН 🎉🎉🎉"
+  );
+
+  console.log(
+    "RESULT:",
+    JSON.stringify(
+      result.data?.result || {},
+      null,
+      2
+    )
+  );
+
+  return true;
+}
+
+// ============================================================
+// FETCH
+// ============================================================
 
 let currentOffset = 0;
 
-// ============================================================
-// ЗАЩИТА ОТ ПАРАЛЛЕЛЬНЫХ FETCH
-// ============================================================
+let fetchRunning = false;
 
-let polling = false;
+// Чтобы одновременно не запустить несколько FETCH
+let processingEvent = false;
 
 // ============================================================
 // GET EVENTS
 // ============================================================
 
-async function getEvents() {
-
-  if (polling) {
-    console.log(
-      "⚠️ Предыдущий FETCH ещё выполняется."
-    );
-    return;
-  }
-
-  polling = true;
-
+async function fetchEvents() {
   console.log("");
   console.log("========================================");
   console.log("🔄 FETCH POLL");
@@ -184,165 +379,129 @@ async function getEvents() {
   console.log("BOT_ID:", BOT_ID);
   console.log("OFFSET:", currentOffset);
 
-  try {
-
-    const params = {
+  const result = await bitrixCall(
+    "imbot.v2.Event.get",
+    {
       botId: BOT_ID,
 
       botToken: BITRIX_BOT_TOKEN,
 
       offset: currentOffset,
 
-      limit: 50
-    };
-
-    const data = await bitrixCall(
-      "imbot.v2.Event.get",
-      params
-    );
-
-    if (!data || !data.result) {
-
-      console.error(
-        "❌ Нет result в ответе Event.get"
-      );
-
-      return;
+      limit: 50,
     }
+  );
 
-    const result = data.result;
-
-    const events = Array.isArray(result.events)
-      ? result.events
-      : [];
-
-    const nextOffset =
-      result.nextOffset;
-
-    const hasMore =
-      result.hasMore === true;
-
-    console.log(
-      "📦 EVENTS:",
-      events.length
-    );
-
-    console.log(
-      "NEXT OFFSET:",
-      nextOffset
-    );
-
-    console.log(
-      "HAS MORE:",
-      hasMore
-    );
-
-    // ========================================================
-    // ОБРАБАТЫВАЕМ СОБЫТИЯ
-    // ========================================================
-
-    for (const event of events) {
-
-      console.log("");
-      console.log(
-        "🎉 ПОЛУЧЕНО СОБЫТИЕ"
-      );
-
-      console.log(
-        "EVENT ID:",
-        event.eventId
-      );
-
-      console.log(
-        "EVENT TYPE:",
-        event.type
-      );
-
-      console.log(
-        "EVENT DATE:",
-        event.date
-      );
-
-      console.log(
-        "----------------------------------------"
-      );
-
-      await processEvent(event);
-    }
-
-    // ========================================================
-    // ОБНОВЛЯЕМ OFFSET
-    // ========================================================
-
-    if (
-      typeof nextOffset === "number"
-    ) {
-
-      currentOffset = nextOffset;
-
-      console.log(
-        "➡️ OFFSET UPDATED TO:",
-        currentOffset
-      );
-    }
-
-    if (events.length === 0) {
-
-      console.log(
-        "📭 Новых событий нет."
-      );
-    }
-
-  } catch (error) {
-
+  if (!result.ok) {
     console.error(
-      "❌ FETCH ERROR:",
-      error
-    );
-
-  } finally {
-
-    polling = false;
-  }
-}
-
-// ============================================================
-// ОБРАБОТКА СОБЫТИЯ
-// ============================================================
-
-async function processEvent(event) {
-
-  console.log(
-    "FULL EVENT:"
-  );
-
-  console.log(
-    JSON.stringify(
-      event,
-      null,
-      2
-    )
-  );
-
-  // ==========================================================
-  // НАМ НУЖНЫ ТОЛЬКО НОВЫЕ СООБЩЕНИЯ
-  // ==========================================================
-
-  if (
-    event.type !==
-    "ONIMBOTV2MESSAGEADD"
-  ) {
-
-    console.log(
-      "ℹ️ Событие не является сообщением."
+      "❌ FETCH ERROR"
     );
 
     return;
   }
 
-  // ==========================================================
-  // DATA
-  // ==========================================================
+  const apiResult = result.data?.result;
+
+  if (!apiResult) {
+    console.error(
+      "❌ В ответе Bitrix отсутствует result"
+    );
+
+    return;
+  }
+
+  const events =
+    Array.isArray(apiResult.events)
+      ? apiResult.events
+      : [];
+
+  const nextOffset =
+    Number.isFinite(Number(apiResult.nextOffset))
+      ? Number(apiResult.nextOffset)
+      : currentOffset;
+
+  const hasMore =
+    Boolean(apiResult.hasMore);
+
+  console.log(
+    "📦 EVENTS:",
+    events.length
+  );
+
+  console.log(
+    "NEXT OFFSET:",
+    nextOffset
+  );
+
+  console.log(
+    "HAS MORE:",
+    hasMore
+  );
+
+  // Обновляем offset сразу после получения событий.
+  // Это важно, чтобы после обработки события
+  // оно не пришло повторно.
+  currentOffset = nextOffset;
+
+  console.log(
+    "➡️ OFFSET UPDATED TO:",
+    currentOffset
+  );
+
+  if (events.length === 0) {
+    console.log(
+      "📭 Новых событий нет."
+    );
+
+    return;
+  }
+
+  console.log("");
+  console.log(
+    "🎉🎉🎉 ПОЛУЧЕНО СОБЫТИЕ 🎉🎉🎉"
+  );
+
+  for (const event of events) {
+    await processEvent(event);
+  }
+}
+
+// ============================================================
+// PROCESS EVENT
+// ============================================================
+
+async function processEvent(event) {
+  console.log("");
+  console.log("========================================");
+  console.log("📦 PROCESS EVENT");
+  console.log("========================================");
+
+  console.log(
+    "EVENT ID:",
+    event.eventId
+  );
+
+  console.log(
+    "EVENT TYPE:",
+    event.type
+  );
+
+  console.log(
+    "EVENT DATE:",
+    event.date
+  );
+
+  // Нас интересуют только сообщения
+  if (
+    event.type !==
+    "ONIMBOTV2MESSAGEADD"
+  ) {
+    console.log(
+      "ℹ️ Событие не является сообщением. Пропускаем."
+    );
+
+    return;
+  }
 
   const data = event.data || {};
 
@@ -358,51 +517,26 @@ async function processEvent(event) {
   const bot =
     data.bot || {};
 
-  // ==========================================================
-  // MESSAGE
-  // ==========================================================
-
-  const messageId =
-    message.id;
-
   const text =
-    message.text || "";
+    typeof message.text === "string"
+      ? message.text.trim()
+      : "";
 
   const chatId =
     message.chatId ||
     message.chat_id ||
     chat.id;
 
-  // ==========================================================
-  // DIALOG ID
-  // ==========================================================
-
-  let dialogId =
+  const dialogId =
     chat.dialogId;
 
-  // Если dialogId отсутствует,
-  // для личного чата можно использовать user.id.
-
-  if (!dialogId) {
-
-    if (
-      chat.type === "private" &&
-      user.id
-    ) {
-
-      dialogId = String(user.id);
-    }
-  }
-
-  // ==========================================================
-  // ЛОГ
-  // ==========================================================
-
-  console.log("");
+  console.log("----------------------------------------");
   console.log("💬 MESSAGE");
+  console.log("----------------------------------------");
+
   console.log(
     "ID:",
-    messageId
+    message.id
   );
 
   console.log(
@@ -420,8 +554,10 @@ async function processEvent(event) {
     text
   );
 
-  console.log("");
+  console.log("----------------------------------------");
   console.log("👤 USER");
+  console.log("----------------------------------------");
+
   console.log(
     "ID:",
     user.id
@@ -432,8 +568,10 @@ async function processEvent(event) {
     user.name
   );
 
-  console.log("");
+  console.log("----------------------------------------");
   console.log("🤖 BOT");
+  console.log("----------------------------------------");
+
   console.log(
     "ID:",
     bot.id
@@ -444,377 +582,172 @@ async function processEvent(event) {
     bot.code
   );
 
-  // ==========================================================
-  // ЗАЩИТА
-  // ==========================================================
-
-  if (!dialogId) {
-
-    console.error(
-      "❌ НЕ НАЙДЕН dialogId."
-    );
-
-    console.error(
-      "Chat:",
-      JSON.stringify(chat, null, 2)
-    );
-
-    return;
-  }
+  // ----------------------------------------------------------
+  // Защита от пустых сообщений
+  // ----------------------------------------------------------
 
   if (!text) {
-
     console.log(
-      "ℹ️ Сообщение пустое. Ответ не отправляем."
+      "📭 Сообщение пустое. Пропускаем."
     );
 
     return;
   }
 
-  // ==========================================================
-  // ЗАЩИТА ОТ ОТВЕТА НА САМОГО СЕБЯ
-  // ==========================================================
+  // ----------------------------------------------------------
+  // Защита от собственных сообщений бота
+  // ----------------------------------------------------------
 
   if (
-    Number(message.authorId) ===
-    Number(BOT_ID)
+    Number(message.authorId) === BOT_ID
   ) {
-
     console.log(
-      "↩️ Сообщение принадлежит самому боту."
-    );
-
-    console.log(
-      "Ответ не отправляем."
+      "🤖 Это сообщение самого бота. Пропускаем."
     );
 
     return;
   }
 
-  // ==========================================================
-  // ГОТОВИМ ТЕСТОВЫЙ ОТВЕТ
-  // ==========================================================
+  // ----------------------------------------------------------
+  // Проверяем dialogId
+  // ----------------------------------------------------------
 
-  const reply =
-`FETCH OK ✅
-
-Я получил ваше сообщение через Bitrix24.
-
-Ваше сообщение:
-«${text}»
-
-Bot ID: ${BOT_ID}
-Dialog ID: ${dialogId}
-
-Следующий этап — подключение DeepSeek.`;
-
-  // ==========================================================
-  // ОТПРАВЛЯЕМ ОТВЕТ
-  // ==========================================================
-
-  await sendMessage(
-    dialogId,
-    reply
-  );
-}
-
-// ============================================================
-// ОТПРАВКА СООБЩЕНИЯ
-// ============================================================
-
-async function sendMessage(
-  dialogId,
-  text
-) {
-
-  console.log("");
-  console.log(
-    "========================================"
-  );
-
-  console.log(
-    "📤 ОТПРАВЛЯЕМ ОТВЕТ В BITRIX"
-  );
-
-  console.log(
-    "========================================"
-  );
-
-  console.log(
-    "BOT_ID:",
-    BOT_ID
-  );
-
-  console.log(
-    "DIALOG_ID:",
-    dialogId
-  );
-
-  console.log(
-    "MESSAGE:",
-    text
-  );
-
-  // ==========================================================
-  // СОВРЕМЕННЫЙ API CHAT-BOTS 2.0
-  // ==========================================================
-
-  const params = {
-
-    botId: BOT_ID,
-
-    botToken: BITRIX_BOT_TOKEN,
-
-    dialogId: String(dialogId),
-
-    fields: {
-
-      message: text,
-
-      urlPreview: false
-
-    }
-  };
-
-  const result =
-    await bitrixCall(
-      "imbot.v2.Chat.Message.send",
-      params
-    );
-
-  // ==========================================================
-  // АНАЛИЗ РЕЗУЛЬТАТА
-  // ==========================================================
-
-  if (!result) {
-
+  if (!dialogId) {
     console.error(
-      "❌ Ответ от Bitrix отсутствует."
+      "❌ Не найден dialogId. Невозможно отправить ответ."
     );
 
-    return false;
+    return;
   }
 
-  if (result.error) {
+  // ----------------------------------------------------------
+  // Не допускаем параллельную обработку
+  // ----------------------------------------------------------
 
-    console.error(
-      "❌ НЕ УДАЛОСЬ ОТПРАВИТЬ СООБЩЕНИЕ"
+  if (processingEvent) {
+    console.log(
+      "⚠️ Уже обрабатывается другое событие."
     );
 
-    console.error(
-      "ERROR:",
-      result.error
-    );
-
-    console.error(
-      "DESCRIPTION:",
-      result.error_description || ""
-    );
-
-    return false;
+    return;
   }
 
-  console.log("");
-  console.log(
-    "🎉🎉🎉 ОТВЕТ УСПЕШНО ОТПРАВЛЕН 🎉🎉🎉"
-  );
+  processingEvent = true;
 
-  console.log(
-    "RESULT:",
-    JSON.stringify(
-      result.result,
-      null,
-      2
-    )
-  );
-
-  console.log(
-    "========================================"
-  );
-
-  return true;
-}
-
-// ============================================================
-// HTTP SERVER
-// ============================================================
-
-// Render требует, чтобы сервис слушал PORT.
-
-const server =
-  http.createServer(
-    (req, res) => {
-
-      // ------------------------------------------------------
-      // HEALTH CHECK
-      // ------------------------------------------------------
-
-      if (
-        req.method === "GET" &&
-        req.url === "/"
-      ) {
-
-        res.writeHead(
-          200,
-          {
-            "Content-Type":
-              "application/json; charset=utf-8"
-          }
-        );
-
-        res.end(
-          JSON.stringify({
-            ok: true,
-            service:
-              "mlk-bitrix-fetch",
-            mode:
-              "fetch",
-            botId:
-              BOT_ID,
-            botCode:
-              BOT_CODE,
-            offset:
-              currentOffset
-          })
-        );
-
-        return;
-      }
-
-      // ------------------------------------------------------
-      // BITRIX WEBHOOK URL НЕ НУЖЕН ДЛЯ FETCH
-      // ------------------------------------------------------
-
-      if (
-        req.url === "/bitrix-webhook"
-      ) {
-
-        res.writeHead(
-          200,
-          {
-            "Content-Type":
-              "application/json; charset=utf-8"
-          }
-        );
-
-        res.end(
-          JSON.stringify({
-            ok: true,
-            mode:
-              "fetch",
-            message:
-              "Webhook endpoint is not used in FETCH mode."
-          })
-        );
-
-        return;
-      }
-
-      // ------------------------------------------------------
-      // 404
-      // ------------------------------------------------------
-
-      res.writeHead(
-        404,
-        {
-          "Content-Type":
-            "application/json; charset=utf-8"
-        }
-      );
-
-      res.end(
-        JSON.stringify({
-          error:
-            "NOT_FOUND"
-        })
-      );
-    }
-  );
-
-// ============================================================
-// START
-// ============================================================
-
-server.listen(
-  PORT,
-  () => {
+  try {
+    // ========================================================
+    // 1. ОТПРАВЛЯЕМ ПОЛЬЗОВАТЕЛЬСКИЙ ТЕКСТ В DEEPSEEK
+    // ========================================================
 
     console.log("");
     console.log(
-      "========================================"
+      "➡️ ШАГ 1: отправляем сообщение в DeepSeek"
     );
 
-    console.log(
-      "🚀 SERVER STARTED"
-    );
+    const deepSeekAnswer =
+      await askDeepSeek(text);
 
-    console.log(
-      "========================================"
-    );
+    // ========================================================
+    // 2. ЕСЛИ DEEPSEEK НЕ ОТВЕТИЛ
+    // ========================================================
 
-    console.log(
-      "PORT:",
-      PORT
-    );
-
-    console.log(
-      "MODE: FETCH"
-    );
-
-    console.log(
-      "BOT ID:",
-      BOT_ID
-    );
-
-    console.log(
-      "BOT CODE:",
-      BOT_CODE
-    );
-
-    console.log(
-      "========================================"
-    );
-
-    // --------------------------------------------------------
-    // Первый FETCH
-    // --------------------------------------------------------
-
-    getEvents();
-
-    // --------------------------------------------------------
-    // Далее проверяем очередь каждые 3 секунды
-    // --------------------------------------------------------
-
-    setInterval(
-      getEvents,
-      3000
-    );
-  }
-);
-
-// ============================================================
-// GRACEFUL SHUTDOWN
-// ============================================================
-
-function shutdown(
-  signal
-) {
-
-  console.log("");
-  console.log(
-    `🛑 ${signal}`
-  );
-
-  server.close(
-    () => {
-
-      console.log(
-        "✅ Server closed"
+    if (!deepSeekAnswer) {
+      console.error(
+        "❌ DeepSeek не вернул ответ."
       );
 
-      process.exit(0);
+      await sendBitrixMessage(
+        dialogId,
+        "Не удалось получить ответ от DeepSeek. Проверь DEEPSEEK_API_KEY и логи Render."
+      );
+
+      return;
     }
-  );
+
+    // ========================================================
+    // 3. ОТПРАВЛЯЕМ ОТВЕТ В BITRIX
+    // ========================================================
+
+    console.log("");
+    console.log(
+      "➡️ ШАГ 2: отправляем ответ DeepSeek в Bitrix"
+    );
+
+    await sendBitrixMessage(
+      dialogId,
+      deepSeekAnswer
+    );
+  } catch (error) {
+    console.error(
+      "❌ Ошибка обработки события:",
+      error
+    );
+
+    try {
+      await sendBitrixMessage(
+        dialogId,
+        "Произошла ошибка при обработке сообщения."
+      );
+    } catch (sendError) {
+      console.error(
+        "❌ Не удалось отправить сообщение об ошибке:",
+        sendError
+      );
+    }
+  } finally {
+    processingEvent = false;
+  }
+}
+
+// ============================================================
+// FETCH LOOP
+// ============================================================
+
+async function startFetch() {
+  if (fetchRunning) {
+    return;
+  }
+
+  fetchRunning = true;
+
+  console.log("");
+  console.log("========================================");
+  console.log("🚀 FETCH LOOP STARTED");
+  console.log("========================================");
+
+  // Первый запрос сразу
+  await fetchEvents();
+
+  // Затем каждые 3 секунды
+  setInterval(async () => {
+    if (fetchRunning === false) {
+      return;
+    }
+
+    await fetchEvents();
+  }, 3000);
+}
+
+// ============================================================
+// SHUTDOWN
+// ============================================================
+
+function shutdown(signal) {
+  console.log("");
+  console.log("========================================");
+  console.log(`🛑 ${signal}`);
+  console.log("========================================");
+
+  fetchRunning = false;
+
+  server.close(() => {
+    console.log("✅ Server closed");
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    process.exit(0);
+  }, 5000);
 }
 
 process.on(
@@ -825,30 +758,4 @@ process.on(
 process.on(
   "SIGINT",
   () => shutdown("SIGINT")
-);
-
-// ============================================================
-// GLOBAL ERROR HANDLERS
-// ============================================================
-
-process.on(
-  "unhandledRejection",
-  (error) => {
-
-    console.error(
-      "❌ UNHANDLED REJECTION:",
-      error
-    );
-  }
-);
-
-process.on(
-  "uncaughtException",
-  (error) => {
-
-    console.error(
-      "❌ UNCAUGHT EXCEPTION:",
-      error
-    );
-  }
 );
