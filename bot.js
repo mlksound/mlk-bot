@@ -2424,179 +2424,343 @@ const server =
                 // https://mlk-bot.onrender.com/bitrix-webhook
                 // ==================================================
 
-                if (
-                    url.pathname ===
-                    '/bitrix-webhook'
+                ```js
+// ==================================================
+// BITRIX INITIAL INSTALLATION CALLBACK — DIAGNOSTIC
+//
+// Временно используем этот обработчик только для диагностики.
+// Он НЕ сохраняет OAuth и НЕ запускает Connector.
+// Его задача — показать в Render Logs, что именно
+// Bitrix24 отправляет при первоначальной установке.
+//
+// URL:
+// https://mlk-bot.onrender.com/bitrix-webhook
+// ==================================================
+
+if (
+    url.pathname ===
+    '/bitrix-webhook'
+) {
+
+    log(
+        '========================================'
+    );
+
+    log(
+        '📥 BITRIX INSTALL CALLBACK — DIAGNOSTIC'
+    );
+
+    log(
+        'METHOD:',
+        req.method
+    );
+
+    log(
+        'URL:',
+        req.url
+    );
+
+    log(
+        'CONTENT-TYPE:',
+        req.headers['content-type'] ||
+        'MISSING'
+    );
+
+    // --------------------------------------------
+    // GET
+    // --------------------------------------------
+
+    if (
+        req.method ===
+        'GET'
+    ) {
+
+        log(
+            'QUERY:',
+            Object.fromEntries(
+                url.searchParams.entries()
+            )
+        );
+
+        res.writeHead(
+            200,
+            {
+                'Content-Type':
+                    'text/plain; charset=utf-8'
+            }
+        );
+
+        res.end(
+            'Bitrix installation endpoint is ready'
+        );
+
+        log(
+            '========================================'
+        );
+
+        return;
+    }
+
+    // --------------------------------------------
+    // POST
+    // --------------------------------------------
+
+    if (
+        req.method ===
+        'POST'
+    ) {
+
+        const body =
+            await readRequestBody(
+                req
+            );
+
+        log(
+            'RAW BODY:',
+            body || 'EMPTY'
+        );
+
+        let payload = {};
+
+        // ----------------------------------------
+        // JSON
+        // ----------------------------------------
+
+        try {
+
+            payload =
+                JSON.parse(
+                    body
+                );
+
+            log(
+                'BODY FORMAT: JSON'
+            );
+
+        } catch (jsonError) {
+
+            // ------------------------------------
+            // FORM DATA / URL ENCODED
+            // ------------------------------------
+
+            log(
+                'BODY FORMAT: URLENCODED / FORM'
+            );
+
+            try {
+
+                const params =
+                    new URLSearchParams(
+                        body
+                    );
+
+                for (
+                    const [
+                        key,
+                        value
+                    ] of params.entries()
                 ) {
 
-                    if (
-                        req.method !==
-                        'POST'
-                    ) {
+                    payload[key] =
+                        value;
 
-                        res.writeHead(
-                            200,
-                            {
-                                'Content-Type':
-                                    'text/plain; charset=utf-8'
-                            }
+                }
+
+            } catch (formError) {
+
+                error(
+                    'Cannot parse Bitrix callback body:',
+                    formError.message
+                );
+
+            }
+
+        }
+
+        // ----------------------------------------
+        // PAYLOAD
+        // ----------------------------------------
+
+        log(
+            'PARSED PAYLOAD:',
+            JSON.stringify(
+                payload,
+                null,
+                2
+            )
+        );
+
+        // ----------------------------------------
+        // AUTH
+        // ----------------------------------------
+
+        log(
+            'AUTH:',
+            payload.auth
+                ? 'PRESENT'
+                : 'MISSING'
+        );
+
+        // ----------------------------------------
+        // AUTH TYPE
+        // ----------------------------------------
+
+        if (
+            payload.auth
+        ) {
+
+            log(
+                'AUTH TYPE:',
+                typeof payload.auth
+            );
+
+            if (
+                typeof payload.auth ===
+                'string'
+            ) {
+
+                try {
+
+                    const parsedAuth =
+                        JSON.parse(
+                            payload.auth
                         );
-
-                        res.end(
-                            'Bitrix installation endpoint is ready'
-                        );
-
-                        return;
-                    }
-
-                    const body =
-                        await readRequestBody(
-                            req
-                        );
-
-                    let payload = {};
-
-                    try {
-
-                        payload =
-                            JSON.parse(body);
-
-                    } catch (e) {
-
-                        const params =
-                            new URLSearchParams(
-                                body
-                            );
-
-                        for (
-                            const [
-                                key,
-                                value
-                            ] of params.entries()
-                        ) {
-
-                            payload[key] =
-                                value;
-                        }
-
-                        // Иногда auth приходит
-                        // строкой JSON.
-                        if (
-                            typeof payload.auth ===
-                            'string'
-                        ) {
-
-                            try {
-
-                                payload.auth =
-                                    JSON.parse(
-                                        payload.auth
-                                    );
-
-                            } catch (e) {}
-                        }
-                    }
 
                     log(
-                        '========================================'
-                    );
-
-                    log(
-                        '📥 BITRIX INSTALL CALLBACK'
-                    );
-
-                    log(
-                        'AUTH:',
-                        payload.auth
-                            ? 'PRESENT'
-                            : 'MISSING'
-                    );
-
-                    // Bitrix присылает:
-                    //
-                    // auth.access_token
-                    // auth.refresh_token
-                    //
-                    // Именно их сохраняем.
-
-                    if (
-                        payload.auth &&
-                        payload.auth.access_token &&
-                        payload.auth.refresh_token
-                    ) {
-
-                        bitrixAuth =
-                            payload.auth;
-
-                        saveAuth(
-                            bitrixAuth
-                        );
-
-                        log(
-                            '✅ OAuth tokens received and saved'
-                        );
-
-                        // Не блокируем ответ Bitrix
-                        // долгими REST-вызовами.
-                        setImmediate(
-                            () => {
-                                setupConnector()
-                                    .catch(
-                                        e =>
-                                            error(
-                                                'Connector setup after installation:',
-                                                e.message
-                                            )
-                                    );
-                            }
-                        );
-
-                        res.writeHead(
-                            200,
-                            {
-                                'Content-Type':
-                                    'application/json'
-                            }
-                        );
-
-                        res.end(
-                            JSON.stringify(
-                                {
-                                    status:
-                                        'success'
-                                }
-                            )
-                        );
-
-                        return;
-                    }
-
-                    error(
-                        '❌ Bitrix installation callback did not contain OAuth auth'
-                    );
-
-                    res.writeHead(
-                        400,
-                        {
-                            'Content-Type':
-                                'application/json'
-                        }
-                    );
-
-                    res.end(
+                        'AUTH PARSED:',
                         JSON.stringify(
-                            {
-                                status:
-                                    'error',
-
-                                message:
-                                    'Bitrix OAuth auth data missing'
-                            }
+                            parsedAuth,
+                            null,
+                            2
                         )
                     );
 
-                    return;
+                } catch (e) {
+
+                    log(
+                        'AUTH IS STRING BUT NOT JSON'
+                    );
+
                 }
+
+            }
+
+        }
+
+        // ----------------------------------------
+        // COMMON BITRIX FIELDS
+        // ----------------------------------------
+
+        log(
+            'AUTH_ID:',
+            payload.AUTH_ID ||
+            payload.auth_id ||
+            'MISSING'
+        );
+
+        log(
+            'REFRESH_ID:',
+            payload.REFRESH_ID ||
+            payload.refresh_id ||
+            'MISSING'
+        );
+
+        log(
+            'DOMAIN:',
+            payload.DOMAIN ||
+            payload.domain ||
+            'MISSING'
+        );
+
+        log(
+            'APP_SID:',
+            payload.APP_SID ||
+            payload.app_sid ||
+            'MISSING'
+        );
+
+        log(
+            'INSTALL:',
+            payload.INSTALL ||
+            payload.install ||
+            'MISSING'
+        );
+
+        log(
+            'PLACEMENT:',
+            payload.PLACEMENT ||
+            payload.placement ||
+            'MISSING'
+        );
+
+        // ----------------------------------------
+        // RESPONSE
+        // ----------------------------------------
+
+        res.writeHead(
+            200,
+            {
+                'Content-Type':
+                    'application/json'
+            }
+        );
+
+        res.end(
+            JSON.stringify(
+                {
+                    status:
+                        'diagnostic_received',
+
+                    method:
+                        req.method,
+
+                    auth_present:
+                        Boolean(
+                            payload.auth
+                        ),
+
+                    received:
+                        true
+                }
+            )
+        );
+
+        log(
+            '========================================'
+        );
+
+        return;
+    }
+
+    // --------------------------------------------
+    // OTHER METHODS
+    // --------------------------------------------
+
+    res.writeHead(
+        405,
+        {
+            'Content-Type':
+                'application/json'
+        }
+    );
+
+    res.end(
+        JSON.stringify(
+            {
+                error:
+                    'Method not allowed'
+            }
+        )
+    );
+
+    log(
+        '========================================'
+    );
+
+    return;
+}
+```
+
 
                 // ==================================================
                 // BITRIX CONNECTOR HANDLER
