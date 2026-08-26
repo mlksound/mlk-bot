@@ -2181,11 +2181,42 @@ async function processConnectorManagerEvent(payload) {
             const chat =
                 item.chat || {};
 
-            const telegramChatId =
-                String(chat.id || '').trim();
+            const externalChatId =
+    String(chat.id || '').trim();
 
-            const bitrixChatId =
-                String(im.chat_id || '').trim();
+const bitrixChatId =
+    String(im.chat_id || '').trim();
+
+const mappedTelegramChatId =
+    bitrixChatId
+        ? String(
+            bitrixChatMap.get(bitrixChatId) || ''
+        ).trim()
+        : '';
+
+const telegramChatId =
+    externalChatId ||
+    mappedTelegramChatId;
+
+console.log(
+    'External chat.id:',
+    externalChatId || '(EMPTY)'
+);
+
+console.log(
+    'Bitrix im.chat_id:',
+    bitrixChatId || '(EMPTY)'
+);
+
+console.log(
+    'Mapped Telegram chat_id:',
+    mappedTelegramChatId || '(EMPTY)'
+);
+
+console.log(
+    'Final Telegram chat_id:',
+    telegramChatId || '(EMPTY)'
+);
 
             const bitrixMessageId =
                 String(im.message_id || '').trim();
@@ -2233,16 +2264,21 @@ async function processConnectorManagerEvent(payload) {
             // ----------------------------------------------------
 
             if (!telegramChatId) {
-                console.log(
-                    '❌ External chat.id is EMPTY'
-                );
+    console.log(
+        '❌ Telegram chat_id could not be resolved'
+    );
 
-                console.log(
-                    '❌ Telegram message will NOT be sent'
-                );
+    console.log(
+        '❌ Bitrix chat_id:',
+        bitrixChatId || '(EMPTY)'
+    );
 
-                continue;
-            }
+    console.log(
+        '❌ No mapping Bitrix chat -> Telegram chat'
+    );
+
+    continue;
+}
 
             if (!managerText) {
                 console.log(
