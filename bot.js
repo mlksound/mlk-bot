@@ -3451,10 +3451,10 @@ body {
 
 /*
 ============================================================
-BITRIX FORM-URLENCODED PARSER
+BITRIX ONIMCONNECTORMESSAGEADD PARSER
 ============================================================
 
-Bitrix отправляет ONIMCONNECTORMESSAGEADD примерно так:
+Bitrix присылает POST как:
 
 event=ONIMCONNECTORMESSAGEADD
 data[CONNECTOR]=mlk_telegram
@@ -3465,29 +3465,24 @@ data[MESSAGES][0][message][user_id]=1
 data[MESSAGES][0][message][text]=Еще проверка
 data[MESSAGES][0][chat][id]=1018137139
 
-Старый parser сохранял это как плоские ключи.
-
-Нам нужен нормальный объект:
+Нужно преобразовать это в:
 
 payload.data.CONNECTOR
 payload.data.LINE
 payload.data.MESSAGES[0].im.chat_id
+payload.data.MESSAGES[0].im.message_id
+payload.data.MESSAGES[0].message.user_id
 payload.data.MESSAGES[0].message.text
 payload.data.MESSAGES[0].chat.id
 ============================================================
 */
 
 function setNestedFormValue(target, key, value) {
-    const parts = [];
 
-    String(key)
+    const parts = String(key)
         .replace(/\[([^\]]*)\]/g, '.$1')
         .split('.')
-        .forEach(part => {
-            if (part !== '') {
-                parts.push(part);
-            }
-        });
+        .filter(Boolean);
 
     if (!parts.length) {
         return;
@@ -3495,7 +3490,12 @@ function setNestedFormValue(target, key, value) {
 
     let current = target;
 
-    for (let i = 0; i < parts.length - 1; i++) {
+    for (
+        let i = 0;
+        i < parts.length - 1;
+        i++
+    ) {
+
         const part = parts[i];
         const nextPart = parts[i + 1];
 
@@ -3504,6 +3504,7 @@ function setNestedFormValue(target, key, value) {
             current[part] === null ||
             typeof current[part] !== 'object'
         ) {
+
             current[part] =
                 /^\d+$/.test(nextPart)
                     ? []
@@ -3513,133 +3514,68 @@ function setNestedFormValue(target, key, value) {
         current = current[part];
     }
 
-    current[parts[parts.length - 1]] = value;
-}
-
-try {
-
-    /*
-    --------------------------------------------------------
-    JSON
-    --------------------------------------------------------
-    */
-
-    if (
-        typeof body === 'string' &&
-        body.trim().startsWith('{')
-    ) {
-
-        try {
-
-            payload =
-                JSON.parse(body);
-
-        } catch (e) {
-
-            error(
-                'Bitrix JSON parse error:',
-                e.message
-            );
-
-            payload = {};
-        }
-
-    } else {
-
-        /*
-        ----------------------------------------------------
-        application/x-www-form-urlencoded
-        ----------------------------------------------------
-        */
-
-        const params =
-            new URLSearchParams(
-                body
-            );
-
-        for (
-            const [
-                key,
-                value
-            ] of params.entries()
-        ) {
-
-            /*
-            Вложенные ключи Bitrix:
-            
-            data[CONNECTOR]
-            data[LINE]
-            data[MESSAGES][0][im][chat_id]
-            data[MESSAGES][0][message][text]
-            auth[access_token]
-            */
-
-            setNestedFormValue(
-                payload,
-                key,
-                value
-            );
-        }
-
-        /*
-        ----------------------------------------------------
-        Иногда Bitrix может прислать data/auth как JSON-строку.
-        Если это произошло — дополнительно распаковываем.
-        ----------------------------------------------------
-        */
-
-        if (
-            typeof payload.data === 'string'
-        ) {
-
-            try {
-
-                payload.data =
-                    JSON.parse(
-                        payload.data
-                    );
-
-            } catch (e) {
-
-                // Это нормально:
-                // в обычном ONIMCONNECTORMESSAGEADD
-                // data приходит через data[...].
-            }
-        }
-
-        if (
-            typeof payload.auth === 'string'
-        ) {
-
-            try {
-
-                payload.auth =
-                    JSON.parse(
-                        payload.auth
-                    );
-
-            } catch (e) {
-
-                // В обычном Bitrix event
-                // auth также приходит через auth[...].
-            }
-        }
-    }
-
-} catch (e) {
-
-    error(
-        'Bitrix Connector parser error:',
-        e.message
-    );
-
-    payload = {};
+    current[
+        parts[parts.length - 1]
+    ] = value;
 }
 
 
 /*
 ============================================================
-ДИАГНОСТИКА
+1. JSON
+============================================================
+*/
+
+if (
+    typeof body === 'string' &&
+    body.trim().startsWith('{')
+) {
+
+    try {
+
+        payload =
+            JSON.parse(body);
+
+    } catch (e) {
+
+        error(
+            'Bitrix JSON parse error:',
+            e.message
+        );
+
+        payload = {};
+    }
+
+} else {
+
+    /*
+    ========================================================
+    2. application/x-www-form-urlencoded
+    ========================================================
+    */
+
+    const params =
+        new URLSearchParams(body);
+
+    for (
+        const [
+            key,
+            value
+        ] of params.entries()
+    ) {
+
+        setNestedFormValue(
+            payload,
+            key,
+            value
+        );
+    }
+}
+
+
+/*
+============================================================
+3. BITRIX EVENT DIAGNOSTICS
 ============================================================
 */
 
@@ -3649,6 +3585,7 @@ log(
     'unknown'
 );
 
+
 if (
     String(
         payload.event ||
@@ -3657,36 +3594,42 @@ if (
     'ONIMCONNECTORMESSAGEADD'
 ) {
 
+    const connector =
+        payload.data?.CONNECTOR ||
+        '';
+
+    const line =
+        payload.data?.LINE ||
+        '';
+
+    const messages =
+        Array.isArray(
+            payload.data?.MESSAGES
+        )
+            ? payload.data.MESSAGES
+            : [];
+
     log(
         '🔎 Parsed Connector:',
-        payload.data?.CONNECTOR ||
+        connector ||
         '(EMPTY)'
     );
 
     log(
         '🔎 Parsed Line:',
-        payload.data?.LINE ||
+        line ||
         '(EMPTY)'
     );
 
     log(
         '🔎 Parsed Messages:',
-        Array.isArray(
-            payload.data?.MESSAGES
-        )
-            ? payload.data.MESSAGES.length
-            : 0
+        messages.length
     );
 
-    if (
-        Array.isArray(
-            payload.data?.MESSAGES
-        ) &&
-        payload.data.MESSAGES.length
-    ) {
+    if (messages.length > 0) {
 
         const first =
-            payload.data.MESSAGES[0];
+            messages[0];
 
         log(
             '🔎 Parsed Telegram chat:',
