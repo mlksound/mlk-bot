@@ -3447,67 +3447,266 @@ body {
                         return;
                     }
 
-                    // ------------------------------------------------
-                    // POST — EVENTS
-                    // ------------------------------------------------
+                   let payload = {};
 
-                    if (
-                        req.method === 'POST'
-                    ) {
+/*
+============================================================
+BITRIX FORM-URLENCODED PARSER
+============================================================
 
-                        const body =
-                            await readRequestBody(
-                                req
-                            );
+Bitrix отправляет ONIMCONNECTORMESSAGEADD примерно так:
 
-                        let payload = {};
+event=ONIMCONNECTORMESSAGEADD
+data[CONNECTOR]=mlk_telegram
+data[LINE]=11
+data[MESSAGES][0][im][chat_id]=1893
+data[MESSAGES][0][im][message_id]=35113
+data[MESSAGES][0][message][user_id]=1
+data[MESSAGES][0][message][text]=Еще проверка
+data[MESSAGES][0][chat][id]=1018137139
 
-                        try {
+Старый parser сохранял это как плоские ключи.
 
-                            payload =
-                                JSON.parse(
-                                    body
-                                );
+Нам нужен нормальный объект:
 
-                        } catch (e) {
+payload.data.CONNECTOR
+payload.data.LINE
+payload.data.MESSAGES[0].im.chat_id
+payload.data.MESSAGES[0].message.text
+payload.data.MESSAGES[0].chat.id
+============================================================
+*/
 
-                            const params =
-                                new URLSearchParams(
-                                    body
-                                );
+function setNestedFormValue(target, key, value) {
+    const parts = [];
 
-                            for (
-                                const [
-                                    key,
-                                    value
-                                ] of params.entries()
-                            ) {
+    String(key)
+        .replace(/\[([^\]]*)\]/g, '.$1')
+        .split('.')
+        .forEach(part => {
+            if (part !== '') {
+                parts.push(part);
+            }
+        });
 
-                                payload[key] =
-                                    value;
-                            }
+    if (!parts.length) {
+        return;
+    }
 
-                            if (
-                                typeof payload.data ===
-                                'string'
-                            ) {
+    let current = target;
 
-                                try {
+    for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        const nextPart = parts[i + 1];
 
-                                    payload.data =
-                                        JSON.parse(
-                                            payload.data
-                                        );
+        if (
+            current[part] === undefined ||
+            current[part] === null ||
+            typeof current[part] !== 'object'
+        ) {
+            current[part] =
+                /^\d+$/.test(nextPart)
+                    ? []
+                    : {};
+        }
 
-                                } catch (e) {}
-                            }
-                        }
+        current = current[part];
+    }
 
-                        log(
-                            '📥 Bitrix Connector POST:',
-                            payload.event ||
-                            'unknown'
-                        );
+    current[parts[parts.length - 1]] = value;
+}
+
+try {
+
+    /*
+    --------------------------------------------------------
+    JSON
+    --------------------------------------------------------
+    */
+
+    if (
+        typeof body === 'string' &&
+        body.trim().startsWith('{')
+    ) {
+
+        try {
+
+            payload =
+                JSON.parse(body);
+
+        } catch (e) {
+
+            error(
+                'Bitrix JSON parse error:',
+                e.message
+            );
+
+            payload = {};
+        }
+
+    } else {
+
+        /*
+        ----------------------------------------------------
+        application/x-www-form-urlencoded
+        ----------------------------------------------------
+        */
+
+        const params =
+            new URLSearchParams(
+                body
+            );
+
+        for (
+            const [
+                key,
+                value
+            ] of params.entries()
+        ) {
+
+            /*
+            Вложенные ключи Bitrix:
+            
+            data[CONNECTOR]
+            data[LINE]
+            data[MESSAGES][0][im][chat_id]
+            data[MESSAGES][0][message][text]
+            auth[access_token]
+            */
+
+            setNestedFormValue(
+                payload,
+                key,
+                value
+            );
+        }
+
+        /*
+        ----------------------------------------------------
+        Иногда Bitrix может прислать data/auth как JSON-строку.
+        Если это произошло — дополнительно распаковываем.
+        ----------------------------------------------------
+        */
+
+        if (
+            typeof payload.data === 'string'
+        ) {
+
+            try {
+
+                payload.data =
+                    JSON.parse(
+                        payload.data
+                    );
+
+            } catch (e) {
+
+                // Это нормально:
+                // в обычном ONIMCONNECTORMESSAGEADD
+                // data приходит через data[...].
+            }
+        }
+
+        if (
+            typeof payload.auth === 'string'
+        ) {
+
+            try {
+
+                payload.auth =
+                    JSON.parse(
+                        payload.auth
+                    );
+
+            } catch (e) {
+
+                // В обычном Bitrix event
+                // auth также приходит через auth[...].
+            }
+        }
+    }
+
+} catch (e) {
+
+    error(
+        'Bitrix Connector parser error:',
+        e.message
+    );
+
+    payload = {};
+}
+
+
+/*
+============================================================
+ДИАГНОСТИКА
+============================================================
+*/
+
+log(
+    '📥 Bitrix Connector POST:',
+    payload.event ||
+    'unknown'
+);
+
+if (
+    String(
+        payload.event ||
+        ''
+    ).toUpperCase() ===
+    'ONIMCONNECTORMESSAGEADD'
+) {
+
+    log(
+        '🔎 Parsed Connector:',
+        payload.data?.CONNECTOR ||
+        '(EMPTY)'
+    );
+
+    log(
+        '🔎 Parsed Line:',
+        payload.data?.LINE ||
+        '(EMPTY)'
+    );
+
+    log(
+        '🔎 Parsed Messages:',
+        Array.isArray(
+            payload.data?.MESSAGES
+        )
+            ? payload.data.MESSAGES.length
+            : 0
+    );
+
+    if (
+        Array.isArray(
+            payload.data?.MESSAGES
+        ) &&
+        payload.data.MESSAGES.length
+    ) {
+
+        const first =
+            payload.data.MESSAGES[0];
+
+        log(
+            '🔎 Parsed Telegram chat:',
+            first?.chat?.id ||
+            '(EMPTY)'
+        );
+
+        log(
+            '🔎 Parsed Bitrix chat:',
+            first?.im?.chat_id ||
+            '(EMPTY)'
+        );
+
+        log(
+            '🔎 Parsed message:',
+            first?.message?.text ||
+            '(EMPTY)'
+        );
+    }
+}
 
                         // ------------------------------------------------
                         // MANAGER MESSAGE
