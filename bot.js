@@ -3447,210 +3447,270 @@ body {
                         return;
                     }
 
-                   let payload = {};
+                                       // ------------------------------------------------
+                    // POST — EVENTS
+                    // ------------------------------------------------
 
-/*
-============================================================
-BITRIX ONIMCONNECTORMESSAGEADD PARSER
-============================================================
+                    if (
+                        req.method === 'POST'
+                    ) {
 
-Bitrix присылает POST как:
+                        const body =
+                            await readRequestBody(
+                                req
+                            );
 
-event=ONIMCONNECTORMESSAGEADD
-data[CONNECTOR]=mlk_telegram
-data[LINE]=11
-data[MESSAGES][0][im][chat_id]=1893
-data[MESSAGES][0][im][message_id]=35113
-data[MESSAGES][0][message][user_id]=1
-data[MESSAGES][0][message][text]=Еще проверка
-data[MESSAGES][0][chat][id]=1018137139
+                        let payload = {};
 
-Нужно преобразовать это в:
+                        /*
+                        ==================================================
+                        BITRIX FORM / JSON PARSER
+                        ==================================================
+                        */
 
-payload.data.CONNECTOR
-payload.data.LINE
-payload.data.MESSAGES[0].im.chat_id
-payload.data.MESSAGES[0].im.message_id
-payload.data.MESSAGES[0].message.user_id
-payload.data.MESSAGES[0].message.text
-payload.data.MESSAGES[0].chat.id
-============================================================
-*/
+                        try {
 
-function setNestedFormValue(target, key, value) {
+                            if (
+                                typeof body === 'string' &&
+                                body.trim().startsWith('{')
+                            ) {
 
-    const parts = String(key)
-        .replace(/\[([^\]]*)\]/g, '.$1')
-        .split('.')
-        .filter(Boolean);
+                                payload =
+                                    JSON.parse(body);
 
-    if (!parts.length) {
-        return;
-    }
+                            } else {
 
-    let current = target;
+                                const params =
+                                    new URLSearchParams(body);
 
-    for (
-        let i = 0;
-        i < parts.length - 1;
-        i++
-    ) {
+                                for (
+                                    const [
+                                        key,
+                                        value
+                                    ] of params.entries()
+                                ) {
 
-        const part = parts[i];
-        const nextPart = parts[i + 1];
+                                    const parts =
+                                        String(key)
+                                            .replace(
+                                                /\[([^\]]*)\]/g,
+                                                '.$1'
+                                            )
+                                            .split('.')
+                                            .filter(Boolean);
 
-        if (
-            current[part] === undefined ||
-            current[part] === null ||
-            typeof current[part] !== 'object'
-        ) {
+                                    let current =
+                                        payload;
 
-            current[part] =
-                /^\d+$/.test(nextPart)
-                    ? []
-                    : {};
-        }
+                                    for (
+                                        let i = 0;
+                                        i < parts.length - 1;
+                                        i++
+                                    ) {
 
-        current = current[part];
-    }
+                                        const part =
+                                            parts[i];
 
-    current[
-        parts[parts.length - 1]
-    ] = value;
-}
+                                        const next =
+                                            parts[i + 1];
 
+                                        if (
+                                            current[part] === undefined ||
+                                            current[part] === null ||
+                                            typeof current[part] !== 'object'
+                                        ) {
 
-/*
-============================================================
-1. JSON
-============================================================
-*/
+                                            current[part] =
+                                                /^\d+$/.test(next)
+                                                    ? []
+                                                    : {};
+                                        }
 
-if (
-    typeof body === 'string' &&
-    body.trim().startsWith('{')
-) {
+                                        current =
+                                            current[part];
+                                    }
 
-    try {
+                                    if (parts.length) {
 
-        payload =
-            JSON.parse(body);
+                                        current[
+                                            parts[parts.length - 1]
+                                        ] = value;
+                                    }
+                                }
+                            }
 
-    } catch (e) {
+                        } catch (e) {
 
-        error(
-            'Bitrix JSON parse error:',
-            e.message
-        );
+                            error(
+                                'Bitrix request parse error:',
+                                e.message
+                            );
 
-        payload = {};
-    }
+                            payload = {};
+                        }
 
-} else {
+                        /*
+                        ==================================================
+                        BITRIX EVENT
+                        ==================================================
+                        */
 
-    /*
-    ========================================================
-    2. application/x-www-form-urlencoded
-    ========================================================
-    */
+                        log(
+                            '📥 Bitrix Connector POST:',
+                            payload.event ||
+                            'unknown'
+                        );
 
-    const params =
-        new URLSearchParams(body);
+                        /*
+                        ==================================================
+                        ONIMCONNECTORMESSAGEADD
+                        ==================================================
+                        */
 
-    for (
-        const [
-            key,
-            value
-        ] of params.entries()
-    ) {
+                        if (
+                            String(
+                                payload.event ||
+                                ''
+                            ).toUpperCase() ===
+                            'ONIMCONNECTORMESSAGEADD'
+                        ) {
 
-        setNestedFormValue(
-            payload,
-            key,
-            value
-        );
-    }
-}
+                            const data =
+                                payload.data ||
+                                {};
 
+                            const connector =
+                                data.CONNECTOR ||
+                                '';
 
-/*
-============================================================
-3. BITRIX EVENT DIAGNOSTICS
-============================================================
-*/
+                            const line =
+                                data.LINE ||
+                                '';
 
-log(
-    '📥 Bitrix Connector POST:',
-    payload.event ||
-    'unknown'
-);
+                            const messages =
+                                Array.isArray(
+                                    data.MESSAGES
+                                )
+                                    ? data.MESSAGES
+                                    : [];
 
+                            log(
+                                '🔎 Parsed Connector:',
+                                connector ||
+                                '(EMPTY)'
+                            );
 
-if (
-    String(
-        payload.event ||
-        ''
-    ).toUpperCase() ===
-    'ONIMCONNECTORMESSAGEADD'
-) {
+                            log(
+                                '🔎 Parsed Line:',
+                                line ||
+                                '(EMPTY)'
+                            );
 
-    const connector =
-        payload.data?.CONNECTOR ||
-        '';
+                            log(
+                                '🔎 Parsed Messages:',
+                                messages.length
+                            );
 
-    const line =
-        payload.data?.LINE ||
-        '';
+                            if (
+                                messages.length > 0
+                            ) {
 
-    const messages =
-        Array.isArray(
-            payload.data?.MESSAGES
-        )
-            ? payload.data.MESSAGES
-            : [];
+                                const first =
+                                    messages[0];
 
-    log(
-        '🔎 Parsed Connector:',
-        connector ||
-        '(EMPTY)'
-    );
+                                log(
+                                    '🔎 Parsed Telegram chat:',
+                                    first?.chat?.id ||
+                                    '(EMPTY)'
+                                );
 
-    log(
-        '🔎 Parsed Line:',
-        line ||
-        '(EMPTY)'
-    );
+                                log(
+                                    '🔎 Parsed Bitrix chat:',
+                                    first?.im?.chat_id ||
+                                    '(EMPTY)'
+                                );
 
-    log(
-        '🔎 Parsed Messages:',
-        messages.length
-    );
+                                log(
+                                    '🔎 Parsed message:',
+                                    first?.message?.text ||
+                                    '(EMPTY)'
+                                );
+                            }
 
-    if (messages.length > 0) {
+                            /*
+                            ------------------------------------------------
+                            Отвечаем Bitrix сразу.
+                            ------------------------------------------------
+                            */
 
-        const first =
-            messages[0];
+                            res.writeHead(
+                                200,
+                                {
+                                    'Content-Type':
+                                        'application/json; charset=utf-8'
+                                }
+                            );
 
-        log(
-            '🔎 Parsed Telegram chat:',
-            first?.chat?.id ||
-            '(EMPTY)'
-        );
+                            res.end(
+                                JSON.stringify(
+                                    {
+                                        status:
+                                            'success'
+                                    }
+                                )
+                            );
 
-        log(
-            '🔎 Parsed Bitrix chat:',
-            first?.im?.chat_id ||
-            '(EMPTY)'
-        );
+                            /*
+                            ------------------------------------------------
+                            Обрабатываем событие отдельно,
+                            чтобы Bitrix не ждал Telegram/DeepSeek.
+                            ------------------------------------------------
+                            */
 
-        log(
-            '🔎 Parsed message:',
-            first?.message?.text ||
-            '(EMPTY)'
-        );
-    }
-}
+                            setImmediate(
+                                () => {
 
+                                    processConnectorManagerEvent(
+                                        payload
+                                    ).catch(
+                                        e =>
+                                            error(
+                                                'Connector event processing:',
+                                                e.message
+                                            )
+                                    );
+
+                                }
+                            );
+
+                            return;
+                        }
+
+                        /*
+                        ==================================================
+                        OTHER BITRIX EVENTS
+                        ==================================================
+                        */
+
+                        res.writeHead(
+                            200,
+                            {
+                                'Content-Type':
+                                    'application/json; charset=utf-8'
+                            }
+                        );
+
+                        res.end(
+                            JSON.stringify(
+                                {
+                                    status:
+                                        'ok'
+                                }
+                            )
+                        );
+
+                        return;
+                    }
                         // ------------------------------------------------
                         // MANAGER MESSAGE
                         // ------------------------------------------------
