@@ -2091,165 +2091,441 @@ async function bitrixFetchPoll() {
 // 18. CONNECTOR MANAGER -> TELEGRAM
 // ============================================================
 
-async function processConnectorManagerEvent(
-    payload
-) {
+async function processConnectorManagerEvent(payload) {
+    try {
+        console.log('========================================');
+        console.log('📥 BITRIX OUTBOUND EVENT');
+        console.log('EVENT:', payload?.event || '');
+        console.log('EVENT HANDLER ID:', payload?.event_handler_id || '');
+        console.log('CONNECTOR:', payload?.data?.CONNECTOR || '');
+        console.log('LINE:', payload?.data?.LINE || '');
+        console.log(
+            'MESSAGES COUNT:',
+            Array.isArray(payload?.data?.MESSAGES)
+                ? payload.data.MESSAGES.length
+                : 0
+        );
 
-    const data =
-        payload?.data;
+        // --------------------------------------------------------
+        // Проверяем Connector
+        // --------------------------------------------------------
 
-    if (!data) {
-        return;
-    }
+        const data = payload?.data;
 
-    if (
-        String(
-            data.CONNECTOR || ''
-        ).toLowerCase() !==
-        BITRIX_CONNECTOR_ID.toLowerCase()
-    ) {
-        return;
-    }
-
-    const messages =
-        Array.isArray(
-            data.MESSAGES
-        )
-            ? data.MESSAGES
-            : [];
-
-    for (
-        const item of messages
-    ) {
-
-        const chat =
-            item.chat || {};
-
-        const message =
-            item.message || {};
-
-        const im =
-            item.im || {};
-
-        const clientId =
-            String(
-                chat.id || ''
-            );
-
-        if (!clientId) {
-            continue;
+        if (!data) {
+            console.log('❌ No data in Bitrix event');
+            console.log('FULL PAYLOAD:', JSON.stringify(payload));
+            console.log('========================================');
+            return;
         }
 
-        if (im.chat_id) {
-
-            bitrixChatMap.set(
-                String(im.chat_id),
-                clientId
-            );
-        }
-
-        const managerText =
-            String(
-                message.text || ''
-            ).trim();
-
-        if (!managerText) {
-            continue;
-        }
-
-        // ----------------------------------------------------
-        // #AI
-        // ----------------------------------------------------
+        const connector =
+            String(data.CONNECTOR || '').trim();
 
         if (
-            managerText === '#AI' ||
-            managerText === '/ai'
+            connector.toLowerCase() !==
+            String(BITRIX_CONNECTOR_ID || '').toLowerCase()
         ) {
-
-            setClientMode(
-                clientId,
-                'AI'
+            console.log(
+                '⚠️ Ignored connector:',
+                connector
             );
 
-            await sendTelegramMessage(
-                clientId,
-                '🤖 AI подключён'
+            console.log(
+                'Expected connector:',
+                BITRIX_CONNECTOR_ID
             );
 
-            await mirrorToAdmin(
-                clientId,
-                'manager',
-                'Команда: AI'
-            );
-
-            await confirmConnectorDelivery(
-                data,
-                item
-            );
-
-            continue;
+            console.log('========================================');
+            return;
         }
 
-        // ----------------------------------------------------
-        // #MANAGER
-        // ----------------------------------------------------
+        // --------------------------------------------------------
+        // Получаем сообщения
+        // --------------------------------------------------------
 
-        if (
-            managerText === '#MANAGER' ||
-            managerText === '/manager'
-        ) {
+        const messages =
+            Array.isArray(data.MESSAGES)
+                ? data.MESSAGES
+                : [];
+
+        if (!messages.length) {
+            console.log(
+                '⚠️ Bitrix event contains no MESSAGES'
+            );
+
+            console.log(
+                'FULL DATA:',
+                JSON.stringify(data)
+            );
+
+            console.log('========================================');
+            return;
+        }
+
+        // --------------------------------------------------------
+        // Обрабатываем каждое сообщение
+        // --------------------------------------------------------
+
+        for (let index = 0; index < messages.length; index++) {
+
+            const item =
+                messages[index] || {};
+
+            const im =
+                item.im || {};
+
+            const message =
+                item.message || {};
+
+            const chat =
+                item.chat || {};
+
+            const telegramChatId =
+                String(chat.id || '').trim();
+
+            const bitrixChatId =
+                String(im.chat_id || '').trim();
+
+            const bitrixMessageId =
+                String(im.message_id || '').trim();
+
+            const managerText =
+                String(message.text || '').trim();
+
+            console.log('----------------------------------------');
+            console.log(
+                `📨 BITRIX MESSAGE ${index + 1}`
+            );
+
+            console.log(
+                'External chat.id:',
+                telegramChatId || '(EMPTY)'
+            );
+
+            console.log(
+                'Bitrix im.chat_id:',
+                bitrixChatId || '(EMPTY)'
+            );
+
+            console.log(
+                'Bitrix im.message_id:',
+                bitrixMessageId || '(EMPTY)'
+            );
+
+            console.log(
+                'Message user_id:',
+                message.user_id || '(EMPTY)'
+            );
+
+            console.log(
+                'Message text:',
+                managerText || '(EMPTY)'
+            );
+
+            console.log(
+                'RAW MESSAGE:',
+                JSON.stringify(item)
+            );
+
+            // ----------------------------------------------------
+            // Без внешнего chat.id отправлять некуда
+            // ----------------------------------------------------
+
+            if (!telegramChatId) {
+                console.log(
+                    '❌ External chat.id is EMPTY'
+                );
+
+                console.log(
+                    '❌ Telegram message will NOT be sent'
+                );
+
+                continue;
+            }
+
+            if (!managerText) {
+                console.log(
+                    '⚠️ Manager message text is EMPTY'
+                );
+
+                continue;
+            }
+
+            // ----------------------------------------------------
+            // Сохраняем связь Bitrix chat -> Telegram chat
+            // ----------------------------------------------------
+
+            if (bitrixChatId) {
+                bitrixChatMap.set(
+                    bitrixChatId,
+                    telegramChatId
+                );
+
+                console.log(
+                    '🗺️ Bitrix chat map:',
+                    bitrixChatId,
+                    '=>',
+                    telegramChatId
+                );
+            }
+
+            // ----------------------------------------------------
+            // #AI
+            // ----------------------------------------------------
+
+            if (
+                managerText === '#AI' ||
+                managerText === '/ai'
+            ) {
+                setClientMode(
+                    telegramChatId,
+                    'AI'
+                );
+
+                console.log(
+                    '🤖 Switching client to AI:',
+                    telegramChatId
+                );
+
+                try {
+                    await sendTelegramMessage(
+                        telegramChatId,
+                        '🤖 AI подключён'
+                    );
+
+                    console.log(
+                        '✅ AI mode message sent to Telegram'
+                    );
+                } catch (e) {
+                    console.error(
+                        '❌ AI mode Telegram error:',
+                        e.message
+                    );
+                }
+
+                try {
+                    await mirrorToAdmin(
+                        telegramChatId,
+                        'manager',
+                        'Команда: AI'
+                    );
+                } catch (e) {
+                    console.error(
+                        '⚠️ Admin mirror error:',
+                        e.message
+                    );
+                }
+
+                await confirmConnectorDelivery(
+                    data,
+                    item
+                );
+
+                continue;
+            }
+
+            // ----------------------------------------------------
+            // #MANAGER
+            // ----------------------------------------------------
+
+            if (
+                managerText === '#MANAGER' ||
+                managerText === '/manager'
+            ) {
+                setClientMode(
+                    telegramChatId,
+                    'MANAGER'
+                );
+
+                console.log(
+                    '👤 Switching client to MANAGER:',
+                    telegramChatId
+                );
+
+                try {
+                    await sendTelegramMessage(
+                        telegramChatId,
+                        '👤 Диалог передан менеджеру'
+                    );
+
+                    console.log(
+                        '✅ MANAGER mode message sent to Telegram'
+                    );
+                } catch (e) {
+                    console.error(
+                        '❌ MANAGER mode Telegram error:',
+                        e.message
+                    );
+                }
+
+                try {
+                    await mirrorToAdmin(
+                        telegramChatId,
+                        'manager',
+                        'Команда: MANAGER'
+                    );
+                } catch (e) {
+                    console.error(
+                        '⚠️ Admin mirror error:',
+                        e.message
+                    );
+                }
+
+                await confirmConnectorDelivery(
+                    data,
+                    item
+                );
+
+                continue;
+            }
+
+            // ----------------------------------------------------
+            // ОБЫЧНЫЙ ОТВЕТ МЕНЕДЖЕРА
+            // ----------------------------------------------------
 
             setClientMode(
-                clientId,
+                telegramChatId,
                 'MANAGER'
             );
 
-            await sendTelegramMessage(
-                clientId,
-                '👤 Диалог передан менеджеру'
+            console.log(
+                '👤 Manager reply detected'
             );
 
-            await mirrorToAdmin(
-                clientId,
-                'manager',
-                'Команда: MANAGER'
+            console.log(
+                '📤 TRY TELEGRAM SEND'
             );
 
-            await confirmConnectorDelivery(
-                data,
-                item
+            console.log(
+                'Telegram chat_id:',
+                telegramChatId
             );
 
-            continue;
+            console.log(
+                'Telegram text:',
+                managerText
+            );
+
+            // ----------------------------------------------------
+            // Отправляем в Telegram
+            // ----------------------------------------------------
+
+            let telegramSent = false;
+
+            try {
+
+                const telegramResult =
+                    await sendTelegramMessage(
+                        telegramChatId,
+                        managerText
+                    );
+
+                telegramSent = true;
+
+                console.log(
+                    '✅ TELEGRAM SEND OK'
+                );
+
+                console.log(
+                    'Telegram result:',
+                    JSON.stringify(
+                        telegramResult || {}
+                    )
+                );
+
+            } catch (e) {
+
+                console.error(
+                    '❌ TELEGRAM SEND ERROR:',
+                    e.message
+                );
+
+                if (e.stack) {
+                    console.error(
+                        e.stack
+                    );
+                }
+            }
+
+            // ----------------------------------------------------
+            // Зеркало администратору
+            // ----------------------------------------------------
+
+            try {
+
+                await mirrorToAdmin(
+                    telegramChatId,
+                    'manager',
+                    managerText
+                );
+
+                console.log(
+                    '✅ Admin mirror OK'
+                );
+
+            } catch (e) {
+
+                console.error(
+                    '⚠️ Admin mirror error:',
+                    e.message
+                );
+            }
+
+            // ----------------------------------------------------
+            // Подтверждаем доставку Bitrix
+            //
+            // Bitrix требует подтверждать событие через
+            // imconnector.send.status.delivery
+            // после обработки сообщения.
+            // ----------------------------------------------------
+
+            try {
+
+                await confirmConnectorDelivery(
+                    data,
+                    item
+                );
+
+                console.log(
+                    '✅ BITRIX DELIVERY CONFIRMED'
+                );
+
+            } catch (e) {
+
+                console.error(
+                    '❌ BITRIX DELIVERY CONFIRM ERROR:',
+                    e.message
+                );
+            }
+
+            console.log(
+                'Telegram sent:',
+                telegramSent
+            );
         }
 
-        // ----------------------------------------------------
-        // ОБЫЧНЫЙ ОТВЕТ МЕНЕДЖЕРА
-        // ----------------------------------------------------
+        console.log('========================================');
 
-        setClientMode(
-            clientId,
-            'MANAGER'
+    } catch (e) {
+
+        console.error(
+            '❌ Connector event processing ERROR:',
+            e.message
         );
 
-        // Bitrix -> Telegram
-        await sendTelegramMessage(
-            clientId,
-            managerText
+        if (e.stack) {
+            console.error(
+                e.stack
+            );
+        }
+
+        console.error(
+            'PAYLOAD:',
+            JSON.stringify(payload)
         );
 
-        // Bitrix -> админский Telegram
-        await mirrorToAdmin(
-            clientId,
-            'manager',
-            managerText
-        );
-
-        // подтверждение Bitrix
-        await confirmConnectorDelivery(
-            data,
-            item
-        );
+        console.log('========================================');
     }
 }
 
