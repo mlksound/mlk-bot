@@ -43,7 +43,6 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { pipeline } = require('stream/promises');
 
 
 // ============================================================
@@ -181,14 +180,6 @@ const DATA_DIR =
         ? '/data'
         : '/tmp';
 
-// Для временных файлов (на диске)
-const TEMP_DIR =
-    path.join(DATA_DIR, 'files');
-
-fs.mkdirSync(TEMP_DIR, {
-    recursive: true
-});
-
 const AUTH_FILE =
     path.join(
         DATA_DIR,
@@ -204,8 +195,16 @@ const OFFSET_FILE =
 const BITRIX_POLL_INTERVAL_MS =
     3000;
 
-// Хранилище для метаданных файлов: fileId -> { name, path, createdAt }
-const fileStore = new Map();
+// ------------------------------------------------------------
+// ВРЕМЕННОЕ ХРАНИЛИЩЕ ФАЙЛОВ ДЛЯ BITRIX
+// ------------------------------------------------------------
+
+const BITRIX_FILE_DIR = path.join(DATA_DIR, 'mlk-bitrix-files');
+if (!fs.existsSync(BITRIX_FILE_DIR)) {
+    fs.mkdirSync(BITRIX_FILE_DIR, { recursive: true });
+}
+const bitrixTempFiles = new Map();
+
 
 // ============================================================
 // 3. LOGGING
@@ -746,7 +745,53 @@ async function sendTelegramMessage(
 
 
 // ============================================================
-// TELEGRAM MEDIA -> BITRIX FILES (Скачивание и сохранение)
+// СКАЧИВАНИЕ ФАЙЛА ИЗ TELEGRAM ДЛЯ BITRIX (БЕЗОПАСНО)
+// ============================================================
+
+async function downloadTelegramFileForBitrix(fileId, fileName) {
+    const token = crypto.randomBytes(32).toString('hex');
+    const safeName = path.basename(fileName || 'file');
+    const filePath = path.join(BITRIX_FILE_DIR, `${token}-${safeName}`);
+
+    // Получаем путь к файлу
+    const getFileResponse = await fetch(
+        `${TELEGRAM_API}/getFile?file_id=${encodeURIComponent(fileId)}`
+    );
+    if (!getFileResponse.ok) {
+        throw new Error(`Telegram getFile HTTP ${getFileResponse.status}`);
+    }
+    const getFileData = await getFileResponse.json();
+    if (!getFileData.ok || !getFileData.result?.file_path) {
+        throw new Error(`Telegram getFile failed: ${JSON.stringify(getFileData)}`);
+    }
+
+    const filePathTelegram = getFileData.result.file_path;
+    const downloadUrl = `${TELEGRAM_API}/file/bot${BOT_TOKEN}/${filePathTelegram}`;
+
+    const fileResponse = await fetch(downloadUrl);
+    if (!fileResponse.ok) {
+        throw new Error(`Telegram file download HTTP ${fileResponse.status}`);
+    }
+
+    const buffer = Buffer.from(await fileResponse.arrayBuffer());
+    fs.writeFileSync(filePath, buffer);
+
+    bitrixTempFiles.set(token, {
+        filePath,
+        fileName: safeName,
+        createdAt: Date.now()
+    });
+
+    console.log(`📦 Temporary Bitrix file prepared: ${safeName}`);
+    return {
+        token,
+        fileName: safeName
+    };
+}
+
+
+// ============================================================
+// TELEGRAM MEDIA -> BITRIX FILES (только fileId и name)
 // ============================================================
 
 async function getTelegramConnectorFiles(message) {
@@ -852,87 +897,24 @@ async function getTelegramConnectorFiles(message) {
 
         try {
 
-            const fileInfo =
-                await telegramCall(
-                    'getFile',
-                    {
-                        file_id:
-                            item.file_id
-                    }
-                );
-
-            const filePath =
-                fileInfo
-                    ?.result
-                    ?.file_path;
-
-            if (!filePath) {
-
+            // Проверяем, что file_id существует
+            if (!item.file_id) {
                 warn(
-                    '⚠️ Telegram file_path not received:',
-                    item.file_id
+                    '⚠️ Telegram media missing file_id:',
+                    item
                 );
-
                 continue;
             }
 
-            const tgFileUrl =
-                `${TELEGRAM_API}/file/bot${BOT_TOKEN}/${filePath}`;
-
-            // Скачиваем файл
-            const response =
-                await fetch(tgFileUrl);
-
-            if (!response.ok) {
-                throw new Error(
-                    `Download failed: ${response.status}`
-                );
-            }
-
-            // Генерируем уникальный ID и сохраняем на диск
-            const fileId =
-                `${Date.now()}_${crypto
-                    .randomBytes(8)
-                    .toString('hex')}_${item.name}`;
-
-            const savePath =
-                path.join(
-                    TEMP_DIR,
-                    fileId
-                );
-
-            // Сохраняем поток
-            const writeStream =
-                fs.createWriteStream(
-                    savePath
-                );
-
-            await pipeline(
-                response.body,
-                writeStream
-            );
-
-            // Метаданные
-            fileStore.set(fileId, {
-                name: item.name,
-                path: savePath,
-                createdAt: Date.now()
-            });
-
-            // Публичный URL (наш сервер)
-            const publicUrl =
-                `${PUBLIC_BASE_URL}/files/${fileId}`;
-
+            // Возвращаем только fileId и имя, скачивание будет позже
             result.push({
-                url: publicUrl,
+                fileId: item.file_id,
                 name: item.name
             });
 
             log(
-                '📎 Telegram file stored:',
-                item.name,
-                '→',
-                publicUrl
+                '📎 Telegram file prepared for Bitrix:',
+                item.name
             );
 
         } catch (e) {
@@ -1785,7 +1767,7 @@ async function setupConnector() {
 
 
 // ============================================================
-// 19. TELEGRAM -> BITRIX CONNECTOR (исправлен)
+// 19. TELEGRAM -> BITRIX CONNECTOR (С БЕЗОПАСНЫМИ ФАЙЛАМИ)
 // ============================================================
 
 async function sendToBitrixConnector(
@@ -1793,7 +1775,7 @@ async function sendToBitrixConnector(
     text,
     senderType = 'client',
     telegramUser = null,
-    files = []
+    files = []  // теперь это массив { fileId, name }
 ) {
     if (!BITRIX_CONNECTOR_ENABLED) {
         return null;
@@ -1869,44 +1851,41 @@ async function sendToBitrixConnector(
 
     /*
      * ----------------------------------------------------------
-     * FILES
-     *
-     * Bitrix connector does not reliably accept:
-     *
-     * text: ''
-     * files: [...]
-     *
-     * Поэтому для сообщения, состоящего только из файла,
-     * добавляем технический текст.
-     *
-     * Клиент его увидит в Open Line как сообщение
-     * с вложением, а сам файл будет прикреплён отдельно.
+     * FILES — безопасное преобразование
      * ----------------------------------------------------------
      */
 
-    const normalizedFiles =
+    // Сначала нормализуем входной массив (может содержать объекты с fileId и name)
+    const rawFiles =
         Array.isArray(files)
-            ? files
-                .filter(
-                    file =>
-                        file &&
-                        file.url
-                )
-                .map(
-                    file => ({
-                        url:
-                            String(
-                                file.url
-                            ),
-
-                        name:
-                            String(
-                                file.name ||
-                                'file'
-                            )
-                    })
-                )
+            ? files.filter(
+                f => f && f.fileId
+            )
             : [];
+
+    const preparedFiles = [];
+
+    for (const raw of rawFiles) {
+        try {
+            const prepared = await downloadTelegramFileForBitrix(raw.fileId, raw.name);
+            const bitrixFileUrl =
+                `${PUBLIC_BASE_URL}/bitrix-file/${encodeURIComponent(prepared.token)}`;
+            preparedFiles.push({
+                url: bitrixFileUrl,
+                name: prepared.fileName
+            });
+            log(
+                `📎 Bitrix file prepared: ${prepared.fileName} → temporary Render URL`
+            );
+        } catch (e) {
+            error(
+                '❌ Failed to prepare file for Bitrix:',
+                e.message
+            );
+        }
+    }
+
+    const normalizedFiles = preparedFiles;
 
     if (
         !messageText &&
@@ -1988,10 +1967,6 @@ async function sendToBitrixConnector(
             messageText
     };
 
-    /*
-     * Файлы добавляем только если они реально есть.
-     */
-
     if (
         normalizedFiles.length
     ) {
@@ -2001,7 +1976,7 @@ async function sendToBitrixConnector(
 
     /*
      * ----------------------------------------------------------
-     * DIAGNOSTICS
+     * DIAGNOSTICS (безопасный лог, без Telegram URL)
      * ----------------------------------------------------------
      */
 
@@ -2163,10 +2138,7 @@ async function sendToBitrixConnector(
             normalizedFiles.forEach(
                 file => {
                     log(
-                        '   📎',
-                        file.name,
-                        '→',
-                        file.url
+                        `   📎 ${file.name} → temporary Render URL`
                     );
                 }
             );
@@ -4028,7 +4000,7 @@ async function processConnectorManagerEvent(
 
 
 // ============================================================
-// 30. HTTP SERVER (добавлен endpoint /files/:id)
+// 30. HTTP SERVER (добавлен /bitrix-file/)
 // ============================================================
 
 const server =
@@ -4048,6 +4020,79 @@ const server =
                             'localhost'
                         }`
                     );
+
+
+                // ==================================================
+                // BITRIX FILE ENDPOINT (безопасная раздача)
+                // ==================================================
+
+                if (req.method === "GET" && url.pathname.startsWith("/bitrix-file/")) {
+                    try {
+                        const token = decodeURIComponent(
+                            url.pathname.substring("/bitrix-file/".length).split("?")[0]
+                        );
+
+                        const entry = bitrixTempFiles.get(token);
+
+                        if (!entry) {
+                            res.writeHead(404, {
+                                "Content-Type": "text/plain; charset=utf-8"
+                            });
+                            res.end("File not found or expired");
+                            return;
+                        }
+
+                        // Файл доступен ограниченное время (30 минут)
+                        if (Date.now() - entry.createdAt > 30 * 60 * 1000) {
+                            try {
+                                fs.unlinkSync(entry.filePath);
+                            } catch {}
+                            bitrixTempFiles.delete(token);
+                            res.writeHead(410, {
+                                "Content-Type": "text/plain; charset=utf-8"
+                            });
+                            res.end("File expired");
+                            return;
+                        }
+
+                        if (!fs.existsSync(entry.filePath)) {
+                            bitrixTempFiles.delete(token);
+                            res.writeHead(404, {
+                                "Content-Type": "text/plain; charset=utf-8"
+                            });
+                            res.end("File not found");
+                            return;
+                        }
+
+                        const stat = fs.statSync(entry.filePath);
+
+                        res.writeHead(200, {
+                            "Content-Type": "application/octet-stream",
+                            "Content-Length": stat.size,
+                            "Content-Disposition":
+                                `attachment; filename="${encodeURIComponent(entry.fileName)}"`
+                        });
+
+                        fs.createReadStream(entry.filePath).pipe(res);
+
+                        console.log(
+                            `📤 Bitrix downloaded temporary file: ${entry.fileName}`
+                        );
+
+                        return;
+
+                    } catch (error) {
+                        console.error(
+                            "❌ Bitrix temporary file error:",
+                            error.message
+                        );
+                        res.writeHead(500, {
+                            "Content-Type": "text/plain; charset=utf-8"
+                        });
+                        res.end("Internal server error");
+                        return;
+                    }
+                }
 
 
                 // ==================================================
@@ -4102,91 +4147,6 @@ const server =
                             }
                         )
                     );
-
-                    return;
-                }
-
-
-                // ==================================================
-                // FILES ENDPOINT (для Bitrix)
-                // ==================================================
-
-                if (
-                    url.pathname.startsWith(
-                        '/files/'
-                    )
-                ) {
-
-                    const fileId =
-                        url.pathname
-                            .replace(
-                                '/files/',
-                                ''
-                            )
-                            .trim();
-
-                    const meta =
-                        fileStore.get(
-                            fileId
-                        );
-
-                    if (
-                        !meta ||
-                        !fs.existsSync(
-                            meta.path
-                        )
-                    ) {
-
-                        res.writeHead(
-                            404,
-                            {
-                                'Content-Type':
-                                    'text/plain'
-                            }
-                        );
-
-                        res.end(
-                            'File not found'
-                        );
-
-                        return;
-                    }
-
-                    // Отдаём файл
-                    const stat =
-                        fs.statSync(
-                            meta.path
-                        );
-
-                    res.writeHead(
-                        200,
-                        {
-                            'Content-Type':
-                                'application/octet-stream',
-
-                            'Content-Disposition':
-                                `attachment; filename="${encodeURIComponent(
-                                    meta.name
-                                )}"`,
-
-                            'Content-Length':
-                                stat.size
-                        }
-                    );
-
-                    const readStream =
-                        fs.createReadStream(
-                            meta.path
-                        );
-
-                    await pipeline(
-                        readStream,
-                        res
-                    );
-
-                    // Удаляем файл после отправки (опционально)
-                    // fileStore.delete(fileId);
-                    // fs.unlinkSync(meta.path);
 
                     return;
                 }
