@@ -1732,8 +1732,10 @@ async function setupConnector() {
 }
 
 
+```js
 // ============================================================
-// 19. TELEGRAM -> BITRIX CONNECTOR (ОБНОВЛЕНО)
+// 19. TELEGRAM -> BITRIX CONNECTOR
+// TEXT + FILES
 // ============================================================
 
 async function sendToBitrixConnector(
@@ -1748,12 +1750,11 @@ async function sendToBitrixConnector(
     }
 
     /*
-     * Для Telegram -> Bitrix обязательно нужен OAuth.
-     *
-     * Если OAuth уже есть — работаем сразу.
-     * Если OAuth ещё не загружен после рестарта Render,
-     * пробуем восстановить его через setupConnector().
+     * ----------------------------------------------------------
+     * OAUTH
+     * ----------------------------------------------------------
      */
+
     if (!bitrixAuth?.access_token) {
         warn(
             '⚠️ Connector OAuth unavailable — trying connector setup'
@@ -1769,9 +1770,6 @@ async function sendToBitrixConnector(
         }
     }
 
-    /*
-     * После setupConnector() проверяем OAuth ещё раз.
-     */
     if (!bitrixAuth?.access_token) {
         warn(
             '⚠️ Connector OAuth still unavailable'
@@ -1781,8 +1779,11 @@ async function sendToBitrixConnector(
     }
 
     /*
-     * Open Line должен быть известен.
+     * ----------------------------------------------------------
+     * OPEN LINE
+     * ----------------------------------------------------------
      */
+
     if (!bitrixOpenLineId) {
         try {
             await findOpenLine();
@@ -1805,28 +1806,34 @@ async function sendToBitrixConnector(
     }
 
     /*
-     * Нормализуем текст.
-     *
-     * Bitrix требует либо text, либо files.
+     * ----------------------------------------------------------
+     * TEXT
+     * ----------------------------------------------------------
      */
-    const messageText =
+
+    let messageText =
         text !== undefined &&
         text !== null
-            ? String(text)
+            ? String(text).trim()
             : '';
 
     /*
-     * Нормализуем файлы.
+     * ----------------------------------------------------------
+     * FILES
      *
-     * imconnector.send.messages принимает:
+     * Bitrix connector does not reliably accept:
      *
-     * files: [
-     *   {
-     *      url: 'PUBLIC_URL',
-     *      name: 'filename'
-     *   }
-     * ]
+     * text: ''
+     * files: [...]
+     *
+     * Поэтому для сообщения, состоящего только из файла,
+     * добавляем технический текст.
+     *
+     * Клиент его увидит в Open Line как сообщение
+     * с вложением, а сам файл будет прикреплён отдельно.
+     * ----------------------------------------------------------
      */
+
     const normalizedFiles =
         Array.isArray(files)
             ? files
@@ -1841,6 +1848,7 @@ async function sendToBitrixConnector(
                             String(
                                 file.url
                             ),
+
                         name:
                             String(
                                 file.name ||
@@ -1850,9 +1858,20 @@ async function sendToBitrixConnector(
                 )
             : [];
 
+    if (
+        !messageText &&
+        normalizedFiles.length
+    ) {
+        messageText =
+            '📎 Вложение из Telegram';
+    }
+
     /*
-     * Нельзя отправлять пустое сообщение.
+     * ----------------------------------------------------------
+     * EMPTY MESSAGE
+     * ----------------------------------------------------------
      */
+
     if (
         !messageText &&
         !normalizedFiles.length
@@ -1865,35 +1884,11 @@ async function sendToBitrixConnector(
     }
 
     /*
-     * Формируем message.
-     *
-     * Для файлов text может быть пустым —
-     * Bitrix допускает message.files без text.
+     * ----------------------------------------------------------
+     * USER
+     * ----------------------------------------------------------
      */
-    const message = {
-        id:
-            `tg-${clientId}-${Date.now()}`,
 
-        date:
-            Math.floor(
-                Date.now() / 1000
-            ),
-
-        text:
-            messageText
-    };
-
-    if (
-        normalizedFiles.length
-    ) {
-        message.files =
-            normalizedFiles;
-    }
-
-    /*
-     * Для клиентских сообщений user.id —
-     * внешний Telegram ID.
-     */
     const user = {
         id:
             String(clientId),
@@ -1923,8 +1918,43 @@ async function sendToBitrixConnector(
     }
 
     /*
-     * Диагностика перед отправкой.
+     * ----------------------------------------------------------
+     * MESSAGE
+     * ----------------------------------------------------------
      */
+
+    const message = {
+        id:
+            `tg-${clientId}-${Date.now()}-${crypto
+                .randomBytes(4)
+                .toString('hex')}`,
+
+        date:
+            Math.floor(
+                Date.now() / 1000
+            ),
+
+        text:
+            messageText
+    };
+
+    /*
+     * Файлы добавляем только если они реально есть.
+     */
+
+    if (
+        normalizedFiles.length
+    ) {
+        message.files =
+            normalizedFiles;
+    }
+
+    /*
+     * ----------------------------------------------------------
+     * DIAGNOSTICS
+     * ----------------------------------------------------------
+     */
+
     log(
         '📤 SEND TO BITRIX:',
         JSON.stringify({
@@ -1946,6 +1976,12 @@ async function sendToBitrixConnector(
                 )
         })
     );
+
+    /*
+     * ----------------------------------------------------------
+     * SEND
+     * ----------------------------------------------------------
+     */
 
     try {
         const result =
@@ -1983,8 +2019,11 @@ async function sendToBitrixConnector(
             );
 
         /*
-         * Сохраняем внутренний Bitrix chat_id.
+         * ------------------------------------------------------
+         * BITRIX CHAT MAP
+         * ------------------------------------------------------
          */
+
         try {
             const item =
                 result
@@ -2017,6 +2056,7 @@ async function sendToBitrixConnector(
                     )
                 );
             }
+
         } catch (e) {
             warn(
                 '⚠️ Bitrix chat mapping error:',
@@ -2025,8 +2065,11 @@ async function sendToBitrixConnector(
         }
 
         /*
-         * Проверяем фактический результат Bitrix.
+         * ------------------------------------------------------
+         * CHECK RESULT
+         * ------------------------------------------------------
          */
+
         const resultItem =
             result
                 ?.result
@@ -2048,6 +2091,12 @@ async function sendToBitrixConnector(
 
             return result;
         }
+
+        /*
+         * ------------------------------------------------------
+         * SUCCESS
+         * ------------------------------------------------------
+         */
 
         log(
             '✅ BITRIX DELIVERY CONFIRMED'
@@ -2076,17 +2125,18 @@ async function sendToBitrixConnector(
         return result;
 
     } catch (e) {
+
         error(
             '❌ SEND TO BITRIX ERROR:',
             e.message
         );
 
         /*
-         * Если OAuth протух/потерялся,
-         * помечаем его как недоступный,
-         * чтобы следующий вызов попытался
-         * восстановить соединение.
+         * Если OAuth протух —
+         * заставляем следующий запрос
+         * повторить авторизацию.
          */
+
         if (
             /oauth|auth|token|access/i.test(
                 String(
@@ -2098,11 +2148,6 @@ async function sendToBitrixConnector(
                 '⚠️ Bitrix OAuth appears unavailable'
             );
 
-            /*
-             * Не удаляем остальные данные.
-             * Просто заставляем следующий вызов
-             * повторно пройти setupConnector().
-             */
             if (
                 bitrixAuth
             ) {
