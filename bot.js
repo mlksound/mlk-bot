@@ -43,6 +43,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { pipeline } = require('stream/promises');
 
 
 // ============================================================
@@ -180,6 +181,14 @@ const DATA_DIR =
         ? '/data'
         : '/tmp';
 
+// Для временных файлов (на диске)
+const TEMP_DIR =
+    path.join(DATA_DIR, 'files');
+
+fs.mkdirSync(TEMP_DIR, {
+    recursive: true
+});
+
 const AUTH_FILE =
     path.join(
         DATA_DIR,
@@ -195,6 +204,8 @@ const OFFSET_FILE =
 const BITRIX_POLL_INTERVAL_MS =
     3000;
 
+// Хранилище для метаданных файлов: fileId -> { name, path, createdAt }
+const fileStore = new Map();
 
 // ============================================================
 // 3. LOGGING
@@ -735,7 +746,7 @@ async function sendTelegramMessage(
 
 
 // ============================================================
-// TELEGRAM MEDIA -> BITRIX FILES
+// TELEGRAM MEDIA -> BITRIX FILES (Скачивание и сохранение)
 // ============================================================
 
 async function getTelegramConnectorFiles(message) {
@@ -865,22 +876,63 @@ async function getTelegramConnectorFiles(message) {
                 continue;
             }
 
-            /*
-             Bitrix должен иметь возможность
-             скачать файл напрямую.
-            */
-
-            const url =
+            const tgFileUrl =
                 `${TELEGRAM_API}/file/bot${BOT_TOKEN}/${filePath}`;
 
+            // Скачиваем файл
+            const response =
+                await fetch(tgFileUrl);
+
+            if (!response.ok) {
+                throw new Error(
+                    `Download failed: ${response.status}`
+                );
+            }
+
+            // Генерируем уникальный ID и сохраняем на диск
+            const fileId =
+                `${Date.now()}_${crypto
+                    .randomBytes(8)
+                    .toString('hex')}_${item.name}`;
+
+            const savePath =
+                path.join(
+                    TEMP_DIR,
+                    fileId
+                );
+
+            // Сохраняем поток
+            const writeStream =
+                fs.createWriteStream(
+                    savePath
+                );
+
+            await pipeline(
+                response.body,
+                writeStream
+            );
+
+            // Метаданные
+            fileStore.set(fileId, {
+                name: item.name,
+                path: savePath,
+                createdAt: Date.now()
+            });
+
+            // Публичный URL (наш сервер)
+            const publicUrl =
+                `${PUBLIC_BASE_URL}/files/${fileId}`;
+
             result.push({
-                url,
+                url: publicUrl,
                 name: item.name
             });
 
             log(
-                '📎 Telegram file prepared for Bitrix:',
-                item.name
+                '📎 Telegram file stored:',
+                item.name,
+                '→',
+                publicUrl
             );
 
         } catch (e) {
@@ -1733,7 +1785,7 @@ async function setupConnector() {
 
 
 // ============================================================
-// 19. TELEGRAM -> BITRIX CONNECTOR (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+// 19. TELEGRAM -> BITRIX CONNECTOR (исправлен)
 // ============================================================
 
 async function sendToBitrixConnector(
@@ -3976,7 +4028,7 @@ async function processConnectorManagerEvent(
 
 
 // ============================================================
-// 30. HTTP SERVER
+// 30. HTTP SERVER (добавлен endpoint /files/:id)
 // ============================================================
 
 const server =
@@ -4050,6 +4102,91 @@ const server =
                             }
                         )
                     );
+
+                    return;
+                }
+
+
+                // ==================================================
+                // FILES ENDPOINT (для Bitrix)
+                // ==================================================
+
+                if (
+                    url.pathname.startsWith(
+                        '/files/'
+                    )
+                ) {
+
+                    const fileId =
+                        url.pathname
+                            .replace(
+                                '/files/',
+                                ''
+                            )
+                            .trim();
+
+                    const meta =
+                        fileStore.get(
+                            fileId
+                        );
+
+                    if (
+                        !meta ||
+                        !fs.existsSync(
+                            meta.path
+                        )
+                    ) {
+
+                        res.writeHead(
+                            404,
+                            {
+                                'Content-Type':
+                                    'text/plain'
+                            }
+                        );
+
+                        res.end(
+                            'File not found'
+                        );
+
+                        return;
+                    }
+
+                    // Отдаём файл
+                    const stat =
+                        fs.statSync(
+                            meta.path
+                        );
+
+                    res.writeHead(
+                        200,
+                        {
+                            'Content-Type':
+                                'application/octet-stream',
+
+                            'Content-Disposition':
+                                `attachment; filename="${encodeURIComponent(
+                                    meta.name
+                                )}"`,
+
+                            'Content-Length':
+                                stat.size
+                        }
+                    );
+
+                    const readStream =
+                        fs.createReadStream(
+                            meta.path
+                        );
+
+                    await pipeline(
+                        readStream,
+                        res
+                    );
+
+                    // Удаляем файл после отправки (опционально)
+                    // fileStore.delete(fileId);
+                    // fs.unlinkSync(meta.path);
 
                     return;
                 }
