@@ -734,6 +734,305 @@ async function sendTelegramMessage(
 }
 
 
+// ============================================================
+// TELEGRAM MEDIA -> BITRIX FILES
+// ============================================================
+
+async function getTelegramConnectorFiles(message) {
+
+    const result = [];
+
+    if (!message) {
+        return result;
+    }
+
+    const media = [];
+
+    // PHOTO
+    if (
+        Array.isArray(message.photo) &&
+        message.photo.length
+    ) {
+        const photo =
+            message.photo[
+                message.photo.length - 1
+            ];
+
+        if (photo?.file_id) {
+            media.push({
+                file_id: photo.file_id,
+                name: 'photo.jpg'
+            });
+        }
+    }
+
+    // DOCUMENT
+    if (
+        message.document?.file_id
+    ) {
+        media.push({
+            file_id:
+                message.document.file_id,
+
+            name:
+                message.document.file_name ||
+                'document'
+        });
+    }
+
+    // VIDEO
+    if (
+        message.video?.file_id
+    ) {
+        media.push({
+            file_id:
+                message.video.file_id,
+
+            name:
+                message.video.file_name ||
+                'video.mp4'
+        });
+    }
+
+    // AUDIO
+    if (
+        message.audio?.file_id
+    ) {
+        media.push({
+            file_id:
+                message.audio.file_id,
+
+            name:
+                message.audio.file_name ||
+                'audio.mp3'
+        });
+    }
+
+    // VOICE
+    if (
+        message.voice?.file_id
+    ) {
+        media.push({
+            file_id:
+                message.voice.file_id,
+
+            name:
+                'voice.ogg'
+        });
+    }
+
+    // ANIMATION / GIF
+    if (
+        message.animation?.file_id
+    ) {
+        media.push({
+            file_id:
+                message.animation.file_id,
+
+            name:
+                message.animation.file_name ||
+                'animation.gif'
+        });
+    }
+
+    for (
+        const item of media
+    ) {
+
+        try {
+
+            const fileInfo =
+                await telegramCall(
+                    'getFile',
+                    {
+                        file_id:
+                            item.file_id
+                    }
+                );
+
+            const filePath =
+                fileInfo
+                    ?.result
+                    ?.file_path;
+
+            if (!filePath) {
+
+                warn(
+                    '⚠️ Telegram file_path not received:',
+                    item.file_id
+                );
+
+                continue;
+            }
+
+            /*
+             Bitrix должен иметь возможность
+             скачать файл напрямую.
+            */
+
+            const url =
+                `${TELEGRAM_API}/file/bot${BOT_TOKEN}/${filePath}`;
+
+            result.push({
+                url,
+                name: item.name
+            });
+
+            log(
+                '📎 Telegram file prepared for Bitrix:',
+                item.name
+            );
+
+        } catch (e) {
+
+            error(
+                '❌ Telegram file preparation error:',
+                e.message
+            );
+        }
+    }
+
+    return result;
+}
+
+
+// ============================================================
+// BITRIX FILE -> TELEGRAM
+// ============================================================
+
+async function sendTelegramFile(
+    chatId,
+    fileUrl,
+    fileName = 'file'
+) {
+
+    if (!fileUrl) {
+        return null;
+    }
+
+    const lowerName =
+        String(
+            fileName
+        ).toLowerCase();
+
+    /*
+     Изображения отправляем
+     как фотографии.
+    */
+
+    const imageExtensions = [
+        '.jpg',
+        '.jpeg',
+        '.png',
+        '.gif',
+        '.webp',
+        '.bmp'
+    ];
+
+    const isImage =
+        imageExtensions.some(
+            ext =>
+                lowerName.endsWith(
+                    ext
+                )
+        );
+
+    if (isImage) {
+
+        log(
+            '📷 Bitrix -> Telegram photo:',
+            fileName
+        );
+
+        return telegramCall(
+            'sendPhoto',
+            {
+                chat_id:
+                    String(chatId),
+
+                photo:
+                    fileUrl
+            }
+        );
+    }
+
+    /*
+     Видео.
+    */
+
+    if (
+        lowerName.endsWith('.mp4') ||
+        lowerName.endsWith('.mov') ||
+        lowerName.endsWith('.m4v')
+    ) {
+
+        log(
+            '🎥 Bitrix -> Telegram video:',
+            fileName
+        );
+
+        return telegramCall(
+            'sendVideo',
+            {
+                chat_id:
+                    String(chatId),
+
+                video:
+                    fileUrl
+            }
+        );
+    }
+
+    /*
+     Audio.
+    */
+
+    if (
+        lowerName.endsWith('.mp3') ||
+        lowerName.endsWith('.wav') ||
+        lowerName.endsWith('.m4a')
+    ) {
+
+        log(
+            '🎵 Bitrix -> Telegram audio:',
+            fileName
+        );
+
+        return telegramCall(
+            'sendAudio',
+            {
+                chat_id:
+                    String(chatId),
+
+                audio:
+                    fileUrl
+            }
+        );
+    }
+
+    /*
+     Всё остальное —
+     document.
+    */
+
+    log(
+        '📎 Bitrix -> Telegram document:',
+        fileName
+    );
+
+    return telegramCall(
+        'sendDocument',
+        {
+            chat_id:
+                String(chatId),
+
+            document:
+                fileUrl
+        }
+    );
+}
+
+
 async function answerTelegramCallback(
     callbackQueryId,
     text = ''
@@ -1434,14 +1733,15 @@ async function setupConnector() {
 
 
 // ============================================================
-// 19. TELEGRAM -> BITRIX CONNECTOR
+// 19. TELEGRAM -> BITRIX CONNECTOR (ОБНОВЛЕНО)
 // ============================================================
 
 async function sendToBitrixConnector(
     clientId,
     text,
     senderType = 'client',
-    telegramUser = null
+    telegramUser = null,
+    files = []
 ) {
 
     if (
@@ -1496,6 +1796,83 @@ async function sendToBitrixConnector(
             .randomBytes(4)
             .toString('hex');
 
+    const message = {
+
+        id:
+            messageId,
+
+        date:
+            Math.floor(
+                Date.now() / 1000
+            )
+    };
+
+    /*
+     Bitrix требует text ИЛИ files.
+    */
+
+    const cleanText =
+        String(
+            text || ''
+        ).trim();
+
+    if (cleanText) {
+
+        message.text =
+            cleanText;
+    }
+
+    if (
+        Array.isArray(files) &&
+        files.length
+    ) {
+
+        message.files =
+            files
+                .filter(
+                    file =>
+                        file &&
+                        file.url
+                )
+                .map(
+                    file => ({
+                        url:
+                            String(
+                                file.url
+                            ),
+
+                        name:
+                            String(
+                                file.name ||
+                                'file'
+                            )
+                    })
+                );
+    }
+
+    if (
+        !message.text &&
+        !message.files?.length
+    ) {
+
+        warn(
+            '⚠️ Bitrix message skipped: no text and no files'
+        );
+
+        return null;
+    }
+
+    log(
+        '📤 SEND TO BITRIX:',
+        JSON.stringify({
+            clientId,
+            senderType,
+            text: message.text || '',
+            files:
+                message.files?.length || 0
+        })
+    );
+
     const result =
         await bitrixOAuthCall(
             'imconnector.send.messages',
@@ -1512,18 +1889,7 @@ async function sendToBitrixConnector(
                     {
                         user,
 
-                        message: {
-                            id:
-                                messageId,
-
-                            date:
-                                Math.floor(
-                                    Date.now() / 1000
-                                ),
-
-                            text:
-                                String(text)
-                        },
+                        message,
 
                         chat: {
                             id:
@@ -1564,10 +1930,23 @@ async function sendToBitrixConnector(
 
                 String(clientId)
             );
+
+            log(
+                '🗺️ Bitrix chat map:',
+                String(
+                    item.session.CHAT_ID
+                ),
+                '=>',
+                String(clientId)
+            );
         }
 
     } catch (e) {
-        // ignore mapping error
+
+        warn(
+            '⚠️ Bitrix chat mapping error:',
+            e.message
+        );
     }
 
     return result;
@@ -1662,7 +2041,7 @@ async function mirrorToAdmin(
 
 
 // ============================================================
-// 21. TELEGRAM CLIENT MESSAGE
+// 21. TELEGRAM CLIENT MESSAGE (ОБНОВЛЕНО)
 // ============================================================
 
 async function processTelegramClientMessage(
@@ -1670,8 +2049,7 @@ async function processTelegramClientMessage(
 ) {
 
     if (
-        !message?.chat?.id ||
-        !message.text
+        !message?.chat?.id
     ) {
         return;
     }
@@ -1683,10 +2061,29 @@ async function processTelegramClientMessage(
 
     const text =
         String(
-            message.text
+            message.text ||
+            message.caption ||
+            ''
         ).trim();
 
-    if (!text) {
+    const files =
+        await getTelegramConnectorFiles(
+            message
+        );
+
+    const hasMedia =
+        Array.isArray(files) &&
+        files.length > 0;
+
+    /*
+     Нет ни текста, ни файла —
+     ничего обрабатывать.
+    */
+
+    if (
+        !text &&
+        !hasMedia
+    ) {
         return;
     }
 
@@ -1702,17 +2099,39 @@ async function processTelegramClientMessage(
         '';
 
     log(
-        `📨 Client ${clientId}: ${text}`
+        `📨 Client ${clientId}: ${
+            text ||
+            '[MEDIA]'
+        }`
     );
 
-    await mirrorToAdmin(
-        clientId,
-        'client',
-        text
-    );
+    if (hasMedia) {
+
+        log(
+            '📎 Telegram media count:',
+            files.length
+        );
+    }
 
     /*
-     Telegram -> Bitrix
+     ------------------------------------------------------------
+     TELEGRAM -> ADMIN
+     ------------------------------------------------------------
+    */
+
+    if (text) {
+
+        await mirrorToAdmin(
+            clientId,
+            'client',
+            text
+        );
+    }
+
+    /*
+     ------------------------------------------------------------
+     TELEGRAM -> BITRIX
+     ------------------------------------------------------------
     */
 
     try {
@@ -1721,7 +2140,8 @@ async function processTelegramClientMessage(
             clientId,
             text,
             'client',
-            message.from
+            message.from,
+            files
         );
 
     } catch (e) {
@@ -1733,7 +2153,9 @@ async function processTelegramClientMessage(
     }
 
     /*
+     ------------------------------------------------------------
      MANAGER MODE
+     ------------------------------------------------------------
     */
 
     if (
@@ -1749,7 +2171,26 @@ async function processTelegramClientMessage(
     }
 
     /*
+     ------------------------------------------------------------
+     Если пришёл только файл —
+     AI не пытаемся заставлять анализировать
+     файл как текст.
+     ------------------------------------------------------------
+    */
+
+    if (!text) {
+
+        log(
+            '⏸ AI skipped: media without text'
+        );
+
+        return;
+    }
+
+    /*
+     ------------------------------------------------------------
      AI
+     ------------------------------------------------------------
     */
 
     try {
@@ -1776,7 +2217,8 @@ async function processTelegramClientMessage(
                 clientId,
                 answer,
                 'ai',
-                message.from
+                message.from,
+                []
             );
 
         } catch (e) {
@@ -1943,7 +2385,8 @@ async function processTelegramAdminMessage(
             {
                 first_name:
                     'Менеджер'
-            }
+            },
+            []
         );
 
     } catch (e) {
@@ -2683,7 +3126,7 @@ async function confirmConnectorDelivery(
 
 
 // ============================================================
-// 29. BITRIX -> TELEGRAM
+// 29. BITRIX -> TELEGRAM (ОБНОВЛЕНО: ДОБАВЛЕНА ОБРАБОТКА ФАЙЛОВ)
 //
 // Это основной исправленный обработчик.
 //
@@ -2901,6 +3344,13 @@ async function processConnectorManagerEvent(
                     ''
                 ).trim();
 
+            const managerFiles =
+                Array.isArray(
+                    message.files
+                )
+                    ? message.files
+                    : [];
+
 
             console.log(
                 '----------------------------------------'
@@ -2953,6 +3403,12 @@ async function processConnectorManagerEvent(
             );
 
             console.log(
+                'Manager files:',
+                managerFiles.length ||
+                    '(EMPTY)'
+            );
+
+            console.log(
                 'RAW MESSAGE:',
                 JSON.stringify(
                     item
@@ -2986,16 +3442,17 @@ async function processConnectorManagerEvent(
 
             /*
              ---------------------------------------------------
-             Без текста отправлять нечего.
+             Без текста и без файлов — нечего отправлять.
              ---------------------------------------------------
             */
 
             if (
-                !managerText
+                !managerText &&
+                !managerFiles.length
             ) {
 
                 warn(
-                    '⚠️ Manager message text is EMPTY'
+                    '⚠️ Manager message has no text and no files'
                 );
 
                 continue;
@@ -3118,7 +3575,7 @@ async function processConnectorManagerEvent(
 
             /*
              ===================================================
-             ОБЫЧНЫЙ ОТВЕТ МЕНЕДЖЕРА
+             ОБЫЧНЫЙ ОТВЕТ МЕНЕДЖЕРА (ТЕКСТ + ФАЙЛЫ)
              ===================================================
             */
 
@@ -3145,50 +3602,80 @@ async function processConnectorManagerEvent(
                 managerText
             );
 
+            console.log(
+                'Telegram files:',
+                managerFiles.length
+            );
 
-            /*
-             ---------------------------------------------------
-             TELEGRAM SEND
-             ---------------------------------------------------
-            */
 
-            let telegramSent =
-                false;
+            // -------------------------------------------------------
+            // Bitrix -> Telegram: TEXT
+            // -------------------------------------------------------
 
-            try {
+            if (managerText) {
 
-                const telegramResult =
-                    await sendTelegramMessage(
-                        telegramChatId,
-                        managerText
-                    );
+                await sendTelegramMessage(
+                    telegramChatId,
+                    managerText
+                );
+            }
 
-                telegramSent =
-                    true;
 
-                console.log(
-                    '✅ TELEGRAM SEND OK'
+            // -------------------------------------------------------
+            // Bitrix -> Telegram: FILES
+            // -------------------------------------------------------
+
+            if (
+                managerFiles.length
+            ) {
+
+                log(
+                    '📎 Bitrix files:',
+                    managerFiles.length
                 );
 
-                console.log(
-                    'Telegram result:',
-                    JSON.stringify(
-                        telegramResult || {}
-                    )
-                );
+                for (
+                    const file of managerFiles
+                ) {
 
-            } catch (e) {
+                    try {
 
-                console.error(
-                    '❌ TELEGRAM SEND ERROR:',
-                    e.message
-                );
+                        const fileUrl =
+                            String(
+                                file?.url ||
+                                file?.link ||
+                                ''
+                            ).trim();
 
-                if (e.stack) {
+                        const fileName =
+                            String(
+                                file?.name ||
+                                'file'
+                            ).trim();
 
-                    console.error(
-                        e.stack
-                    );
+                        if (!fileUrl) {
+
+                            warn(
+                                '⚠️ Bitrix file has no URL:',
+                                fileName
+                            );
+
+                            continue;
+                        }
+
+                        await sendTelegramFile(
+                            telegramChatId,
+                            fileUrl,
+                            fileName
+                        );
+
+                    } catch (e) {
+
+                        error(
+                            '❌ Bitrix -> Telegram file error:',
+                            e.message
+                        );
+                    }
                 }
             }
 
@@ -3204,7 +3691,8 @@ async function processConnectorManagerEvent(
                 await mirrorToAdmin(
                     telegramChatId,
                     'manager',
-                    managerText
+                    managerText ||
+                        '[файл]'
                 );
 
                 console.log(
@@ -3244,7 +3732,7 @@ async function processConnectorManagerEvent(
 
             console.log(
                 'Telegram sent:',
-                telegramSent
+                true
             );
         }
 
