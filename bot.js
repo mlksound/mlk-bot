@@ -1743,6 +1743,377 @@ async function sendToBitrixConnector(
     telegramUser = null,
     files = []
 ) {
+    if (!BITRIX_CONNECTOR_ENABLED) {
+        return null;
+    }
+
+    /*
+     * Для Telegram -> Bitrix обязательно нужен OAuth.
+     *
+     * Если OAuth уже есть — работаем сразу.
+     * Если OAuth ещё не загружен после рестарта Render,
+     * пробуем восстановить его через setupConnector().
+     */
+    if (!bitrixAuth?.access_token) {
+        warn(
+            '⚠️ Connector OAuth unavailable — trying connector setup'
+        );
+
+        try {
+            await setupConnector();
+        } catch (e) {
+            warn(
+                '⚠️ Connector setup retry failed:',
+                e.message
+            );
+        }
+    }
+
+    /*
+     * После setupConnector() проверяем OAuth ещё раз.
+     */
+    if (!bitrixAuth?.access_token) {
+        warn(
+            '⚠️ Connector OAuth still unavailable'
+        );
+
+        return null;
+    }
+
+    /*
+     * Open Line должен быть известен.
+     */
+    if (!bitrixOpenLineId) {
+        try {
+            await findOpenLine();
+        } catch (e) {
+            error(
+                '❌ Unable to find Bitrix Open Line:',
+                e.message
+            );
+
+            return null;
+        }
+    }
+
+    if (!bitrixOpenLineId) {
+        error(
+            '❌ Bitrix Open Line ID is empty'
+        );
+
+        return null;
+    }
+
+    /*
+     * Нормализуем текст.
+     *
+     * Bitrix требует либо text, либо files.
+     */
+    const messageText =
+        text !== undefined &&
+        text !== null
+            ? String(text)
+            : '';
+
+    /*
+     * Нормализуем файлы.
+     *
+     * imconnector.send.messages принимает:
+     *
+     * files: [
+     *   {
+     *      url: 'PUBLIC_URL',
+     *      name: 'filename'
+     *   }
+     * ]
+     */
+    const normalizedFiles =
+        Array.isArray(files)
+            ? files
+                .filter(
+                    file =>
+                        file &&
+                        file.url
+                )
+                .map(
+                    file => ({
+                        url:
+                            String(
+                                file.url
+                            ),
+                        name:
+                            String(
+                                file.name ||
+                                'file'
+                            )
+                    })
+                )
+            : [];
+
+    /*
+     * Нельзя отправлять пустое сообщение.
+     */
+    if (
+        !messageText &&
+        !normalizedFiles.length
+    ) {
+        warn(
+            '⚠️ Bitrix message skipped: no text and no files'
+        );
+
+        return null;
+    }
+
+    /*
+     * Формируем message.
+     *
+     * Для файлов text может быть пустым —
+     * Bitrix допускает message.files без text.
+     */
+    const message = {
+        id:
+            `tg-${clientId}-${Date.now()}`,
+
+        date:
+            Math.floor(
+                Date.now() / 1000
+            ),
+
+        text:
+            messageText
+    };
+
+    if (
+        normalizedFiles.length
+    ) {
+        message.files =
+            normalizedFiles;
+    }
+
+    /*
+     * Для клиентских сообщений user.id —
+     * внешний Telegram ID.
+     */
+    const user = {
+        id:
+            String(clientId),
+
+        name:
+            telegramUser?.first_name
+                ? String(
+                    telegramUser.first_name
+                )
+                : 'Telegram user'
+    };
+
+    if (
+        telegramUser?.last_name
+    ) {
+        user.last_name =
+            String(
+                telegramUser.last_name
+            );
+    }
+
+    if (
+        telegramUser?.username
+    ) {
+        user.url =
+            `https://t.me/${telegramUser.username}`;
+    }
+
+    /*
+     * Диагностика перед отправкой.
+     */
+    log(
+        '📤 SEND TO BITRIX:',
+        JSON.stringify({
+            clientId:
+                String(clientId),
+
+            senderType,
+
+            text:
+                messageText,
+
+            files:
+                normalizedFiles.length,
+
+            fileNames:
+                normalizedFiles.map(
+                    file =>
+                        file.name
+                )
+        })
+    );
+
+    try {
+        const result =
+            await bitrixOAuthCall(
+                'imconnector.send.messages',
+                {
+                    CONNECTOR:
+                        BITRIX_CONNECTOR_ID,
+
+                    LINE:
+                        Number(
+                            bitrixOpenLineId
+                        ),
+
+                    MESSAGES: [
+                        {
+                            user,
+
+                            message,
+
+                            chat: {
+                                id:
+                                    String(
+                                        clientId
+                                    ),
+
+                                url:
+                                    telegramUser?.username
+                                        ? `https://t.me/${telegramUser.username}`
+                                        : 'https://t.me/'
+                            }
+                        }
+                    ]
+                }
+            );
+
+        /*
+         * Сохраняем внутренний Bitrix chat_id.
+         */
+        try {
+            const item =
+                result
+                    ?.result
+                    ?.DATA
+                    ?.RESULT
+                    ?.[0];
+
+            if (
+                item?.session?.CHAT_ID
+            ) {
+                bitrixChatMap.set(
+                    String(
+                        item.session.CHAT_ID
+                    ),
+
+                    String(
+                        clientId
+                    )
+                );
+
+                log(
+                    '🗺️ Bitrix chat map:',
+                    String(
+                        item.session.CHAT_ID
+                    ),
+                    '=>',
+                    String(
+                        clientId
+                    )
+                );
+            }
+        } catch (e) {
+            warn(
+                '⚠️ Bitrix chat mapping error:',
+                e.message
+            );
+        }
+
+        /*
+         * Проверяем фактический результат Bitrix.
+         */
+        const resultItem =
+            result
+                ?.result
+                ?.DATA
+                ?.RESULT
+                ?.[0];
+
+        if (
+            resultItem &&
+            resultItem.SUCCESS === false
+        ) {
+            error(
+                '❌ BITRIX DELIVERY FAILED:',
+                JSON.stringify(
+                    resultItem.ERRORS ||
+                    resultItem
+                )
+            );
+
+            return result;
+        }
+
+        log(
+            '✅ BITRIX DELIVERY CONFIRMED'
+        );
+
+        if (
+            normalizedFiles.length
+        ) {
+            log(
+                '📎 Files sent to Bitrix:',
+                normalizedFiles.length
+            );
+
+            normalizedFiles.forEach(
+                file => {
+                    log(
+                        '   📎',
+                        file.name,
+                        '→',
+                        file.url
+                    );
+                }
+            );
+        }
+
+        return result;
+
+    } catch (e) {
+        error(
+            '❌ SEND TO BITRIX ERROR:',
+            e.message
+        );
+
+        /*
+         * Если OAuth протух/потерялся,
+         * помечаем его как недоступный,
+         * чтобы следующий вызов попытался
+         * восстановить соединение.
+         */
+        if (
+            /oauth|auth|token|access/i.test(
+                String(
+                    e.message || ''
+                )
+            )
+        ) {
+            warn(
+                '⚠️ Bitrix OAuth appears unavailable'
+            );
+
+            /*
+             * Не удаляем остальные данные.
+             * Просто заставляем следующий вызов
+             * повторно пройти setupConnector().
+             */
+            if (
+                bitrixAuth
+            ) {
+                bitrixAuth.access_token =
+                    null;
+            }
+        }
+
+        return null;
+    }
+}
 
     if (
         !BITRIX_CONNECTOR_ENABLED
