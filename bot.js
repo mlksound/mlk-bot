@@ -749,40 +749,106 @@ async function sendTelegramMessage(
 // ============================================================
 
 async function downloadTelegramFileForBitrix(fileId, fileName) {
-    const token = crypto.randomBytes(32).toString('hex');
-    const safeName = path.basename(fileName || 'file');
-    const filePath = path.join(BITRIX_FILE_DIR, `${token}-${safeName}`);
+    const token =
+        crypto.randomBytes(32).toString('hex');
 
-    // Получаем путь к файлу
-    const getFileResponse = await fetch(
-        `${TELEGRAM_API}/getFile?file_id=${encodeURIComponent(fileId)}`
-    );
+    const safeName =
+        path.basename(
+            fileName || 'file'
+        );
+
+    const filePath =
+        path.join(
+            BITRIX_FILE_DIR,
+            `${token}-${safeName}`
+        );
+
+    // ----------------------------------------------------------
+    // 1. Получаем Telegram file_path
+    // ----------------------------------------------------------
+
+    const getFileResponse =
+        await fetch(
+            `${TELEGRAM_API}/getFile?file_id=${encodeURIComponent(fileId)}`
+        );
+
     if (!getFileResponse.ok) {
-        throw new Error(`Telegram getFile HTTP ${getFileResponse.status}`);
-    }
-    const getFileData = await getFileResponse.json();
-    if (!getFileData.ok || !getFileData.result?.file_path) {
-        throw new Error(`Telegram getFile failed: ${JSON.stringify(getFileData)}`);
+        throw new Error(
+            `Telegram getFile HTTP ${getFileResponse.status}`
+        );
     }
 
-    const filePathTelegram = getFileData.result.file_path;
-    const downloadUrl = `${TELEGRAM_API}/file/bot${BOT_TOKEN}/${filePathTelegram}`;
+    const getFileData =
+        await getFileResponse.json();
 
-    const fileResponse = await fetch(downloadUrl);
+    if (
+        !getFileData.ok ||
+        !getFileData.result?.file_path
+    ) {
+        throw new Error(
+            `Telegram getFile failed: ${JSON.stringify(getFileData)}`
+        );
+    }
+
+    const filePathTelegram =
+        getFileData.result.file_path;
+
+    // ----------------------------------------------------------
+    // 2. ВАЖНО:
+    // TELEGRAM_API уже содержит /bot<TOKEN>
+    // поэтому здесь НЕ добавляем /bot<TOKEN> второй раз.
+    // ----------------------------------------------------------
+
+    const telegramFileBase =
+        'https://api.telegram.org';
+
+    const downloadUrl =
+        `${telegramFileBase}/file/bot${BOT_TOKEN}/${filePathTelegram}`;
+
+    console.log(
+        `📥 Downloading Telegram file: ${safeName}`
+    );
+
+    const fileResponse =
+        await fetch(downloadUrl);
+
     if (!fileResponse.ok) {
-        throw new Error(`Telegram file download HTTP ${fileResponse.status}`);
+        throw new Error(
+            `Telegram file download HTTP ${fileResponse.status}`
+        );
     }
 
-    const buffer = Buffer.from(await fileResponse.arrayBuffer());
-    fs.writeFileSync(filePath, buffer);
+    // ----------------------------------------------------------
+    // 3. Сохраняем файл во временное хранилище Render
+    // ----------------------------------------------------------
 
-    bitrixTempFiles.set(token, {
+    const buffer =
+        Buffer.from(
+            await fileResponse.arrayBuffer()
+        );
+
+    fs.writeFileSync(
         filePath,
-        fileName: safeName,
-        createdAt: Date.now()
-    });
+        buffer
+    );
 
-    console.log(`📦 Temporary Bitrix file prepared: ${safeName}`);
+    // ----------------------------------------------------------
+    // 4. Регистрируем временный файл
+    // ----------------------------------------------------------
+
+    bitrixTempFiles.set(
+        token,
+        {
+            filePath,
+            fileName: safeName,
+            createdAt: Date.now()
+        }
+    );
+
+    console.log(
+        `📦 Temporary Bitrix file prepared: ${safeName}`
+    );
+
     return {
         token,
         fileName: safeName
