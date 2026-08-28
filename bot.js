@@ -1732,10 +1732,8 @@ async function setupConnector() {
 }
 
 
-```js
 // ============================================================
-// 19. TELEGRAM -> BITRIX CONNECTOR
-// TEXT + FILES
+// 19. TELEGRAM -> BITRIX CONNECTOR (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 // ============================================================
 
 async function sendToBitrixConnector(
