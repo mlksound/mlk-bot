@@ -37,6 +37,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const {
+    processSalesMessage
+} = require('./sales.js');
+
 // ============================================================
 // 1. ENV
 // ============================================================
@@ -1484,11 +1488,42 @@ async function processTelegramClientMessage(
         return;
     }
 
-    // 4. AI
+    // 4. SALES ENGINE
     try {
 
+        const salesInput =
+            text === '/start'
+                ? {
+                    type: 'start',
+                    clientName: client.name || ''
+                }
+                : {
+                    type: 'text',
+                    text,
+                    clientName: client.name || ''
+                };
+
+        const result =
+            await processSalesMessage(
+                clientId,
+                salesInput
+            );
+
         const answer =
-            await askDeepSeek(text);
+            String(result?.text || '').trim();
+
+        if (!answer) {
+            throw new Error(
+                'Sales Engine returned empty text'
+            );
+        }
+
+        log(
+            '🧠 Sales Engine:',
+            `client=${clientId}`,
+            `stage=${result?.stage || ''}`,
+            `intent=${result?.intent || ''}`
+        );
 
         // Telegram
         await sendTelegramMessage(
@@ -1516,7 +1551,7 @@ async function processTelegramClientMessage(
         } catch (e) {
 
             error(
-                'AI -> Bitrix error:',
+                'Sales Engine -> Bitrix error:',
                 e.message
             );
         }
@@ -1524,7 +1559,7 @@ async function processTelegramClientMessage(
     } catch (e) {
 
         error(
-            'DeepSeek error:',
+            'Sales Engine error:',
             e.message
         );
 
