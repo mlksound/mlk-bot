@@ -1007,13 +1007,12 @@ function cleanDependentFields(state) {
 
 
     // --------------------------------------------------------
-    // PLACE
+    // FLOOR / LIFT
     // --------------------------------------------------------
 
     if (
         p.place !== 'indoor'
     ) {
-
         p.floor = null;
         p.lift = null;
         p.liftDimensions = null;
@@ -1021,19 +1020,8 @@ function cleanDependentFields(state) {
 
 
     // --------------------------------------------------------
-    // LIFT
+    // LIFT DIMENSIONS
     // --------------------------------------------------------
-
-    if (
-        p.place === 'indoor' &&
-        typeof p.floor === 'number' &&
-        p.floor <= 2
-    ) {
-
-        p.lift = null;
-        p.liftDimensions = null;
-    }
-
 
     if (
         p.lift !== 'has_lift'
@@ -1046,7 +1034,9 @@ function cleanDependentFields(state) {
     // MOUNT TIME
     // --------------------------------------------------------
 
-    if (p.mount !== 'night') {
+    if (
+        p.mount !== 'night'
+    ) {
         p.mountTime = null;
     }
 
@@ -1055,7 +1045,9 @@ function cleanDependentFields(state) {
     // DEMOUNT TIME
     // --------------------------------------------------------
 
-    if (p.demount !== 'deadline') {
+    if (
+        p.demount !== 'deadline'
+    ) {
         p.demountTime = null;
     }
 }
@@ -1065,13 +1057,27 @@ function cleanDependentFields(state) {
 // CALCULATE MISSING
 // ============================================================
 //
-// Это НЕ DeepSeek.
-// Это наш deterministic funnel.
+// Порядок здесь — это фактический порядок воронки.
+//
+// 1. Формат
+// 2. Уровень / гости
+// 3. Персонал
+// 4. Даты
+// 5. Адрес
+// 6. Место
+// 7. Этаж
+// 8. Лифт
+// 9. Размеры лифта
+// 10. Оборудование
+// 11. Монтаж
+// 12. Демонтаж
+//
+// Важно:
+// функция возвращает только ПЕРВОЕ реально необходимое
+// действие, кроме специальных случаев.
 //
 
 function calculateMissing(state) {
-
-    cleanDependentFields(state);
 
     const p = state.project;
 
@@ -1094,46 +1100,45 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 2. EVENT LEVEL
+    // 2. LEVEL / GUEST COUNT
     // --------------------------------------------------------
 
     if (
-        (
-            p.eventType === 'concerts' ||
-            p.eventType === 'sports'
-        ) &&
-        !p.eventLevel
+        p.eventType === 'concerts' ||
+        p.eventType === 'sports'
     ) {
 
-        missing.push({
-            field: 'eventLevel',
-            action: 'ask_level'
-        });
+        if (!p.eventLevel) {
 
-        return missing;
+            missing.push({
+                field: 'eventLevel',
+                action: 'ask_level'
+            });
+
+            return missing;
+        }
+
+    } else if (
+        p.eventType === 'corporate'
+    ) {
+
+        if (
+            p.guestCount === null ||
+            p.guestCount === undefined
+        ) {
+
+            missing.push({
+                field: 'guestCount',
+                action: 'ask_guest_count'
+            });
+
+            return missing;
+        }
     }
 
 
     // --------------------------------------------------------
-    // 3. CORPORATE GUEST COUNT
-    // --------------------------------------------------------
-
-    if (
-        p.eventType === 'corporate' &&
-        p.guestCount === null
-    ) {
-
-        missing.push({
-            field: 'guestCount',
-            action: 'text_question'
-        });
-
-        return missing;
-    }
-
-
-    // --------------------------------------------------------
-    // 4. PERSONNEL
+    // 3. PERSONNEL
     // --------------------------------------------------------
 
     if (!p.personnel) {
@@ -1147,23 +1152,8 @@ function calculateMissing(state) {
     }
 
 
-    // "Другое" обязательно описать
-    if (
-        p.personnel === 'other' &&
-        !p.personnelDetails
-    ) {
-
-        missing.push({
-            field: 'personnelDetails',
-            action: 'text_question'
-        });
-
-        return missing;
-    }
-
-
     // --------------------------------------------------------
-    // 5. DATES
+    // 4. DATES
     // --------------------------------------------------------
 
     if (!p.dateStart) {
@@ -1200,7 +1190,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 6. LOCATION
+    // 5. LOCATION
     // --------------------------------------------------------
 
     if (!p.location) {
@@ -1215,7 +1205,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 7. PLACE
+    // 6. PLACE
     // --------------------------------------------------------
 
     if (!p.place) {
@@ -1230,7 +1220,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 8. FLOOR
+    // 7. FLOOR
     // --------------------------------------------------------
 
     if (
@@ -1248,7 +1238,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 9. LIFT
+    // 8. LIFT
     // --------------------------------------------------------
 
     if (
@@ -1268,7 +1258,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 10. LIFT DIMENSIONS
+    // 9. LIFT DIMENSIONS
     // --------------------------------------------------------
 
     if (
@@ -1286,7 +1276,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 11. EQUIPMENT
+    // 10. EQUIPMENT
     // --------------------------------------------------------
 
     if (
@@ -1304,7 +1294,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 12. MOUNT
+    // 11. MOUNT
     // --------------------------------------------------------
 
     if (!p.mount) {
@@ -1313,11 +1303,13 @@ function calculateMissing(state) {
             field: 'mount',
             action: 'ask_mount'
         });
+
+        return missing;
     }
 
 
     // --------------------------------------------------------
-    // 13. DEMOUNT
+    // 12. DEMOUNT
     // --------------------------------------------------------
 
     if (!p.demount) {
@@ -1326,11 +1318,13 @@ function calculateMissing(state) {
             field: 'demount',
             action: 'ask_demount'
         });
+
+        return missing;
     }
 
 
     // --------------------------------------------------------
-    // 14. MOUNT TIME
+    // 13. NIGHT / EARLY MOUNT TIME
     // --------------------------------------------------------
 
     if (
@@ -1342,11 +1336,13 @@ function calculateMissing(state) {
             field: 'mountTime',
             action: 'text_question'
         });
+
+        return missing;
     }
 
 
     // --------------------------------------------------------
-    // 15. DEMOUNT TIME
+    // 14. DEMOUNT DEADLINE
     // --------------------------------------------------------
 
     if (
@@ -1358,6 +1354,8 @@ function calculateMissing(state) {
             field: 'demountTime',
             action: 'text_question'
         });
+
+        return missing;
     }
 
 
@@ -1386,26 +1384,6 @@ function getNextAction(state) {
         missing[0];
 
 
-    // --------------------------------------------------------
-    // TEXT QUESTIONS
-    // --------------------------------------------------------
-
-    if (
-        first.action ===
-        'text_question'
-    ) {
-
-        return {
-            type: 'text_question',
-            field: first.field
-        };
-    }
-
-
-    // --------------------------------------------------------
-    // QUICK REPLY
-    // --------------------------------------------------------
-
     if (
         first.action ===
         'ask_format'
@@ -1426,6 +1404,18 @@ function getNextAction(state) {
         return {
             type: 'quick_reply',
             tag: 'ask_level'
+        };
+    }
+
+
+    if (
+        first.action ===
+        'ask_guest_count'
+    ) {
+
+        return {
+            type: 'text_question',
+            field: 'guestCount'
         };
     }
 
@@ -1741,24 +1731,24 @@ function extractJSON(text) {
     }
 
 
-    // 2. Найти первый объект
-    const first =
+    // 2. Находим первый JSON object
+    const firstBrace =
         text.indexOf('{');
 
-    const last =
+    const lastBrace =
         text.lastIndexOf('}');
 
 
     if (
-        first !== -1 &&
-        last !== -1 &&
-        last > first
+        firstBrace !== -1 &&
+        lastBrace !== -1 &&
+        lastBrace > firstBrace
     ) {
 
         const candidate =
             text.slice(
-                first,
-                last + 1
+                firstBrace,
+                lastBrace + 1
             );
 
         try {
@@ -1774,165 +1764,157 @@ function extractJSON(text) {
 
 
 // ============================================================
-// EXTRACTION PROMPT
+// DEEPSEEK EXTRACTION
 // ============================================================
 
-function buildExtractionPrompt(
+async function extractClientData(
     state,
-    message
+    userText
 ) {
 
-    return `
-Ты работаешь как модуль извлечения данных для CRM Sales Engine компании MLK.
+    const system = `
+Ты — аналитический слой AI-консультанта MLK.
 
 Твоя задача — НЕ вести диалог и НЕ задавать вопросы.
 
-Твоя задача:
-1. внимательно прочитать сообщение клиента;
-2. учитывать уже собранные данные;
-3. извлечь из НОВОГО сообщения все данные о мероприятии;
-4. если клиент исправляет старое значение — вернуть НОВОЕ значение;
-5. если клиент явно говорит "не знаю", "пока не знаю", "не определились" — вернуть "unknown";
-6. не придумывать отсутствующие данные;
-7. вернуть только JSON.
+Твоя задача — только определить, какую информацию о клиенте
+и проекте он сообщил в последнем сообщении.
 
-ВАЖНО:
-Одно сообщение клиента может содержать сразу много параметров.
-Нужно извлечь ВСЕ параметры, которые в нём есть.
+Верни ТОЛЬКО JSON.
 
-ТЕКУЩЕЕ СОСТОЯНИЕ:
-${JSON.stringify(state.project, null, 2)}
+Разрешённые значения:
 
-ИМЯ КЛИЕНТА:
-${state.client.name || 'неизвестно'}
+eventType:
+- concerts
+- conferences
+- corporate
+- exhibitions
+- sports
 
-НОВОЕ СООБЩЕНИЕ:
-${message}
-
-Допустимые eventType:
-- concerts = Концерты & Фестивали
-- conferences = Конференции & Презентации & TV-проекты
-- corporate = Корпоративы & Торжества
-- exhibitions = Выставки
-- sports = Спортивные мероприятия
-
-Допустимые eventLevel:
+eventLevel:
 - standard
 - high
 - highest
 
-Допустимые personnel:
+place:
+- outdoor
+- indoor
+- covered
+
+lift:
+- has_lift
+- stairs
+- unknown
+
+personnel:
 - management
 - duty_technician
 - installation_dismantling
 - other
 
-Допустимые place:
-- outdoor
-- indoor
-- covered
+mount:
+- any
+- night
 
-Допустимые lift:
-- has_lift
-- stairs
-- unknown
+demount:
+- any
+- deadline
 
-Допустимое оборудование:
+equipment:
 - sound
 - led
 - light
 - stage
 - all
 
-Допустимый mount:
-- any
-- night
+Если поле в последнем сообщении НЕ было указано —
+НЕ включай его в JSON.
 
-Допустимый demount:
-- any
-- deadline
+Если клиент явно сказал, что не знает значение,
+можно использовать "unknown".
 
-Формат JSON:
+Если клиент исправляет ранее сказанное значение —
+верни новое значение.
+
+Структура:
 
 {
   "client": {
-    "name": null
+    "name": "..."
   },
   "project": {
-    "eventType": null,
-    "eventLevel": null,
-    "guestCount": null,
-    "dateStart": null,
-    "dateEnd": null,
-    "readyDate": null,
-    "location": null,
-    "place": null,
-    "floor": null,
-    "lift": null,
-    "liftDimensions": null,
+    "eventType": "...",
+    "eventLevel": "...",
+    "guestCount": 0,
+    "dateStart": "YYYY-MM-DD",
+    "dateEnd": "YYYY-MM-DD",
+    "readyDate": "YYYY-MM-DD",
+    "location": "...",
+    "place": "...",
+    "floor": 3,
+    "lift": "...",
+    "liftDimensions": "...",
     "equipment": [],
-    "equipmentDetails": null,
-    "personnel": null,
-    "personnelDetails": null,
-    "mount": null,
-    "mountTime": null,
-    "demount": null,
-    "demountTime": null,
-    "clientRequest": null,
-    "additionalInfo": null
+    "equipmentDetails": "...",
+    "personnel": "...",
+    "personnelDetails": "...",
+    "mount": "...",
+    "mountTime": "...",
+    "demount": "...",
+    "demountTime": "...",
+    "clientRequest": "...",
+    "additionalInfo": "..."
   }
 }
 
-Правила:
-- null означает: в НОВОМ сообщении этого параметра нет.
-- Не копируй автоматически старое значение.
-- Возвращай только то, что удалось извлечь из нового сообщения.
-- Если клиент явно исправляет значение, верни новое значение.
-- Даты сохраняй максимально точно. Если клиент сказал "20 декабря" и год очевиден из контекста, укажи дату с годом.
-- Если точный год нельзя определить надёжно, сохрани фразу клиента.
-- guestCount может быть числом, диапазоном/строкой или "unknown".
-- floor может быть числом или "unknown".
-- clientRequest — краткая суть исходного запроса клиента, если она есть.
-- additionalInfo — полезная информация, которая не подходит под остальные поля.
+Важно:
 
-Верни ТОЛЬКО JSON.
+- Не додумывай.
+- Не извлекай информацию из старой истории, если её нет
+  в последнем сообщении.
+- Не меняй значения только потому, что они кажутся логичными.
+- Даты приводи к YYYY-MM-DD, если дата однозначно понятна.
 `;
-}
 
 
-// ============================================================
-// EXTRACT PROJECT DATA
-// ============================================================
+    const context = {
+        currentProject:
+            state.project,
 
-async function extractProjectData(
-    state,
-    message
-) {
+        currentClient:
+            state.client,
 
-    const prompt =
-        buildExtractionPrompt(
-            state,
-            message
-        );
+        userMessage:
+            userText
+    };
+
+
+    const messages = [
+
+        {
+            role: 'system',
+            content: system
+        },
+
+        {
+            role: 'user',
+            content:
+                JSON.stringify(
+                    context,
+                    null,
+                    2
+                )
+        }
+
+    ];
 
 
     const raw =
         await callDeepSeek(
-            [
-                {
-                    role: 'system',
-                    content:
-                        'Ты строгий JSON-модуль извлечения данных. Никогда не добавляй пояснения вне JSON.'
-                },
-
-                {
-                    role: 'user',
-                    content: prompt
-                }
-            ],
+            messages,
             {
                 temperature: 0,
-                max_tokens: 1400
+                max_tokens: 1000
             }
         );
 
@@ -1944,7 +1926,7 @@ async function extractProjectData(
     if (!parsed) {
 
         console.warn(
-            '⚠️ Не удалось распарсить extraction JSON:',
+            '⚠️ Sales Engine: DeepSeek не вернул JSON:',
             raw
         );
 
@@ -1964,88 +1946,100 @@ async function extractProjectData(
 
 async function detectIntent(
     state,
-    message
+    userText
 ) {
 
-    const prompt = `
-Определи намерение клиента в текущем сообщении.
+    const system = `
+Определи намерение последнего сообщения клиента
+в контексте диалога с консультантом MLK.
 
-Допустимые значения:
-
-new_request
-question
-price_question
-equipment_question
-portfolio_question
-objection
-correction
-manager_request
-file_submission
-
-Правила:
-
-new_request:
-клиент описывает новое мероприятие или хочет заказать оснащение.
-
-question:
-обычный вопрос о работе MLK.
-
-price_question:
-клиент спрашивает цену, стоимость, бюджет.
-
-equipment_question:
-вопрос именно об оборудовании, технических возможностях, характеристиках.
-
-portfolio_question:
-клиент спрашивает об опыте, проектах, кейсах, клиентах, примерах работ.
-
-objection:
-сомнение или возражение: дорого, почему так, не уверен, сравниваю, зачем столько и т.п.
-
-correction:
-клиент явно исправляет ранее сообщённые данные.
-
-manager_request:
-клиент хочет поговорить с человеком / менеджером.
-
-file_submission:
-сообщение связано с передачей ТЗ, райдера или файла.
-
-new_request имеет приоритет, если клиент одновременно сообщает новые параметры проекта.
-
-ТЕКУЩЕЕ СОСТОЯНИЕ:
-${JSON.stringify(state.project, null, 2)}
-
-СООБЩЕНИЕ:
-${message}
-
-Верни только JSON:
+Верни ТОЛЬКО JSON:
 
 {
   "intent": "..."
 }
+
+Разрешённые значения:
+
+- qualification
+- question
+- equipment_question
+- portfolio_question
+- objection
+- manager_request
+- greeting
+- correction
+- other
+
+Правила:
+
+qualification —
+клиент сообщает данные проекта.
+
+question —
+клиент задаёт общий вопрос.
+
+equipment_question —
+вопрос про оборудование, технические возможности,
+комплектацию.
+
+portfolio_question —
+вопрос о реализованных проектах MLK.
+
+objection —
+сомнение, возражение, недоверие.
+
+manager_request —
+клиент прямо просит менеджера / человека.
+
+correction —
+клиент исправляет ранее сообщённые данные.
+
+greeting —
+приветствие без содержательной информации.
+
+other —
+если ничего выше не подходит.
+
+Не додумывай.
 `;
+
+
+    const messages = [
+
+        {
+            role: 'system',
+            content: system
+        },
+
+        {
+            role: 'user',
+            content:
+                JSON.stringify({
+                    project:
+                        state.project,
+
+                    history:
+                        state.history.slice(
+                            -10
+                        ),
+
+                    message:
+                        userText
+                })
+        }
+
+    ];
 
 
     try {
 
         const raw =
             await callDeepSeek(
-                [
-                    {
-                        role: 'system',
-                        content:
-                            'Определи intent и верни только JSON.'
-                    },
-
-                    {
-                        role: 'user',
-                        content: prompt
-                    }
-                ],
+                messages,
                 {
                     temperature: 0,
-                    max_tokens: 150
+                    max_tokens: 100
                 }
             );
 
@@ -2056,29 +2050,11 @@ ${message}
 
         if (
             parsed &&
-            typeof parsed.intent === 'string'
+            parsed.intent
         ) {
-
-            const allowed = [
-                'new_request',
-                'question',
-                'price_question',
-                'equipment_question',
-                'portfolio_question',
-                'objection',
-                'correction',
-                'manager_request',
-                'file_submission'
-            ];
-
-
-            if (
-                allowed.includes(
-                    parsed.intent
-                )
-            ) {
-                return parsed.intent;
-            }
+            return String(
+                parsed.intent
+            );
         }
 
     } catch (error) {
@@ -2090,296 +2066,285 @@ ${message}
     }
 
 
-    return 'new_request';
+    return 'other';
 }
 
 
 // ============================================================
-// RESPONSE PROMPT
-// ============================================================
-//
-// Здесь DeepSeek уже формулирует человеческий ответ.
-//
-// Но он НЕ имеет права решать:
-//   - какой следующий вопрос;
-//   - какие кнопки показать;
-//   - что считается заполненным.
-//
-
-function buildResponsePrompt(
-    state,
-    clientMessage,
-    intent,
-    nextAction
-) {
-
-    let portfolioBlock = '';
-
-    if (
-        intent === 'portfolio_question' ||
-        intent === 'equipment_question' ||
-        intent === 'question' ||
-        intent === 'objection'
-    ) {
-
-        if (PORTFOLIO_TEXT) {
-
-            portfolioBlock = `
-ПОРТФОЛИО MLK.
-Используй только эти реальные проекты.
-Ничего не выдумывай.
-
-${PORTFOLIO_TEXT}
-`;
-        }
-    }
-
-
-    return `
-Ты — Дмитрий, менеджер по продажам компании MLK.
-
-Общайся естественно, профессионально и доброжелательно.
-Строго на «Вы».
-Если имя клиента известно — можно обращаться по имени.
-
-Ты НЕ управляешь воронкой.
-Следующий вопрос уже определён программой.
-
-ТЕКУЩИЙ ПРОЕКТ:
-${JSON.stringify(state.project, null, 2)}
-
-НАМЕРЕНИЕ КЛИЕНТА:
-${intent}
-
-СООБЩЕНИЕ КЛИЕНТА:
-${clientMessage}
-
-СЛЕДУЮЩЕЕ ДЕЙСТВИЕ ПРОГРАММЫ:
-${JSON.stringify(nextAction, null, 2)}
-
-${portfolioBlock}
-
-ВАЖНЫЕ ПРАВИЛА:
-
-1. Не выдумывай информацию.
-
-2. Не называй цену самостоятельно.
-Если клиент спрашивает стоимость, объясни, что точная стоимость зависит от параметров проекта и будет рассчитана менеджером при подготовке КП.
-
-3. MLK работает с техническим оснащением мероприятий «под ключ».
-Если клиент просит просто сдать отдельный микрофон, пульт или другое оборудование в аренду — вежливо объясни, что MLK не сдаёт оборудование отдельно, а работает с комплексным техническим обеспечением мероприятия.
-
-4. Если клиент сообщил новые параметры — не задавай повторно вопрос, на который он уже ответил.
-
-5. Если клиент исправил ранее сообщённую информацию — спокойно используй новое значение.
-
-6. Не перечисляй все собранные данные после каждого сообщения.
-Итог нужен только когда квалификация полностью закончена.
-
-7. Не используй технические названия вроде "eventType", "missing", "Sales Engine".
-
-8. Не показывай клиенту JSON.
-
-9. Если следующий шаг — вопрос текстом, задай именно этот вопрос естественной фразой.
-
-10. Если следующий шаг — кнопка или календарь, текст должен только подвести к этому действию.
-Саму кнопку создавать не нужно.
-
-11. Если информации уже достаточно для ответа на вопрос клиента, сначала ответь на него, затем мягко продолжи квалификацию.
-
-12. Если клиент говорит, что чего-то не знает, не дави на него. Можно принять неизвестное значение и двигаться дальше.
-
-13. Если клиент просит менеджера — не спорь. Подтверди передачу менеджеру.
-
-14. Если речь идёт о портфолио — используй только реальные проекты из переданного портфолио.
-
-15. Не утверждай наличие конкретной модели оборудования, если её нет в предоставленной информации.
-
-16. Не рассчитывай стоимость.
-
-17. Не пиши длинные ответы. Обычно 1–4 коротких абзаца.
-
-Сформулируй только готовый текст ответа клиенту.
-`;
-}
-
-
-// ============================================================
-// GENERATE NATURAL RESPONSE
+// BUILD AI CONTEXT
 // ============================================================
 
-async function generateResponse(
-    state,
-    clientMessage,
-    intent,
-    nextAction
-) {
-
-    const prompt =
-        buildResponsePrompt(
-            state,
-            clientMessage,
-            intent,
-            nextAction
-        );
-
-
-    return await callDeepSeek(
-        [
-            {
-                role: 'system',
-                content:
-                    SYSTEM_PROMPT ||
-                    'Ты Дмитрий, менеджер MLK.'
-            },
-
-            {
-                role: 'user',
-                content: prompt
-            }
-        ],
-        {
-            temperature: 0.65,
-            max_tokens: 800
-        }
-    );
-}
-
-
-// ============================================================
-// TEXT QUESTIONS
-// ============================================================
-
-function getTextQuestion(
-    field,
+function buildSalesContext(
     state
 ) {
 
-    const name =
-        state.client.name
-            ? `${state.client.name}, `
-            : '';
+    return {
 
+        client: state.client,
 
-    switch (field) {
+        project: state.project,
 
-        case 'guestCount':
-            return `${name}подскажите, пожалуйста, сколько гостей планируется на мероприятии?`;
+        intent: state.intent,
 
+        missing: state.missing,
 
-        case 'personnelDetails':
-            return `${name}подскажите, пожалуйста, какой именно персонал Вам потребуется?`;
+        stage: state.stage,
 
+        history:
+            state.history.slice(
+                -MAX_HISTORY
+            )
 
-        case 'floor':
-            return `${name}подскажите, пожалуйста, на каком этаже будет проходить мероприятие?`;
-
-
-        case 'liftDimensions':
-            return `${name}подскажите, пожалуйста, размеры грузового лифта (ширина × глубина × высота), если они известны.`;
-
-
-        case 'location':
-            return `${name}подскажите, пожалуйста, точный адрес проведения мероприятия.`;
-
-
-        case 'mountTime':
-            return `${name}подскажите, пожалуйста, до какого времени должен завершиться ночной/ранний монтаж? Например: 06:00.`;
-
-
-        case 'demountTime':
-            return `${name}подскажите, пожалуйста, до какого времени должен завершиться демонтаж? Например: 18:00.`;
-
-
-        default:
-            return `${name}подскажите, пожалуйста, эту информацию.`;
-    }
+    };
 }
 
 
 // ============================================================
-// ACTION QUESTION OVERRIDE
+// BUILD CONTROLLED QUESTION
 // ============================================================
 //
-// Важный момент.
+// Здесь JS определяет, ЧТО спрашивать.
 //
-// Для обязательных вопросов мы не позволяем DeepSeek
-// случайно спросить что-то другое.
-//
-// Но перед вопросом можно использовать natural response,
-// если это вопрос клиента.
+// DeepSeek определяет только КАК это сформулировать.
 //
 
 function buildControlledQuestion(
-    action,
     state
 ) {
 
-    if (!action) {
+    const missing =
+        calculateMissing(state);
+
+    if (!missing.length) {
         return null;
     }
 
 
-    if (
-        action.type ===
-        'text_question'
-    ) {
+    const first =
+        missing[0];
 
-        return getTextQuestion(
-            action.field,
+
+    switch (first.field) {
+
+        case 'eventType':
+            return 'Подскажите, пожалуйста, какой у вас формат мероприятия?';
+
+        case 'eventLevel':
+            return 'Какой уровень технического оснащения планируется?';
+
+        case 'guestCount':
+            return 'Подскажите, пожалуйста, ориентировочное количество гостей.';
+
+        case 'personnel':
+            return 'Какой формат технического персонала вам нужен?';
+
+        case 'dateStart':
+            return 'Выберите, пожалуйста, дату начала мероприятия.';
+
+        case 'dateEnd':
+            return 'Выберите, пожалуйста, дату окончания мероприятия.';
+
+        case 'readyDate':
+            return 'К какой дате оборудование должно быть готово на площадке?';
+
+        case 'location':
+            return 'Подскажите, пожалуйста, адрес площадки.';
+
+        case 'place':
+            return 'Мероприятие будет проходить на улице или в помещении?';
+
+        case 'floor':
+            return 'На каком этаже находится площадка?';
+
+        case 'lift':
+            return 'Есть ли на площадке грузовой лифт?';
+
+        case 'liftDimensions':
+            return 'Подскажите, пожалуйста, размеры грузового лифта.';
+
+        case 'equipment':
+            return 'Какое оборудование вам необходимо?';
+
+        case 'mount':
+            return 'Когда удобно выполнить монтаж?';
+
+        case 'demount':
+            return 'Когда планируется демонтаж?';
+
+        case 'mountTime':
+            return 'Подскажите, пожалуйста, во сколько можно начать монтаж.';
+
+        case 'demountTime':
+            return 'До какого времени необходимо завершить демонтаж?';
+
+        default:
+            return 'Подскажите, пожалуйста, дополнительную информацию по проекту.';
+    }
+}
+
+
+// ============================================================
+// BUILD AI RESPONSE
+// ============================================================
+
+async function generateAssistantText(
+    state,
+    userText
+) {
+
+    const controlledQuestion =
+        buildControlledQuestion(
             state
         );
+
+
+    const salesContext =
+        buildSalesContext(
+            state
+        );
+
+
+    const system = `
+${SYSTEM_PROMPT}
+
+------------------------------------------------------------
+SALES ENGINE CONTEXT
+------------------------------------------------------------
+
+Ты работаешь внутри Sales Engine MLK.
+
+Текущий контекст проекта:
+
+${JSON.stringify(
+    salesContext,
+    null,
+    2
+)}
+
+------------------------------------------------------------
+ВАЖНЫЕ ПРАВИЛА
+------------------------------------------------------------
+
+1. JS Sales Engine является источником истины
+   по состоянию проекта и порядку квалификации.
+
+2. Не задавай повторно вопросы, на которые уже есть ответ.
+
+3. Не придумывай оборудование, цены, кейсы,
+   характеристики или условия.
+
+4. Не называй стоимость, если она не предоставлена
+   явно в исходных данных.
+
+5. Если клиент спрашивает о портфолио —
+   используй только portfolio.txt.
+
+6. Если клиент задал содержательный вопрос,
+   сначала ответь на него, а затем мягко продолжи
+   квалификацию.
+
+7. Если клиент исправляет информацию —
+   принимай новую информацию без спора.
+
+8. Если следующий обязательный вопрос определён JS,
+   не заменяй его другим вопросом.
+
+9. Не перечисляй клиенту всю внутреннюю структуру
+   Sales Engine.
+
+10. Общайся естественно, коротко и по делу.
+
+------------------------------------------------------------
+ТЕКУЩИЙ КОНТРОЛИРУЕМЫЙ ВОПРОС
+------------------------------------------------------------
+
+${
+    controlledQuestion ||
+    'Квалификация завершена.'
+}
+
+------------------------------------------------------------
+PORTFOLIO
+------------------------------------------------------------
+
+${PORTFOLIO_TEXT}
+`;
+
+
+    const messages = [
+
+        {
+            role: 'system',
+            content: system
+        }
+
+    ];
+
+
+    // История разговора
+    for (
+        const item of
+        state.history.slice(
+            -12
+        )
+    ) {
+
+        if (
+            item.role === 'user'
+        ) {
+
+            messages.push({
+                role: 'user',
+                content:
+                    item.content
+            });
+
+        } else if (
+            item.role === 'assistant'
+        ) {
+
+            messages.push({
+                role: 'assistant',
+                content:
+                    item.content
+            });
+        }
     }
 
 
-    switch (action.tag) {
+    // Текущее сообщение
+    if (userText) {
 
-        case 'ask_format':
-            return 'Подскажите, пожалуйста, какой формат мероприятия планируется.';
-
-
-        case 'ask_level':
-            return 'Подскажите, пожалуйста, какой уровень требований у мероприятия.';
-
-
-        case 'ask_personnel':
-            return 'Какой персонал потребуется на мероприятии?';
+        messages.push({
+            role: 'user',
+            content: userText
+        });
+    }
 
 
-        case 'ask_place':
-            return 'Где будет проходить мероприятие — на улице, в помещении или под навесом?';
+    try {
+
+        return await callDeepSeek(
+            messages,
+            {
+                temperature: 0.4,
+                max_tokens: 700
+            }
+        );
+
+    } catch (error) {
+
+        console.error(
+            '❌ Sales Engine DeepSeek response error:',
+            error.message
+        );
 
 
-        case 'ask_lift':
-            return 'Есть ли на объекте грузовой лифт для подъёма оборудования?';
+        // Даже если DeepSeek временно недоступен,
+        // Sales Engine продолжает управлять воронкой.
 
-
-        case 'ask_equipment':
-            return 'Какое оборудование необходимо? Можно выбрать несколько вариантов.';
-
-
-        case 'ask_mount':
-            return 'Какое время монтажа Вам подходит — любое по согласованию или ночью/рано утром?';
-
-
-        case 'ask_demount':
-            return 'Какое время демонтажа Вам подходит — любое по согласованию или до определённого времени?';
-
-
-        case 'ask_date_start':
-            return 'Укажите, пожалуйста, дату начала мероприятия.';
-
-
-        case 'ask_date_end':
-            return 'Укажите, пожалуйста, дату окончания мероприятия.';
-
-
-        case 'ask_ready_date':
-            return 'И к какой дате и времени оборудование должно быть полностью готово?';
-
-
-        default:
-            return null;
+        return controlledQuestion ||
+            'Подскажите, пожалуйста, дополнительную информацию по проекту.';
     }
 }
 
@@ -2395,19 +2360,19 @@ function buildManagerSummary(
     const p =
         state.project;
 
-
     const lines = [];
 
 
     lines.push(
-        'ЗАЯВКА MLK'
+        'ЗАЯВКА MLK — ГОТОВА К ПОДГОТОВКЕ КП'
     );
 
+    lines.push('');
 
-    lines.push(
-        ''
-    );
 
+    // --------------------------------------------------------
+    // CLIENT
+    // --------------------------------------------------------
 
     lines.push(
         `Клиент: ${
@@ -2416,24 +2381,16 @@ function buildManagerSummary(
         }`
     );
 
-
-    lines.push(
-        `ID: ${
-            state.client.id ||
-            'Не указан'
-        }`
-    );
+    lines.push('');
 
 
-    lines.push(
-        ''
-    );
-
+    // --------------------------------------------------------
+    // EVENT
+    // --------------------------------------------------------
 
     lines.push(
         'МЕРОПРИЯТИЕ:'
     );
-
 
     lines.push(
         `Формат: ${
@@ -2491,10 +2448,12 @@ function buildManagerSummary(
     }
 
 
-    lines.push(
-        ''
-    );
+    lines.push('');
 
+
+    // --------------------------------------------------------
+    // DATES
+    // --------------------------------------------------------
 
     lines.push(
         'ДАТЫ:'
@@ -2503,29 +2462,34 @@ function buildManagerSummary(
 
     lines.push(
         `Начало: ${
-            p.dateStart || 'Не указано'
+            p.dateStart ||
+            'Не указано'
         }`
     );
 
 
     lines.push(
         `Окончание: ${
-            p.dateEnd || 'Не указано'
+            p.dateEnd ||
+            'Не указано'
         }`
     );
 
 
     lines.push(
         `Готовность: ${
-            p.readyDate || 'Не указано'
+            p.readyDate ||
+            'Не указано'
         }`
     );
 
 
-    lines.push(
-        ''
-    );
+    lines.push('');
 
+
+    // --------------------------------------------------------
+    // LOCATION
+    // --------------------------------------------------------
 
     lines.push(
         'МЕСТО:'
@@ -2534,7 +2498,8 @@ function buildManagerSummary(
 
     lines.push(
         `Адрес: ${
-            p.location || 'Не указано'
+            p.location ||
+            'Не указано'
         }`
     );
 
@@ -2586,10 +2551,12 @@ function buildManagerSummary(
     }
 
 
-    lines.push(
-        ''
-    );
+    lines.push('');
 
+
+    // --------------------------------------------------------
+    // EQUIPMENT
+    // --------------------------------------------------------
 
     lines.push(
         'ОБОРУДОВАНИЕ:'
@@ -2633,10 +2600,12 @@ function buildManagerSummary(
     }
 
 
-    lines.push(
-        ''
-    );
+    lines.push('');
 
+
+    // --------------------------------------------------------
+    // MOUNT / DEMOUNT
+    // --------------------------------------------------------
 
     lines.push(
         'МОНТАЖ / ДЕМОНТАЖ:'
@@ -2685,9 +2654,7 @@ function buildManagerSummary(
     }
 
 
-    lines.push(
-        ''
-    );
+    lines.push('');
 
 
     if (
@@ -2702,9 +2669,7 @@ function buildManagerSummary(
             p.clientRequest
         );
 
-        lines.push(
-            ''
-        );
+        lines.push('');
     }
 
 
@@ -2720,9 +2685,7 @@ function buildManagerSummary(
             p.additionalInfo
         );
 
-        lines.push(
-            ''
-        );
+        lines.push('');
     }
 
 
@@ -2830,7 +2793,7 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Место: ${getPlaceLabel(p.place)}`
+        `• Тип места: ${getPlaceLabel(p.place)}`
     );
 
 
@@ -2849,11 +2812,11 @@ function buildClientSummary(
     ) {
 
         lines.push(
-            `• Подъём оборудования: ${
+            `• Лифт: ${
                 p.lift === 'has_lift'
-                    ? 'грузовой лифт'
+                    ? 'Есть грузовой лифт'
                     : p.lift === 'stairs'
-                        ? 'по лестнице'
+                        ? 'Носить по лестнице'
                         : p.lift
             }`
         );
@@ -2870,13 +2833,50 @@ function buildClientSummary(
     }
 
 
+    lines.push('');
+
+
     lines.push(
-        `• Оборудование: ${
+        '• Оборудование:'
+    );
+
+
+    if (
+        Array.isArray(p.equipment) &&
+        p.equipment.length
+    ) {
+
+        for (
+            const item of
             getEquipmentLabels(
                 p.equipment
-            ).join(', ')
-        }`
-    );
+            )
+        ) {
+
+            lines.push(
+                `  — ${item}`
+            );
+        }
+
+    } else {
+
+        lines.push(
+            '  — Не указано'
+        );
+    }
+
+
+    if (
+        p.equipmentDetails
+    ) {
+
+        lines.push(
+            `• Дополнительно: ${p.equipmentDetails}`
+        );
+    }
+
+
+    lines.push('');
 
 
     lines.push(
@@ -2919,7 +2919,12 @@ function buildClientSummary(
 
 
     lines.push(
-        'Спасибо! Все основные данные собраны. На их основе отдел подготовки КП сможет подготовить предложение.'
+        'Все основные данные зафиксированы.'
+    );
+
+
+    lines.push(
+        'Мы передадим информацию в отдел подготовки КП.'
     );
 
 
@@ -2945,6 +2950,7 @@ function calculateStage(
     if (
         intent === 'manager_request'
     ) {
+
         return 'manager_handoff';
     }
 
@@ -2952,6 +2958,7 @@ function calculateStage(
     if (
         !state.history.length
     ) {
+
         return 'greeting';
     }
 
@@ -2959,6 +2966,7 @@ function calculateStage(
     if (
         !missing.length
     ) {
+
         return 'summary';
     }
 
@@ -2966,6 +2974,7 @@ function calculateStage(
     if (
         intent === 'objection'
     ) {
+
         return 'objection';
     }
 
@@ -2975,6 +2984,7 @@ function calculateStage(
         intent === 'equipment_question' ||
         intent === 'portfolio_question'
     ) {
+
         return 'clarification';
     }
 
@@ -3038,6 +3048,2678 @@ function normalizeMessage(message) {
             ''
     };
 }
+
+
+// ============================================================
+// ACTION -> HUMAN TEXT FOR AI
+// ============================================================
+
+function actionToText(
+    message
+) {
+
+    if (
+        message.type !== 'action'
+    ) {
+
+        return '';
+    }
+
+
+    const map = {
+
+        ask_format: {
+
+            concerts:
+                'Формат: Концерты & Фестивали',
+
+            conferences:
+                'Формат: Конференции & Презентации & TV-проекты',
+
+            corporate:
+                'Формат: Корпоративы & Торжества',
+
+            exhibitions:
+                'Формат: Выставки',
+
+            sports:
+                'Формат: Спортивные мероприятия'
+        },
+
+
+        ask_level: {
+
+            standard:
+                'Уровень: Стандартный',
+
+            high:
+                'Уровень: Высокие требования',
+
+            highest:
+                'Уровень: Высший уровень'
+        },
+
+
+        ask_personnel: {
+
+            management:
+                'Персонал: Управление оборудованием',
+
+            duty_technician:
+                'Персонал: Дежурный техник',
+
+            installation_dismantling:
+                'Персонал: Только монтаж-демонтаж',
+
+            other:
+                'Персонал: Другое'
+        },
+
+
+        ask_place: {
+
+            outdoor:
+                'Место: Улица',
+
+            indoor:
+                'Место: Помещение',
+
+            covered:
+                'Место: Под навесом'
+        },
+
+
+        ask_lift: {
+
+            has_lift:
+                'Подъём: Есть грузовой лифт',
+
+            stairs:
+                'Подъём: Нужно носить по лестнице',
+
+            unknown:
+                'Подъём: Не знаю'
+        },
+
+
+        ask_mount: {
+
+            any:
+                'Монтаж: Любое по согласованию',
+
+            night:
+                'Монтаж: Ночью/рано утром'
+        },
+
+
+        ask_demount: {
+
+            any:
+                'Демонтаж: Любое по согласованию',
+
+            deadline:
+                'Демонтаж: До определённого времени'
+        },
+
+
+        ask_equipment: {
+
+            sound:
+                'Оборудование: Звуковое оборудование',
+
+            led:
+                'Оборудование: Светодиодные экраны',
+
+            light:
+                'Оборудование: Световое оборудование',
+
+            stage:
+                'Оборудование: Сценические конструкции',
+
+            all:
+                'Оборудование: Полный комплекс'
+        }
+
+    };
+
+
+    const group =
+        map[message.tag];
+
+
+    if (!group) {
+        return '';
+    }
+
+
+    if (
+        Array.isArray(
+            message.value
+        )
+    ) {
+
+        return message.value
+            .map(
+                value =>
+                    group[value]
+            )
+            .filter(Boolean)
+            .join('\n');
+    }
+
+
+    if (
+        message.value &&
+        group[message.value]
+    ) {
+
+        return group[
+            message.value
+        ];
+    }
+
+
+    return '';
+}
+
+
+// ============================================================
+// START MESSAGE
+// ============================================================
+
+function getGreeting(
+    state
+) {
+
+    const name =
+        state.client.name ||
+        '';
+
+
+    return `Здравствуйте${
+        name
+            ? `, ${name}`
+            : ''
+    }! Рад приветствовать вас в MLK. Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».
+
+Если у вас есть готовое техническое задание, райдер или любые другие файлы, вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.
+
+Если же вы пока не знаете всех деталей, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.
+
+С чего начнём?`;
+}
+
+
+// ============================================================
+// START ACTIONS
+// ============================================================
+
+function getStartActions() {
+
+    return [
+
+        {
+            type: 'send_files'
+        },
+
+        {
+            type: 'quick_reply',
+            tag: 'ask_format'
+        }
+
+    ];
+}
+
+
+// ============================================================
+// PROCESS START
+// ============================================================
+
+function processStart(
+    clientId,
+    clientName = ''
+) {
+
+    const state =
+        resetSalesClient(
+            clientId,
+            clientName
+        );
+
+
+    const text =
+        getGreeting(
+            state
+        );
+
+
+    addHistory(
+        state,
+        'assistant',
+        text
+    );
+
+
+    state.lastAction =
+        'ask_format';
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return {
+
+        text,
+
+        actions:
+            getStartActions(),
+
+        project:
+            state.project,
+
+        missing:
+            calculateMissing(
+                state
+            ),
+
+        stage:
+            'greeting',
+
+        intent:
+            'greeting',
+
+        readyForManager:
+            false,
+
+        managerSummary:
+            null
+    };
+}
+
+
+// ============================================================
+// APPLY ACTION
+// ============================================================
+
+function applyAction(
+    state,
+    message
+) {
+
+    if (
+        message.type !== 'action'
+    ) {
+        return '';
+    }
+
+
+    const tag =
+        message.tag;
+
+    const value =
+        message.value;
+
+
+    if (
+        tag === 'ask_format' &&
+        value &&
+        EVENT_TYPES[value]
+    ) {
+
+        state.project.eventType =
+            value;
+
+        return actionToText(
+            message
+        );
+    }
+
+
+    if (
+        tag === 'ask_level' &&
+        value &&
+        LEVELS[value]
+    ) {
+
+        state.project.eventLevel =
+            value;
+
+        return actionToText(
+            message
+        );
+    }
+
+
+    if (
+        tag === 'ask_personnel' &&
+        value &&
+        PERSONNEL[value]
+    ) {
+
+        state.project.personnel =
+            value;
+
+        return actionToText(
+            message
+        );
+    }
+
+
+    if (
+        tag === 'ask_place' &&
+        value &&
+        PLACES[value]
+    ) {
+
+        state.project.place =
+            value;
+
+        return actionToText(
+            message
+        );
+    }
+
+
+    if (
+        tag === 'ask_lift' &&
+        value
+    ) {
+
+        if (
+            value === 'has_lift' ||
+            value === 'stairs' ||
+            value === 'unknown'
+        ) {
+
+            state.project.lift =
+                value;
+
+            return actionToText(
+                message
+            );
+        }
+    }
+
+
+    if (
+        tag === 'ask_equipment'
+    ) {
+
+        if (
+            Array.isArray(value)
+        ) {
+
+            const equipment =
+                normalizeEquipment(
+                    value
+                );
+
+            if (
+                equipment.length
+            ) {
+
+                state.project.equipment =
+                    equipment;
+
+                return actionToText(
+                    message
+                );
+            }
+        }
+
+
+        if (
+            value &&
+            EQUIPMENT[value]
+        ) {
+
+            state.project.equipment =
+                [value];
+
+            return actionToText(
+                message
+            );
+        }
+    }
+
+
+    if (
+        tag === 'ask_mount' &&
+        value &&
+        MOUNT[value]
+    ) {
+
+        state.project.mount =
+            value;
+
+        return actionToText(
+            message
+        );
+    }
+
+
+    if (
+        tag === 'ask_demount' &&
+        value &&
+        DEMOUNT[value]
+    ) {
+
+        state.project.demount =
+            value;
+
+        return actionToText(
+            message
+        );
+    }
+
+
+    if (
+        tag === 'ask_date_start'
+    ) {
+
+        if (value) {
+
+            state.project.dateStart =
+                String(value);
+
+            return `Дата начала: ${value}`;
+        }
+    }
+
+
+    if (
+        tag === 'ask_date_end'
+    ) {
+
+        if (value) {
+
+            state.project.dateEnd =
+                String(value);
+
+            return `Дата окончания: ${value}`;
+        }
+    }
+
+
+    if (
+        tag === 'ask_ready_date'
+    ) {
+
+        if (value) {
+
+            state.project.readyDate =
+                String(value);
+
+            return `Дата готовности оборудования: ${value}`;
+        }
+    }
+
+
+    return '';
+}
+
+
+// ============================================================
+// FILE PROCESSING
+// ============================================================
+
+async function processFileMessage(
+    state,
+    message
+) {
+
+    const fileName =
+        message.fileName ||
+        'файл';
+
+
+    addHistory(
+        state,
+        'user',
+        `[Файл: ${fileName}]`
+    );
+
+
+    // Если bot.js когда-нибудь передаст извлечённый
+    // текст файла — Sales Engine сможет его проанализировать.
+    //
+    // Сейчас намеренно не придумываем extraction,
+    // потому что transport-слой должен сам решить,
+    // как извлекать текст из PDF/DOCX/XLSX.
+
+    if (
+        message.fileText
+    ) {
+
+        const extracted =
+            await extractClientData(
+                state,
+                message.fileText
+            );
+
+        mergeProjectData(
+            state,
+            extracted
+        );
+
+        cleanDependentFields(
+            state
+        );
+    }
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return `Файл «${fileName}» получил. Я передам его в отдел подготовки КП и учту информацию из него при работе с заявкой.`;
+}
+
+
+// ============================================================
+// PREPARE RESULT
+// ============================================================
+
+function prepareResult(
+    state,
+    text,
+    intent
+) {
+
+    const missing =
+        calculateMissing(
+            state
+        );
+
+
+    state.missing =
+        missing;
+
+
+    state.intent =
+        intent;
+
+
+    state.stage =
+        calculateStage(
+            state,
+            intent,
+            missing
+        );
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    const readyForManager =
+        missing.length === 0;
+
+
+    let finalText =
+        text;
+
+
+    if (
+        readyForManager &&
+        state.stage !== 'manager_handoff'
+    ) {
+
+        finalText =
+            buildClientSummary(
+                state
+            );
+    }
+
+
+    return {
+
+        text:
+            finalText,
+
+        actions:
+            readyForManager
+                ? [
+                    {
+                        type: 'quick_reply',
+                        tag: 'manager_handoff'
+                    }
+                ]
+                : getActions(
+                    state
+                ),
+
+        project:
+            state.project,
+
+        missing,
+
+        stage:
+            state.stage,
+
+        intent,
+
+        readyForManager,
+
+        managerSummary:
+            readyForManager
+                ? buildManagerSummary(
+                    state
+                )
+                : null
+    };
+}
+
+
+// ============================================================
+// PROCESS SALES MESSAGE
+// ============================================================
+
+async function processSalesMessage(
+    clientId,
+    message
+) {
+
+    const normalized =
+        normalizeMessage(
+            message
+        );
+
+
+    // --------------------------------------------------------
+    // CLIENT NAME
+    // --------------------------------------------------------
+
+    const clientName =
+        normalized.clientName ||
+        '';
+
+
+    // --------------------------------------------------------
+    // GET STATE
+    // --------------------------------------------------------
+
+    const state =
+        getSalesState(
+            clientId,
+            clientName
+        );
+
+
+    // --------------------------------------------------------
+    // START
+    // --------------------------------------------------------
+
+    if (
+        normalized.type === 'start'
+    ) {
+
+        return processStart(
+            clientId,
+            clientName
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // FIRST REAL MESSAGE
+    // --------------------------------------------------------
+
+    let initialGreeting =
+        null;
+
+
+    if (
+        state.history.length === 0
+    ) {
+
+        const startResult =
+            processStart(
+                clientId,
+                clientName
+            );
+
+        initialGreeting =
+            startResult.text;
+    }
+
+
+    // --------------------------------------------------------
+    // FILE
+    // --------------------------------------------------------
+
+    if (
+        normalized.type === 'file'
+    ) {
+
+        const fileText =
+            await processFileMessage(
+                state,
+                normalized
+            );
+
+
+        const missing =
+            calculateMissing(
+                state
+            );
+
+
+        state.missing =
+            missing;
+
+
+        const actions =
+            getActions(
+                state
+            );
+
+
+        const text =
+            initialGreeting
+                ? `${initialGreeting}\n\n${fileText}`
+                : fileText;
+
+
+        return {
+
+            text,
+
+            actions,
+
+            project:
+                state.project,
+
+            missing,
+
+            stage:
+                state.stage,
+
+            intent:
+                'qualification',
+
+            readyForManager:
+                missing.length === 0,
+
+            managerSummary:
+                missing.length === 0
+                    ? buildManagerSummary(
+                        state
+                    )
+                    : null
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // ACTION
+    // --------------------------------------------------------
+
+    let userText = '';
+
+
+    if (
+        normalized.type === 'action'
+    ) {
+
+        userText =
+            actionToText(
+                normalized
+            );
+
+
+        const applied =
+            applyAction(
+                state,
+                normalized
+            );
+
+
+        if (
+            applied
+        ) {
+            userText =
+                applied;
+        }
+
+    } else {
+
+        userText =
+            normalized.text ||
+            '';
+    }
+
+
+    // --------------------------------------------------------
+    // EMPTY
+    // --------------------------------------------------------
+
+    if (!userText) {
+
+        const fallback =
+            buildControlledQuestion(
+                state
+            );
+
+
+        return {
+
+            text:
+                initialGreeting
+                    ? `${initialGreeting}\n\n${fallback}`
+                    : fallback,
+
+            actions:
+                getActions(
+                    state
+                ),
+
+            project:
+                state.project,
+
+            missing:
+                calculateMissing(
+                    state
+                ),
+
+            stage:
+                state.stage,
+
+            intent:
+                'other',
+
+            readyForManager:
+                false,
+
+            managerSummary:
+                null
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // ADD USER HISTORY
+    // --------------------------------------------------------
+
+    addHistory(
+        state,
+        'user',
+        userText
+    );
+
+
+    // --------------------------------------------------------
+    // AI EXTRACTION
+    // --------------------------------------------------------
+
+    try {
+
+        const extracted =
+            await extractClientData(
+                state,
+                userText
+            );
+
+
+        mergeProjectData(
+            state,
+            extracted
+        );
+
+
+        cleanDependentFields(
+            state
+        );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Sales Engine extraction error:',
+            error.message
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // INTENT
+    // --------------------------------------------------------
+
+    let intent =
+        'qualification';
+
+
+    try {
+
+        intent =
+            await detectIntent(
+                state,
+                userText
+            );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Sales Engine intent error:',
+            error.message
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // MANAGER REQUEST
+    // --------------------------------------------------------
+
+    if (
+        intent === 'manager_request'
+    ) {
+
+        const text =
+            'Конечно. Передам ваш запрос менеджеру.';
+
+
+        addHistory(
+            state,
+            'assistant',
+            text
+        );
+
+
+        const result =
+            prepareResult(
+                state,
+                text,
+                intent
+            );
+
+
+        if (
+            initialGreeting
+        ) {
+
+            result.text =
+                `${initialGreeting}\n\n${result.text}`;
+        }
+
+
+        return result;
+    }
+
+
+    // --------------------------------------------------------
+    // GENERATE RESPONSE
+    // --------------------------------------------------------
+
+    let assistantText = '';
+
+
+    try {
+
+        assistantText =
+            await generateAssistantText(
+                state,
+                userText
+            );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Sales Engine response error:',
+            error.message
+        );
+
+        assistantText =
+            buildControlledQuestion(
+                state
+            ) ||
+            'Спасибо. Информация зафиксирована.';
+    }
+
+
+    // --------------------------------------------------------
+    // HISTORY
+    // --------------------------------------------------------
+
+    addHistory(
+        state,
+        'assistant',
+        assistantText
+    );
+
+
+    // --------------------------------------------------------
+    // RESULT
+    // --------------------------------------------------------
+
+    const result =
+        prepareResult(
+            state,
+            assistantText,
+            intent
+        );
+
+
+    // --------------------------------------------------------
+    // INITIAL GREETING
+    // --------------------------------------------------------
+
+    if (
+        initialGreeting
+    ) {
+
+        result.text =
+            `${initialGreeting}\n\n${result.text}`;
+    }
+
+
+    return result;
+}
+
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
+module.exports = {
+
+    processSalesMessage,
+
+    processStart,
+
+    getSalesState,
+
+    resetSalesClient,
+
+    deleteSalesClient,
+
+    addHistory,
+
+    getHistory,
+
+    calculateMissing,
+
+    getNextAction,
+
+    getActions,
+
+    buildManagerSummary,
+
+    buildClientSummary,
+
+    EVENT_TYPES,
+
+    LEVELS,
+
+    PERSONNEL,
+
+    PLACES,
+
+    EQUIPMENT,
+
+    MOUNT,
+
+    DEMOUNT
+
+};
+objection:
+клиент сомневается, возражает, не хочет отвечать, выражает недоверие.
+
+correction:
+клиент исправляет ранее сообщённую информацию.
+
+manager_request:
+клиент просит связать его с менеджером или человеком.
+
+file_submission:
+клиент отправляет файл или сообщает о наличии ТЗ/райдера.
+
+Если сообщение одновременно содержит данные проекта и вопрос,
+выбирай наиболее содержательный intent.
+
+Верни ТОЛЬКО JSON:
+
+{
+  "intent": "..."
+}
+`;
+
+
+    try {
+
+        const raw =
+            await callDeepSeek(
+                [
+                    {
+                        role: 'system',
+                        content:
+                            'Ты классификатор намерения. Верни только JSON.'
+                    },
+
+                    {
+                        role: 'user',
+                        content:
+                            JSON.stringify({
+                                currentProject:
+                                    state.project,
+
+                                history:
+                                    state.history.slice(
+                                        -10
+                                    ),
+
+                                message
+                            })
+                    },
+
+                    {
+                        role: 'system',
+                        content: prompt
+                    }
+                ],
+                {
+                    temperature: 0,
+                    max_tokens: 150
+                }
+            );
+
+
+        const parsed =
+            extractJSON(raw);
+
+
+        if (
+            parsed &&
+            parsed.intent
+        ) {
+
+            return String(
+                parsed.intent
+            );
+        }
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Ошибка detectIntent:',
+            error.message
+        );
+    }
+
+
+    return 'new_request';
+}
+
+
+// ============================================================
+// BUILD CONVERSATION CONTEXT
+// ============================================================
+
+function buildConversationContext(
+    state
+) {
+
+    return `
+ТЕКУЩЕЕ СОСТОЯНИЕ ПРОЕКТА:
+
+${JSON.stringify(
+    state.project,
+    null,
+    2
+)}
+
+ИНФОРМАЦИЯ О КЛИЕНТЕ:
+
+${JSON.stringify(
+    state.client,
+    null,
+    2
+)}
+
+НЕДОСТАЮЩАЯ ИНФОРМАЦИЯ:
+
+${JSON.stringify(
+    state.missing,
+    null,
+    2
+)}
+
+ТЕКУЩИЙ ЭТАП:
+
+${state.stage}
+
+ПОСЛЕДНЕЕ ДЕЙСТВИЕ:
+
+${state.lastAction || 'нет'}
+`;
+}
+
+
+// ============================================================
+// GENERATE ASSISTANT RESPONSE
+// ============================================================
+//
+// Важный принцип:
+//
+// DeepSeek НЕ решает, какое поле спрашивать.
+//
+// JS Sales Engine уже определил missing/action.
+//
+// DeepSeek только формулирует естественный ответ.
+//
+
+async function generateAssistantResponse(
+    state,
+    userMessage
+) {
+
+    const missing =
+        calculateMissing(
+            state
+        );
+
+
+    state.missing =
+        missing;
+
+
+    const nextAction =
+        getNextAction(
+            state
+        );
+
+
+    const controlledQuestion =
+        buildControlledQuestion(
+            state
+        );
+
+
+    const context =
+        buildConversationContext(
+            state
+        );
+
+
+    const system = `
+${SYSTEM_PROMPT}
+
+============================================================
+SALES ENGINE
+============================================================
+
+Ты работаешь внутри Sales Engine компании MLK.
+
+Ты — Дмитрий, консультант по техническому оснащению
+мероприятий «под ключ».
+
+Твоя задача — вести естественный диалог с клиентом,
+отвечать на его вопросы и помогать собрать информацию
+для подготовки коммерческого предложения.
+
+============================================================
+ЖЁСТКИЕ ПРАВИЛА
+============================================================
+
+1. Не выдумывай факты.
+
+2. Не выдумывай стоимость.
+
+3. Не называй цены, если их нет в переданном контексте.
+
+4. Не придумывай характеристики оборудования.
+
+5. Не придумывай кейсы MLK.
+
+6. Для портфолио используй только PORTFOLIO ниже.
+
+7. Если клиент уже сообщил информацию —
+   не спрашивай её повторно.
+
+8. Если клиент исправил информацию —
+   используй новое значение.
+
+9. Если клиент задаёт вопрос,
+   сначала ответь на него.
+
+10. После ответа продолжай квалификацию,
+    если это уместно.
+
+11. Не показывай клиенту внутренние названия полей:
+    eventType, eventLevel, guestCount и т.п.
+
+12. Не сообщай клиенту внутреннюю логику Sales Engine.
+
+13. Не говори, что ты AI, если клиент напрямую
+    об этом не спрашивает.
+
+14. Всегда обращайся к клиенту на «Вы».
+
+15. Если имя клиента известно,
+    используй его естественно, но не в каждом сообщении.
+
+16. MLK работает с техническим оснащением
+    мероприятий «под ключ».
+
+17. Не обещай того, чего нет в контексте.
+
+============================================================
+ТЕКУЩИЙ КОНТЕКСТ
+============================================================
+
+${context}
+
+============================================================
+СЛЕДУЮЩИЙ КОНТРОЛИРУЕМЫЙ ШАГ
+============================================================
+
+${JSON.stringify(
+    nextAction,
+    null,
+    2
+)}
+
+============================================================
+КОНТРОЛИРУЕМЫЙ ВОПРОС
+============================================================
+
+${
+    controlledQuestion ||
+    'Квалификация завершена.'
+}
+
+============================================================
+ПОРТФОЛИО MLK
+============================================================
+
+${PORTFOLIO_TEXT}
+
+============================================================
+ПОСЛЕДНЕЕ СООБЩЕНИЕ КЛИЕНТА
+============================================================
+
+${userMessage}
+
+============================================================
+ФОРМАТ ОТВЕТА
+============================================================
+
+Напиши только готовый текст сообщения клиенту.
+
+Не добавляй:
+- JSON;
+- технические комментарии;
+- внутренние названия полей;
+- анализ;
+- инструкции для менеджера.
+
+Ответ должен быть естественным и достаточно коротким.
+`;
+
+
+    const messages = [
+        {
+            role: 'system',
+            content: system
+        }
+    ];
+
+
+    // Добавляем историю, но не всю бесконечно.
+    for (
+        const item of
+        state.history.slice(-16)
+    ) {
+
+        if (
+            item.role === 'user'
+        ) {
+
+            messages.push({
+                role: 'user',
+                content:
+                    item.content
+            });
+
+        } else if (
+            item.role === 'assistant'
+        ) {
+
+            messages.push({
+                role: 'assistant',
+                content:
+                    item.content
+            });
+        }
+    }
+
+
+    // Текущее сообщение отдельно,
+    // чтобы DeepSeek точно его видел.
+    messages.push({
+        role: 'user',
+        content:
+            userMessage
+    });
+
+
+    try {
+
+        const answer =
+            await callDeepSeek(
+                messages,
+                {
+                    temperature: 0.4,
+                    max_tokens: 700
+                }
+            );
+
+
+        return answer;
+
+    } catch (error) {
+
+        console.error(
+            '❌ generateAssistantResponse:',
+            error.message
+        );
+
+
+        // DeepSeek недоступен —
+        // Sales Engine всё равно продолжает воронку.
+        return controlledQuestion ||
+            'Спасибо, информацию зафиксировал. Подскажите, пожалуйста, дополнительные детали по проекту.';
+    }
+}
+
+
+// ============================================================
+// CONTROLLED FALLBACK TEXT
+// ============================================================
+
+function getFallbackQuestion(
+    state
+) {
+
+    const question =
+        buildControlledQuestion(
+            state
+        );
+
+
+    if (question) {
+        return question;
+    }
+
+
+    return 'Спасибо, информацию зафиксировал.';
+}
+
+
+// ============================================================
+// MANAGER HANDOFF
+// ============================================================
+
+function isManagerRequest(
+    intent,
+    text
+) {
+
+    if (
+        intent === 'manager_request'
+    ) {
+        return true;
+    }
+
+
+    const normalized =
+        String(text || '')
+            .toLowerCase()
+            .trim();
+
+
+    const patterns = [
+
+        'позовите менеджера',
+
+        'свяжите с менеджером',
+
+        'соедините с менеджером',
+
+        'нужен менеджер',
+
+        'хочу менеджера',
+
+        'хочу поговорить с менеджером',
+
+        'с человеком',
+
+        'живого человека',
+
+        'свяжите с человеком',
+
+        'позовите человека'
+
+    ];
+
+
+    return patterns.some(
+        pattern =>
+            normalized.includes(
+                pattern
+            )
+    );
+}
+
+
+// ============================================================
+// READY FOR MANAGER
+// ============================================================
+
+function isReadyForManager(
+    state
+) {
+
+    return (
+        calculateMissing(
+            state
+        ).length === 0
+    );
+}
+
+
+// ============================================================
+// PROCESS ACTION MESSAGE
+// ============================================================
+
+async function processActionMessage(
+    state,
+    message
+) {
+
+    const actionText =
+        applyAction(
+            state,
+            message
+        );
+
+
+    if (!actionText) {
+
+        return prepareResult(
+            state,
+            getFallbackQuestion(
+                state
+            ),
+            'new_request'
+        );
+    }
+
+
+    addHistory(
+        state,
+        'user',
+        actionText,
+        {
+            source: 'telegram_action'
+        }
+    );
+
+
+    // После нажатия кнопки клиент может
+    // сразу закрыть несколько зависимостей.
+    cleanDependentFields(
+        state
+    );
+
+
+    const intent =
+        'new_request';
+
+
+    let responseText = '';
+
+
+    try {
+
+        responseText =
+            await generateAssistantResponse(
+                state,
+                actionText
+            );
+
+    } catch (error) {
+
+        responseText =
+            getFallbackQuestion(
+                state
+            );
+    }
+
+
+    addHistory(
+        state,
+        'assistant',
+        responseText
+    );
+
+
+    return prepareResult(
+        state,
+        responseText,
+        intent
+    );
+}
+
+
+// ============================================================
+// PROCESS TEXT MESSAGE
+// ============================================================
+
+async function processTextMessage(
+    state,
+    text
+) {
+
+    const cleanText =
+        String(text || '')
+            .trim();
+
+
+    if (!cleanText) {
+
+        return prepareResult(
+            state,
+            getFallbackQuestion(
+                state
+            ),
+            'new_request'
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // MANAGER REQUEST
+    // --------------------------------------------------------
+
+    let intent =
+        'new_request';
+
+
+    try {
+
+        intent =
+            await detectIntent(
+                state,
+                cleanText
+            );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Intent fallback:',
+            error.message
+        );
+    }
+
+
+    if (
+        isManagerRequest(
+            intent,
+            cleanText
+        )
+    ) {
+
+        addHistory(
+            state,
+            'user',
+            cleanText
+        );
+
+
+        const response =
+            'Конечно. Передам ваш запрос менеджеру.';
+
+
+        addHistory(
+            state,
+            'assistant',
+            response
+        );
+
+
+        state.stage =
+            'manager_handoff';
+
+
+        state.updatedAt =
+            new Date().toISOString();
+
+
+        return {
+
+            text:
+                response,
+
+            actions: [
+
+                {
+                    type: 'manager_handoff'
+                }
+
+            ],
+
+            project:
+                state.project,
+
+            missing:
+                calculateMissing(
+                    state
+                ),
+
+            stage:
+                'manager_handoff',
+
+            intent:
+                'manager_request',
+
+            readyForManager:
+                true,
+
+            managerSummary:
+                buildManagerSummary(
+                    state
+                )
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // USER HISTORY
+    // --------------------------------------------------------
+
+    addHistory(
+        state,
+        'user',
+        cleanText
+    );
+
+
+    // --------------------------------------------------------
+    // EXTRACT
+    // --------------------------------------------------------
+
+    let extracted = {};
+
+
+    try {
+
+        extracted =
+            await extractProjectData(
+                state,
+                cleanText
+            );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Extraction error:',
+            error.message
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // MERGE
+    // --------------------------------------------------------
+
+    mergeProjectData(
+        state,
+        extracted
+    );
+
+
+    // --------------------------------------------------------
+    // CLEAN DEPENDENCIES
+    // --------------------------------------------------------
+
+    cleanDependentFields(
+        state
+    );
+
+
+    // --------------------------------------------------------
+    // SAVE INTENT
+    // --------------------------------------------------------
+
+    state.intent =
+        intent;
+
+
+    // --------------------------------------------------------
+    // CLIENT REQUEST
+    // --------------------------------------------------------
+
+    if (
+        !state.project.clientRequest &&
+        intent === 'new_request'
+    ) {
+
+        state.project.clientRequest =
+            cleanText;
+    }
+
+
+    // --------------------------------------------------------
+    // RESPONSE
+    // --------------------------------------------------------
+
+    let responseText = '';
+
+
+    try {
+
+        responseText =
+            await generateAssistantResponse(
+                state,
+                cleanText
+            );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Response error:',
+            error.message
+        );
+
+        responseText =
+            getFallbackQuestion(
+                state
+            );
+    }
+
+
+    // --------------------------------------------------------
+    // READY?
+    // --------------------------------------------------------
+
+    const ready =
+        isReadyForManager(
+            state
+        );
+
+
+    if (ready) {
+
+        responseText =
+            buildClientSummary(
+                state
+            );
+    }
+
+
+    addHistory(
+        state,
+        'assistant',
+        responseText
+    );
+
+
+    // --------------------------------------------------------
+    // PREPARE RESULT
+    // --------------------------------------------------------
+
+    return {
+
+        text:
+            responseText,
+
+        actions:
+            ready
+                ? [
+                    {
+                        type: 'quick_reply',
+                        tag: 'manager_handoff'
+                    }
+                ]
+                : getActions(
+                    state
+                ),
+
+        project:
+            state.project,
+
+        missing:
+            calculateMissing(
+                state
+            ),
+
+        stage:
+            ready
+                ? 'summary'
+                : calculateStage(
+                    state,
+                    intent,
+                    calculateMissing(
+                        state
+                    )
+                ),
+
+        intent,
+
+        readyForManager:
+            ready,
+
+        managerSummary:
+            ready
+                ? buildManagerSummary(
+                    state
+                )
+                : null
+    };
+}
+
+
+// ============================================================
+// MAIN PROCESSOR
+// ============================================================
+
+async function processSalesMessage(
+    clientId,
+    message
+) {
+
+    const normalized =
+        normalizeMessage(
+            message
+        );
+
+
+    // --------------------------------------------------------
+    // CLIENT NAME
+    // --------------------------------------------------------
+    //
+    // ВАЖНО:
+    // bot.js может передавать имя клиента вместе с сообщением.
+    //
+
+    const clientName =
+        normalized.clientName ||
+        '';
+
+
+    // --------------------------------------------------------
+    // START
+    // --------------------------------------------------------
+
+    if (
+        normalized.type === 'start'
+    ) {
+
+        return processStart(
+            clientId,
+            clientName
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // STATE
+    // --------------------------------------------------------
+
+    const state =
+        getSalesState(
+            clientId,
+            clientName
+        );
+
+
+    // --------------------------------------------------------
+    // FIRST REAL MESSAGE
+    // --------------------------------------------------------
+    //
+    // Если клиент впервые пишет не через /start,
+    // всё равно сначала формируем приветствие.
+    //
+
+    let initialGreeting =
+        null;
+
+
+    if (
+        state.history.length === 0
+    ) {
+
+        const startResult =
+            processStart(
+                clientId,
+                clientName
+            );
+
+
+        initialGreeting =
+            startResult.text;
+    }
+
+
+    // --------------------------------------------------------
+    // FILE
+    // --------------------------------------------------------
+
+    if (
+        normalized.type === 'file'
+    ) {
+
+        const fileText =
+            await processFileMessage(
+                state,
+                normalized
+            );
+
+
+        const missing =
+            calculateMissing(
+                state
+            );
+
+
+        state.missing =
+            missing;
+
+
+        const result = {
+
+            text:
+                initialGreeting
+                    ? `${initialGreeting}\n\n${fileText}`
+                    : fileText,
+
+            actions:
+                getActions(
+                    state
+                ),
+
+            project:
+                state.project,
+
+            missing,
+
+            stage:
+                state.stage,
+
+            intent:
+                'file_submission',
+
+            readyForManager:
+                missing.length === 0,
+
+            managerSummary:
+                missing.length === 0
+                    ? buildManagerSummary(
+                        state
+                    )
+                    : null
+        };
+
+
+        return result;
+    }
+
+
+    // --------------------------------------------------------
+    // ACTION
+    // --------------------------------------------------------
+
+    if (
+        normalized.type === 'action'
+    ) {
+
+        const result =
+            await processActionMessage(
+                state,
+                normalized
+            );
+
+
+        if (
+            initialGreeting
+        ) {
+
+            result.text =
+                `${initialGreeting}\n\n${result.text}`;
+        }
+
+
+        return result;
+    }
+
+
+    // --------------------------------------------------------
+    // TEXT
+    // --------------------------------------------------------
+
+    const result =
+        await processTextMessage(
+            state,
+            normalized.text
+        );
+
+
+    if (
+        initialGreeting
+    ) {
+
+        result.text =
+            `${initialGreeting}\n\n${result.text}`;
+    }
+
+
+    return result;
+}
+
+
+// ============================================================
+// BUILD MANAGER SUMMARY — SHORT
+// ============================================================
+
+function buildShortManagerSummary(
+    state
+) {
+
+    const p =
+        state.project;
+
+
+    const equipment =
+        getEquipmentLabels(
+            p.equipment
+        );
+
+
+    return [
+        `Клиент: ${state.client.name || 'Не указано'}`,
+
+        `Формат: ${getEventLabel(p.eventType)}`,
+
+        p.eventLevel
+            ? `Уровень: ${getLevelLabel(p.eventLevel)}`
+            : null,
+
+        p.guestCount !== null
+            ? `Гостей: ${p.guestCount}`
+            : null,
+
+        `Персонал: ${getPersonnelLabel(p.personnel)}`,
+
+        `Дата: ${p.dateStart || '—'} → ${p.dateEnd || '—'}`,
+
+        `Готовность: ${p.readyDate || '—'}`,
+
+        `Адрес: ${p.location || '—'}`,
+
+        `Место: ${getPlaceLabel(p.place)}`,
+
+        p.floor !== null
+            ? `Этаж: ${p.floor}`
+            : null,
+
+        p.lift
+            ? `Лифт: ${p.lift}`
+            : null,
+
+        p.liftDimensions
+            ? `Размеры лифта: ${p.liftDimensions}`
+            : null,
+
+        `Оборудование: ${
+            equipment.length
+                ? equipment.join(', ')
+                : '—'
+        }`,
+
+        `Монтаж: ${
+            MOUNT[p.mount]?.label ||
+            p.mount ||
+            '—'
+        }`,
+
+        p.mountTime
+            ? `Время монтажа: ${p.mountTime}`
+            : null,
+
+        `Демонтаж: ${
+            DEMOUNT[p.demount]?.label ||
+            p.demount ||
+            '—'
+        }`,
+
+        p.demountTime
+            ? `Время демонтажа: ${p.demountTime}`
+            : null
+    ]
+        .filter(Boolean)
+        .join('\n');
+}
+
+
+// ============================================================
+// PUBLIC HELPERS
+// ============================================================
+
+function getClientProject(
+    clientId
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    return state.project;
+}
+
+
+function getClientName(
+    clientId
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    return state.client.name || '';
+}
+
+
+function setClientName(
+    clientId,
+    name
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    state.client.name =
+        cleanString(name) || '';
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return state;
+}
+
+
+// ============================================================
+// UPDATE PROJECT FIELD
+// ============================================================
+
+function updateProjectField(
+    clientId,
+    field,
+    value
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    if (
+        !Object.prototype.hasOwnProperty.call(
+            state.project,
+            field
+        )
+    ) {
+
+        return state;
+    }
+
+
+    state.project[field] =
+        value;
+
+
+    cleanDependentFields(
+        state
+    );
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return state;
+}
+
+
+// ============================================================
+// ADD EQUIPMENT
+// ============================================================
+
+function addEquipment(
+    clientId,
+    equipment
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    const normalized =
+        normalizeEquipment(
+            Array.isArray(equipment)
+                ? equipment
+                : [equipment]
+        );
+
+
+    for (
+        const item of
+        normalized
+    ) {
+
+        if (
+            !state.project.equipment.includes(
+                item
+            )
+        ) {
+
+            state.project.equipment.push(
+                item
+            );
+        }
+    }
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return state;
+}
+
+
+// ============================================================
+// ADD CLIENT HISTORY
+// ============================================================
+
+function addClientHistory(
+    clientId,
+    role,
+    text,
+    meta = {}
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    addHistory(
+        state,
+        role,
+        text,
+        meta
+    );
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return state;
+}
+
+
+// ============================================================
+// GET CLIENT HISTORY
+// ============================================================
+
+function getClientHistory(
+    clientId
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    return [
+        ...state.history
+    ];
+}
+
+
+// ============================================================
+// GET SALES CONTEXT
+// ============================================================
+
+function getSalesContext(
+    clientId
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    return {
+
+        client:
+            {
+                ...state.client
+            },
+
+        project:
+            {
+                ...state.project,
+                equipment:
+                    Array.isArray(
+                        state.project.equipment
+                    )
+                        ? [
+                            ...state.project.equipment
+                        ]
+                        : []
+            },
+
+        intent:
+            state.intent,
+
+        missing:
+            calculateMissing(
+                state
+            ),
+
+        stage:
+            state.stage,
+
+        lastAction:
+            state.lastAction,
+
+        managerNotified:
+            state.managerNotified,
+
+        updatedAt:
+            state.updatedAt
+    };
+}
+
+
+// ============================================================
+// MANAGER SUMMARY EXPORT
+// ============================================================
+
+function getManagerSummary(
+    clientId
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    return buildManagerSummary(
+        state
+    );
+}
+
+
+// ============================================================
+// MANAGER NOTIFICATION FLAG
+// ============================================================
+
+function setManagerNotified(
+    clientId,
+    value = true
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    state.managerNotified =
+        Boolean(value);
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return state;
+}
+
+
+// ============================================================
+// SET LAST ACTION
+// ============================================================
+
+function setLastAction(
+    clientId,
+    action
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    state.lastAction =
+        action || null;
+
+
+    state.updatedAt =
+        new Date().toISOString();
+
+
+    return state;
+}
+
+
+// ============================================================
+// GET FULL STATE
+// ============================================================
+
+function getFullSalesState(
+    clientId
+) {
+
+    const state =
+        getSalesState(
+            clientId
+        );
+
+
+    return state;
+}
+
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
+module.exports = {
+
+    // Main Sales Engine
+    processSalesMessage,
+
+    processStart,
+
+    // State
+    getSalesState,
+    getFullSalesState,
+    resetSalesClient,
+    deleteSalesClient,
+
+    // Client
+    getClientName,
+    setClientName,
+
+    // Project
+    getClientProject,
+    updateProjectField,
+    addEquipment,
+
+    // History
+    addHistory,
+    addClientHistory,
+    getHistory,
+    getClientHistory,
+
+    // Sales context
+    getSalesContext,
+
+    // Actions / funnel
+    calculateMissing,
+    getNextAction,
+    getActions,
+
+    // Manager
+    buildManagerSummary,
+    buildShortManagerSummary,
+    getManagerSummary,
+    setManagerNotified,
+
+    // State helpers
+    setLastAction,
+
+    // Constants
+    EVENT_TYPES,
+    LEVELS,
+    PERSONNEL,
+    PLACES,
+    EQUIPMENT,
+    MOUNT,
+    DEMOUNT
+
+};
+
+    if (
+        !message ||
+        typeof message !== 'object'
+    ) {
+
+        return {
+            type: 'text',
+            text: ''
+        };
+    }
 
 
 // ============================================================
