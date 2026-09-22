@@ -2988,7 +2988,7 @@ console.log(
 
                         await sendTelegramFile(
                             telegramChatId,
-                            file.url,
+                            file.downloadLink,
                             file.name || 'file'
                         );
 
