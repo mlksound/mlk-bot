@@ -60,8 +60,6 @@ const ADMIN_CHAT_ID = (process.env.ADMIN_CHAT_ID || '').trim();
 
 const DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || '').trim();
 
-// Используем именно эту модель.
-// DEEPSEEK_MODEL из Render НЕ нужен.
 const DEEPSEEK_MODEL = 'deepseek-chat';
 
 // ------------------------------------------------------------
@@ -113,7 +111,6 @@ const PUBLIC_BASE_URL =
 // OPEN LINE
 // ------------------------------------------------------------
 
-// Если не указать — линия определяется автоматически.
 const BITRIX_OPENLINE_ID =
     Number(process.env.BITRIX_OPENLINE_ID || 0);
 
@@ -131,19 +128,37 @@ const BITRIX_INSTALL_URL =
 // STORAGE
 // ------------------------------------------------------------
 
-// Render Free не гарантирует постоянный диск.
-// Если /data существует — используем его.
-// Иначе /tmp.
-//
-// ВАЖНО:
-// OAuth после рестарта Free-инстанса может исчезнуть.
-// В таком случае приложение нужно переустановить,
-// чтобы Bitrix снова прислал auth.
 const DATA_DIR =
     fs.existsSync('/data') ? '/data' : '/tmp';
 
 const AUTH_FILE =
     path.join(DATA_DIR, 'bitrix-auth.json');
+
+// ------------------------------------------------------------
+// ВРЕМЕННОЕ ХРАНИЛИЩЕ ФАЙЛОВ ДЛЯ BITRIX
+// ------------------------------------------------------------
+
+const BITRIX_FILE_DIR =
+    path.join(
+        DATA_DIR,
+        'mlk-bitrix-files'
+    );
+
+if (
+    !fs.existsSync(
+        BITRIX_FILE_DIR
+    )
+) {
+    fs.mkdirSync(
+        BITRIX_FILE_DIR,
+        {
+            recursive: true
+        }
+    );
+}
+
+const bitrixTempFiles =
+    new Map();
 
 const OFFSET_FILE =
     path.join(DATA_DIR, 'bitrix-offset.json');
@@ -279,7 +294,6 @@ let bitrixAuth = loadAuth();
 
 // ============================================================
 // 5. BITRIX WEBHOOK — СТАРЫЙ КОНТУР
-// НЕ МЕНЯЕМ ЕГО ЛОГИКУ
 // ============================================================
 
 async function bitrixWebhookCall(
@@ -429,7 +443,6 @@ async function bitrixOAuthCall(
                 }
             );
 
-        // Некоторые ошибки приходят HTTP 200.
         if (
             data &&
             (
@@ -460,8 +473,6 @@ async function bitrixOAuthCall(
 
     } catch (e) {
 
-        // Если fetchJson выбросил ошибку с текстом
-        // expired_token / NO_AUTH_FOUND — пробуем refresh.
         if (
             retry &&
             (
@@ -583,6 +594,359 @@ async function answerTelegramCallback(
 }
 
 // ============================================================
+// СКАЧИВАНИЕ ФАЙЛА ИЗ TELEGRAM ДЛЯ BITRIX
+// ============================================================
+
+async function downloadTelegramFileForBitrix(
+    fileId,
+    fileName
+) {
+
+    const token =
+        crypto
+            .randomBytes(32)
+            .toString('hex');
+
+    const safeName =
+        path.basename(
+            fileName || 'file'
+        );
+
+    const filePath =
+        path.join(
+            BITRIX_FILE_DIR,
+            `${token}-${safeName}`
+        );
+
+    // --------------------------------------------------------
+    // 1. Получаем Telegram file_path
+    // --------------------------------------------------------
+
+    const getFileResponse =
+        await fetch(
+            `${TELEGRAM_API}/getFile?file_id=${encodeURIComponent(fileId)}`
+        );
+
+    if (!getFileResponse.ok) {
+
+        throw new Error(
+            `Telegram getFile HTTP ${getFileResponse.status}`
+        );
+    }
+
+    const getFileData =
+        await getFileResponse.json();
+
+    if (
+        !getFileData.ok ||
+        !getFileData.result?.file_path
+    ) {
+
+        throw new Error(
+            `Telegram getFile failed: ${JSON.stringify(getFileData)}`
+        );
+    }
+
+    const filePathTelegram =
+        getFileData.result.file_path;
+
+    // --------------------------------------------------------
+    // 2. Скачиваем сам файл
+    // --------------------------------------------------------
+
+    const downloadUrl =
+        `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePathTelegram}`;
+
+    log(
+        '📥 Downloading Telegram file:',
+        safeName
+    );
+
+    const fileResponse =
+        await fetch(
+            downloadUrl
+        );
+
+    if (!fileResponse.ok) {
+
+        throw new Error(
+            `Telegram file download HTTP ${fileResponse.status}`
+        );
+    }
+
+    // --------------------------------------------------------
+    // 3. Сохраняем временно
+    // --------------------------------------------------------
+
+    const buffer =
+        Buffer.from(
+            await fileResponse.arrayBuffer()
+        );
+
+    fs.writeFileSync(
+        filePath,
+        buffer
+    );
+
+    // --------------------------------------------------------
+    // 4. Запоминаем файл
+    // --------------------------------------------------------
+
+    bitrixTempFiles.set(
+        token,
+        {
+            filePath,
+            fileName: safeName,
+            createdAt: Date.now()
+        }
+    );
+
+    log(
+        '📦 Temporary Bitrix file prepared:',
+        safeName
+    );
+
+    return {
+        token,
+        fileName: safeName
+    };
+}
+
+// ============================================================
+// TELEGRAM MEDIA -> BITRIX FILES
+// ============================================================
+
+async function getTelegramConnectorFiles(
+    message
+) {
+
+    const result = [];
+
+    if (!message) {
+        return result;
+    }
+
+    const media = [];
+
+    // PHOTO
+    if (
+        Array.isArray(message.photo) &&
+        message.photo.length
+    ) {
+
+        const photo =
+            message.photo[
+                message.photo.length - 1
+            ];
+
+        if (photo?.file_id) {
+
+            media.push({
+                file_id:
+                    photo.file_id,
+
+                name:
+                    'photo.jpg'
+            });
+        }
+    }
+
+    // DOCUMENT
+    if (
+        message.document?.file_id
+    ) {
+
+        media.push({
+            file_id:
+                message.document.file_id,
+
+            name:
+                message.document.file_name ||
+                'document'
+        });
+    }
+
+    // VIDEO
+    if (
+        message.video?.file_id
+    ) {
+
+        media.push({
+            file_id:
+                message.video.file_id,
+
+            name:
+                message.video.file_name ||
+                'video.mp4'
+        });
+    }
+
+    // AUDIO
+    if (
+        message.audio?.file_id
+    ) {
+
+        media.push({
+            file_id:
+                message.audio.file_id,
+
+            name:
+                message.audio.file_name ||
+                'audio.mp3'
+        });
+    }
+
+    // VOICE
+    if (
+        message.voice?.file_id
+    ) {
+
+        media.push({
+            file_id:
+                message.voice.file_id,
+
+            name:
+                'voice.ogg'
+        });
+    }
+
+    // ANIMATION / GIF
+    if (
+        message.animation?.file_id
+    ) {
+
+        media.push({
+            file_id:
+                message.animation.file_id,
+
+            name:
+                message.animation.file_name ||
+                'animation.gif'
+        });
+    }
+
+    for (
+        const item of media
+    ) {
+
+        if (!item.file_id) {
+            continue;
+        }
+
+        result.push({
+            fileId:
+                item.file_id,
+
+            name:
+                item.name
+        });
+
+        log(
+            '📎 Telegram file prepared for Bitrix:',
+            item.name
+        );
+    }
+
+    return result;
+}
+
+// ============================================================
+// BITRIX FILE -> TELEGRAM
+// ============================================================
+
+async function sendTelegramFile(
+    chatId,
+    fileUrl,
+    fileName = 'file'
+) {
+
+    if (!fileUrl) {
+        return null;
+    }
+
+    const lowerName =
+        String(
+            fileName
+        ).toLowerCase();
+
+    const imageExtensions = [
+        '.jpg',
+        '.jpeg',
+        '.png',
+        '.gif',
+        '.webp',
+        '.bmp'
+    ];
+
+    const isImage =
+        imageExtensions.some(
+            ext =>
+                lowerName.endsWith(ext)
+        );
+
+    if (isImage) {
+
+        return telegramCall(
+            'sendPhoto',
+            {
+                chat_id:
+                    String(chatId),
+
+                photo:
+                    fileUrl
+            }
+        );
+    }
+
+    if (
+        lowerName.endsWith('.mp4') ||
+        lowerName.endsWith('.mov') ||
+        lowerName.endsWith('.m4v')
+    ) {
+
+        return telegramCall(
+            'sendVideo',
+            {
+                chat_id:
+                    String(chatId),
+
+                video:
+                    fileUrl
+            }
+        );
+    }
+
+    if (
+        lowerName.endsWith('.mp3') ||
+        lowerName.endsWith('.wav') ||
+        lowerName.endsWith('.m4a')
+    ) {
+
+        return telegramCall(
+            'sendAudio',
+            {
+                chat_id:
+                    String(chatId),
+
+                audio:
+                    fileUrl
+            }
+        );
+    }
+
+    return telegramCall(
+        'sendDocument',
+        {
+            chat_id:
+                String(chatId),
+
+            document:
+                fileUrl
+        }
+    );
+}
+
+// ============================================================
 // 8. DEEPSEEK
 // ============================================================
 
@@ -655,32 +1019,11 @@ async function askDeepSeek(userText) {
 
 const clients = new Map();
 
-/*
-telegramId -> {
-    mode: AI | MANAGER,
-    name,
-    username,
-    lastSeen
-}
-*/
-
 const adminMessageMap =
     new Map();
 
-/*
-admin Telegram message_id
-    ->
-telegram client id
-*/
-
 const bitrixChatMap =
     new Map();
-
-/*
-Bitrix chat_id
-    ->
-Telegram client id
-*/
 
 function getClient(clientId) {
 
@@ -736,10 +1079,6 @@ let connectorReady = false;
 
 let connectorSetupRunning = false;
 
-// ------------------------------------------------------------
-// ICON
-// ------------------------------------------------------------
-
 const CONNECTOR_ICON =
     'data:image/svg+xml,' +
     encodeURIComponent(
@@ -750,10 +1089,6 @@ const CONNECTOR_ICON =
         'font-size="50" fill="white">T</text>' +
         '</svg>'
     );
-
-// ------------------------------------------------------------
-// FIND OPEN LINE
-// ------------------------------------------------------------
 
 async function findOpenLine() {
 
@@ -804,7 +1139,6 @@ async function findOpenLine() {
         );
     }
 
-    // Сначала пытаемся найти линию Telegram.
     let line =
         lines.find(
             item =>
@@ -815,8 +1149,6 @@ async function findOpenLine() {
                 .includes('telegram')
         );
 
-    // Если Telegram-линии нет —
-    // берём первую активную.
     if (!line) {
         line = lines[0];
     }
@@ -832,10 +1164,6 @@ async function findOpenLine() {
 
     return line;
 }
-
-// ------------------------------------------------------------
-// REGISTER CONNECTOR
-// ------------------------------------------------------------
 
 async function registerConnector() {
 
@@ -929,10 +1257,6 @@ async function registerConnector() {
     return result;
 }
 
-// ------------------------------------------------------------
-// BIND MANAGER MESSAGE EVENT
-// ------------------------------------------------------------
-
 async function bindConnectorEvent() {
 
     if (!bitrixAuth?.access_token) {
@@ -964,10 +1288,6 @@ async function bindConnectorEvent() {
 
     return result;
 }
-
-// ------------------------------------------------------------
-// ACTIVATE CONNECTOR
-// ------------------------------------------------------------
 
 async function activateConnector(
     lineId
@@ -1041,10 +1361,6 @@ async function activateConnector(
     return true;
 }
 
-// ------------------------------------------------------------
-// CONNECTOR STATUS
-// ------------------------------------------------------------
-
 async function connectorStatus(
     lineId
 ) {
@@ -1080,10 +1396,6 @@ async function connectorStatus(
         return null;
     }
 }
-
-// ------------------------------------------------------------
-// COMPLETE CONNECTOR SETUP
-// ------------------------------------------------------------
 
 async function setupConnector() {
 
@@ -1127,21 +1439,16 @@ async function setupConnector() {
             '========================================'
         );
 
-        // 1. Register.
         await registerConnector();
 
-        // 2. Event.
         await bindConnectorEvent();
 
-        // 3. Open Line.
         await findOpenLine();
 
-        // 4. Activate.
         await activateConnector(
             bitrixOpenLineId
         );
 
-        // 5. Check.
         await connectorStatus(
             bitrixOpenLineId
         );
@@ -1193,7 +1500,8 @@ async function sendToBitrixConnector(
     clientId,
     text,
     senderType = 'client',
-    telegramUser = null
+    telegramUser = null,
+    files = []
 ) {
 
     if (!BITRIX_CONNECTOR_ENABLED) {
@@ -1214,6 +1522,62 @@ async function sendToBitrixConnector(
 
     if (!bitrixOpenLineId) {
         await findOpenLine();
+    }
+
+    // ------------------------------------------------------------
+    // FILES
+    // ------------------------------------------------------------
+
+    const rawFiles =
+        Array.isArray(files)
+            ? files.filter(
+                file =>
+                    file &&
+                    file.fileId
+            )
+            : [];
+
+    const preparedFiles = [];
+
+    for (
+        const raw of rawFiles
+    ) {
+
+        try {
+
+            const prepared =
+                await downloadTelegramFileForBitrix(
+                    raw.fileId,
+                    raw.name
+                );
+
+            const bitrixFileUrl =
+                `${PUBLIC_BASE_URL}/bitrix-file/${encodeURIComponent(prepared.token)}`;
+
+            preparedFiles.push({
+                url:
+                    bitrixFileUrl,
+
+                name:
+                    prepared.fileName
+            });
+
+        } catch (e) {
+
+            error(
+                '❌ Failed to prepare file for Bitrix:',
+                e.message
+            );
+        }
+    }
+
+    if (
+        !text &&
+        preparedFiles.length
+    ) {
+
+        text =
+            '📎 Вложение из Telegram';
     }
 
     const user = {
@@ -1238,17 +1602,32 @@ async function sendToBitrixConnector(
             'Y'
     };
 
-    /*
-    ВАЖНО:
-    Для AI ответов мы НЕ создаём нового пользователя.
-    И AI, и клиент идут в одном Telegram-диалоге.
-    */
-
     const messageId =
         `tg_${Date.now()}_` +
         crypto
             .randomBytes(4)
             .toString('hex');
+
+    const message = {
+        id:
+            messageId,
+
+        date:
+            Math.floor(
+                Date.now() / 1000
+            ),
+
+        text:
+            String(text)
+    };
+
+    if (
+        preparedFiles.length
+    ) {
+
+        message.files =
+            preparedFiles;
+    }
 
     const result =
         await bitrixOAuthCall(
@@ -1267,19 +1646,7 @@ async function sendToBitrixConnector(
 
                         user,
 
-                        message: {
-
-                            id:
-                                messageId,
-
-                            date:
-                                Math.floor(
-                                    Date.now() / 1000
-                                ),
-
-                            text:
-                                String(text)
-                        },
+                        message,
 
                         chat: {
 
@@ -1424,8 +1791,7 @@ async function processTelegramClientMessage(
 ) {
 
     if (
-        !message?.chat?.id ||
-        !message.text
+        !message?.chat?.id
     ) {
         return;
     }
@@ -1434,9 +1800,21 @@ async function processTelegramClientMessage(
         String(message.chat.id);
 
     const text =
-        String(message.text).trim();
+        String(
+            message.text ||
+            message.caption ||
+            ''
+        ).trim();
 
-    if (!text) {
+    const telegramFiles =
+        await getTelegramConnectorFiles(
+            message
+        );
+
+    if (
+        !text &&
+        !telegramFiles.length
+    ) {
         return;
     }
 
@@ -1450,14 +1828,14 @@ async function processTelegramClientMessage(
         message.from?.username || '';
 
     log(
-        `📨 Client ${clientId}: ${text}`
+        `📨 Client ${clientId}: ${text || '[MEDIA]'}`
     );
 
     // 1. Полностью дублируем клиентское сообщение
     await mirrorToAdmin(
         clientId,
         'client',
-        text
+        text || '[MEDIA]'
     );
 
     // 2. Telegram -> Bitrix
@@ -1467,7 +1845,8 @@ async function processTelegramClientMessage(
             clientId,
             text,
             'client',
-            message.from
+            message.from,
+            telegramFiles
         );
 
     } catch (e) {
@@ -1491,17 +1870,47 @@ async function processTelegramClientMessage(
     // 4. SALES ENGINE
     try {
 
-        const salesInput =
+        let salesInput;
+
+        if (
             text === '/start'
-                ? {
-                    type: 'start',
-                    clientName: client.name || ''
-                }
-                : {
-                    type: 'text',
-                    text,
-                    clientName: client.name || ''
-                };
+        ) {
+
+            salesInput = {
+                type: 'start',
+
+                clientName:
+                    client.name || ''
+            };
+
+        } else if (
+            telegramFiles.length
+        ) {
+
+            salesInput = {
+                type: 'file',
+
+                fileName:
+                    telegramFiles[0].name,
+
+                fileText:
+                    text || '',
+
+                clientName:
+                    client.name || ''
+            };
+
+        } else {
+
+            salesInput = {
+                type: 'text',
+
+                text,
+
+                clientName:
+                    client.name || ''
+            };
+        }
 
         const result =
             await processSalesMessage(
@@ -1525,27 +1934,25 @@ async function processTelegramClientMessage(
             `intent=${result?.intent || ''}`
         );
 
-        // Telegram
         await sendTelegramMessage(
             clientId,
             answer
         );
 
-        // Админ Telegram
         await mirrorToAdmin(
             clientId,
             'ai',
             answer
         );
 
-        // Bitrix
         try {
 
             await sendToBitrixConnector(
                 clientId,
                 answer,
                 'ai',
-                message.from
+                message.from,
+                []
             );
 
         } catch (e) {
@@ -1598,7 +2005,6 @@ async function processTelegramAdminMessage(
         return;
     }
 
-    // /ai CLIENT_ID
     if (text.startsWith('/ai ')) {
 
         const clientId =
@@ -1620,7 +2026,6 @@ async function processTelegramAdminMessage(
         return;
     }
 
-    // /manager CLIENT_ID
     if (text.startsWith('/manager ')) {
 
         const clientId =
@@ -1642,7 +2047,6 @@ async function processTelegramAdminMessage(
         return;
     }
 
-    // Reply на сообщение клиента в админском Telegram
     const replyId =
         message.reply_to_message?.message_id;
 
@@ -1660,20 +2064,16 @@ async function processTelegramAdminMessage(
         return;
     }
 
-    // Ответ менеджера автоматически
-    // переводит клиента в MANAGER
     setClientMode(
         clientId,
         'MANAGER'
     );
 
-    // Telegram
     await sendTelegramMessage(
         clientId,
         text
     );
 
-    // Bitrix
     try {
 
         await sendToBitrixConnector(
@@ -1683,7 +2083,8 @@ async function processTelegramAdminMessage(
             {
                 first_name:
                     'Менеджер'
-            }
+            },
+            []
         );
 
     } catch (e) {
@@ -1894,11 +2295,6 @@ async function telegramPoll() {
 
 // ============================================================
 // 17. BITRIX FETCH
-//
-// ВАЖНО:
-// Это тот самый старый рабочий контур.
-// Не переводим его на OAuth.
-// Не переводим его на Connector.
 // ============================================================
 
 let bitrixOffset = 0;
@@ -1985,12 +2381,6 @@ async function bitrixFetchPoll() {
 
         try {
 
-            /*
-            ==================================================
-            НЕ МЕНЯЕМ РАБОЧУЮ СХЕМУ
-            ==================================================
-            */
-
             const result =
                 await bitrixWebhookCall(
                     'imbot.v2.Event.get',
@@ -2064,13 +2454,6 @@ async function bitrixFetchPoll() {
                             dialogId
                         ) {
 
-                            /*
-                            Старый внутренний
-                            Bitrix-чат продолжает
-                            работать независимо
-                            от Connector.
-                            */
-
                             const answer =
                                 await askDeepSeek(
                                     text
@@ -2139,10 +2522,6 @@ async function processConnectorManagerEvent(payload) {
                 : 0
         );
 
-        // --------------------------------------------------------
-        // Проверяем Connector
-        // --------------------------------------------------------
-
         const data = payload?.data;
 
         if (!data) {
@@ -2173,10 +2552,6 @@ async function processConnectorManagerEvent(payload) {
             return;
         }
 
-        // --------------------------------------------------------
-        // Получаем сообщения
-        // --------------------------------------------------------
-
         const messages =
             Array.isArray(data.MESSAGES)
                 ? data.MESSAGES
@@ -2195,10 +2570,6 @@ async function processConnectorManagerEvent(payload) {
             console.log('========================================');
             return;
         }
-
-        // --------------------------------------------------------
-        // Обрабатываем каждое сообщение
-        // --------------------------------------------------------
 
         for (let index = 0; index < messages.length; index++) {
 
@@ -2257,6 +2628,13 @@ console.log(
             const managerText =
                 String(message.text || '').trim();
 
+            const managerFiles =
+                Array.isArray(
+                    message.files
+                )
+                    ? message.files
+                    : [];
+
             console.log('----------------------------------------');
             console.log(
                 `📨 BITRIX MESSAGE ${index + 1}`
@@ -2288,13 +2666,14 @@ console.log(
             );
 
             console.log(
+                'Manager files:',
+                managerFiles.length || '(EMPTY)'
+            );
+
+            console.log(
                 'RAW MESSAGE:',
                 JSON.stringify(item)
             );
-
-            // ----------------------------------------------------
-            // Без внешнего chat.id отправлять некуда
-            // ----------------------------------------------------
 
             if (!telegramChatId) {
     console.log(
@@ -2313,17 +2692,16 @@ console.log(
     continue;
 }
 
-            if (!managerText) {
+            if (
+                !managerText &&
+                !managerFiles.length
+            ) {
                 console.log(
-                    '⚠️ Manager message text is EMPTY'
+                    '⚠️ Manager message contains no text and no files'
                 );
 
                 continue;
             }
-
-            // ----------------------------------------------------
-            // Сохраняем связь Bitrix chat -> Telegram chat
-            // ----------------------------------------------------
 
             if (bitrixChatId) {
                 bitrixChatMap.set(
@@ -2338,10 +2716,6 @@ console.log(
                     telegramChatId
                 );
             }
-
-            // ----------------------------------------------------
-            // #AI
-            // ----------------------------------------------------
 
             if (
                 managerText === '#AI' ||
@@ -2394,10 +2768,6 @@ console.log(
                 continue;
             }
 
-            // ----------------------------------------------------
-            // #MANAGER
-            // ----------------------------------------------------
-
             if (
                 managerText === '#MANAGER' ||
                 managerText === '/manager'
@@ -2449,10 +2819,6 @@ console.log(
                 continue;
             }
 
-            // ----------------------------------------------------
-            // ОБЫЧНЫЙ ОТВЕТ МЕНЕДЖЕРА
-            // ----------------------------------------------------
-
             setClientMode(
                 telegramChatId,
                 'MANAGER'
@@ -2476,32 +2842,64 @@ console.log(
                 managerText
             );
 
-            // ----------------------------------------------------
-            // Отправляем в Telegram
-            // ----------------------------------------------------
+            console.log(
+                'Telegram files:',
+                managerFiles.length
+            );
 
             let telegramSent = false;
 
             try {
 
-                const telegramResult =
-                    await sendTelegramMessage(
-                        telegramChatId,
-                        managerText
+                if (managerText) {
+
+                    const telegramResult =
+                        await sendTelegramMessage(
+                            telegramChatId,
+                            managerText
+                        );
+
+                    telegramSent = true;
+
+                    console.log(
+                        '✅ TELEGRAM SEND OK'
                     );
 
-                telegramSent = true;
+                    console.log(
+                        'Telegram result:',
+                        JSON.stringify(
+                            telegramResult || {}
+                        )
+                    );
+                }
 
-                console.log(
-                    '✅ TELEGRAM SEND OK'
-                );
+                for (
+                    const file of managerFiles
+                ) {
 
-                console.log(
-                    'Telegram result:',
-                    JSON.stringify(
-                        telegramResult || {}
-                    )
-                );
+                    try {
+
+                        await sendTelegramFile(
+                            telegramChatId,
+                            file.url,
+                            file.name || 'file'
+                        );
+
+                        console.log(
+                            '✅ Manager file sent to Telegram:',
+                            file.name || 'file'
+                        );
+
+                        telegramSent = true;
+
+                    } catch (e) {
+
+                        console.error(
+                            '❌ Manager file -> Telegram error:',
+                            e.message
+                        );
+                    }
+                }
 
             } catch (e) {
 
@@ -2517,16 +2915,12 @@ console.log(
                 }
             }
 
-            // ----------------------------------------------------
-            // Зеркало администратору
-            // ----------------------------------------------------
-
             try {
 
                 await mirrorToAdmin(
                     telegramChatId,
                     'manager',
-                    managerText
+                    managerText || '[файл]'
                 );
 
                 console.log(
@@ -2540,14 +2934,6 @@ console.log(
                     e.message
                 );
             }
-
-            // ----------------------------------------------------
-            // Подтверждаем доставку Bitrix
-            //
-            // Bitrix требует подтверждать событие через
-            // imconnector.send.status.delivery
-            // после обработки сообщения.
-            // ----------------------------------------------------
 
             try {
 
@@ -2705,6 +3091,161 @@ const server =
                     );
 
                 // ==================================================
+                // BITRIX FILE ENDPOINT
+                // ==================================================
+
+                if (
+                    req.method === 'GET' &&
+                    url.pathname.startsWith(
+                        '/bitrix-file/'
+                    )
+                ) {
+
+                    try {
+
+                        const token =
+                            decodeURIComponent(
+                                url.pathname
+                                    .substring(
+                                        '/bitrix-file/'.length
+                                    )
+                                    .split('?')[0]
+                            );
+
+                        const entry =
+                            bitrixTempFiles.get(
+                                token
+                            );
+
+                        if (!entry) {
+
+                            res.writeHead(
+                                404,
+                                {
+                                    'Content-Type':
+                                        'text/plain; charset=utf-8'
+                                }
+                            );
+
+                            res.end(
+                                'File not found or expired'
+                            );
+
+                            return;
+                        }
+
+                        // Файл доступен 30 минут
+                        if (
+                            Date.now() -
+                                entry.createdAt >
+                            30 * 60 * 1000
+                        ) {
+
+                            try {
+                                fs.unlinkSync(
+                                    entry.filePath
+                                );
+                            } catch {}
+
+                            bitrixTempFiles.delete(
+                                token
+                            );
+
+                            res.writeHead(
+                                410,
+                                {
+                                    'Content-Type':
+                                        'text/plain; charset=utf-8'
+                                }
+                            );
+
+                            res.end(
+                                'File expired'
+                            );
+
+                            return;
+                        }
+
+                        if (
+                            !fs.existsSync(
+                                entry.filePath
+                            )
+                        ) {
+
+                            bitrixTempFiles.delete(
+                                token
+                            );
+
+                            res.writeHead(
+                                404,
+                                {
+                                    'Content-Type':
+                                        'text/plain; charset=utf-8'
+                                }
+                            );
+
+                            res.end(
+                                'File not found'
+                            );
+
+                            return;
+                        }
+
+                        const stat =
+                            fs.statSync(
+                                entry.filePath
+                            );
+
+                        res.writeHead(
+                            200,
+                            {
+                                'Content-Type':
+                                    'application/octet-stream',
+
+                                'Content-Length':
+                                    stat.size,
+
+                                'Content-Disposition':
+                                    `attachment; filename="${encodeURIComponent(entry.fileName)}"`
+                            }
+                        );
+
+                        fs.createReadStream(
+                            entry.filePath
+                        ).pipe(res);
+
+                        log(
+                            '📤 Bitrix downloaded temporary file:',
+                            entry.fileName
+                        );
+
+                        return;
+
+                    } catch (e) {
+
+                        error(
+                            '❌ Bitrix temporary file error:',
+                            e.message
+                        );
+
+                        if (
+                            !res.headersSent
+                        ) {
+
+                            res.writeHead(
+                                500
+                            );
+                        }
+
+                        res.end(
+                            'Internal Server Error'
+                        );
+
+                        return;
+                    }
+                }
+
+                // ==================================================
                 // HEALTH
                 // ==================================================
 
@@ -2762,34 +3303,12 @@ const server =
 
                 // ==================================================
 // BITRIX INITIAL INSTALLATION CALLBACK
-//
-// URL:
-// https://mlk-bot.onrender.com/bitrix-webhook
-//
-// Bitrix24 может прислать данные:
-//   application/x-www-form-urlencoded
-//
-// Например:
-//   auth[access_token]=...
-//   auth[refresh_token]=...
-//   auth[domain]=...
-//   auth[client_endpoint]=...
-//
-// Поэтому здесь специально поддерживаем:
-// 1. JSON
-// 2. auth как JSON-строку
-// 3. auth[...]
-// 4. обычные top-level поля
 // ==================================================
 
 if (
     url.pathname ===
     '/bitrix-webhook'
 ) {
-
-    // --------------------------------------------------
-    // GET
-    // --------------------------------------------------
 
     if (
         req.method !==
@@ -2810,10 +3329,6 @@ if (
 
         return;
     }
-
-    // --------------------------------------------------
-    // READ BODY
-    // --------------------------------------------------
 
     let body = '';
 
@@ -2850,10 +3365,6 @@ if (
         return;
     }
 
-    // --------------------------------------------------
-    // PARSE REQUEST
-    // --------------------------------------------------
-
     let payload = {};
     let auth = {};
 
@@ -2864,10 +3375,6 @@ if (
         ).toLowerCase();
 
     try {
-
-        // ==================================================
-        // JSON
-        // ==================================================
 
         if (
             contentType.includes(
@@ -2881,10 +3388,6 @@ if (
                     : {};
 
         }
-
-        // ==================================================
-        // FORM URLENCODED
-        // ==================================================
 
         else {
 
@@ -2903,15 +3406,6 @@ if (
                 payload[key] =
                     value;
             }
-
-            // ------------------------------------------------
-            // Bitrix can send:
-            //
-            // auth[access_token]
-            // auth[refresh_token]
-            // auth[domain]
-            // auth[client_endpoint]
-            // ------------------------------------------------
 
             for (
                 const [
@@ -2932,10 +3426,6 @@ if (
                     ] = value;
                 }
             }
-
-            // ------------------------------------------------
-            // Sometimes auth itself can be JSON
-            // ------------------------------------------------
 
             if (
                 typeof payload.auth ===
@@ -2962,8 +3452,6 @@ if (
                     }
 
                 } catch (e) {
-                    // auth is not JSON —
-                    // that's fine
                 }
             }
         }
@@ -2994,10 +3482,6 @@ if (
         return;
     }
 
-    // --------------------------------------------------
-    // If JSON contained payload.auth as an object
-    // --------------------------------------------------
-
     if (
         payload.auth &&
         typeof payload.auth ===
@@ -3009,12 +3493,6 @@ if (
             ...payload.auth
         };
     }
-
-    // --------------------------------------------------
-    // FALLBACK:
-    // Some Bitrix responses can expose auth fields
-    // directly.
-    // --------------------------------------------------
 
     if (
         !auth.access_token &&
@@ -3051,12 +3529,6 @@ if (
         auth.client_endpoint =
             payload.client_endpoint;
     }
-
-    // --------------------------------------------------
-    // DIAGNOSTICS
-    //
-    // Никогда не выводим сами токены.
-    // --------------------------------------------------
 
     log(
         '========================================'
@@ -3107,29 +3579,14 @@ if (
         '========================================'
     );
 
-    // --------------------------------------------------
-    // VALIDATE OAUTH
-    // --------------------------------------------------
-
     if (
         auth.access_token &&
         auth.refresh_token
     ) {
 
-        // ------------------------------------------------
-        // Нормализуем auth.
-        //
-        // Сохраняем только необходимые поля плюс
-        // остальные данные Bitrix, если они пришли.
-        // ------------------------------------------------
-
         bitrixAuth = {
             ...auth
         };
-
-        // ------------------------------------------------
-        // Если domain не пришёл — используем наш домен.
-        // ------------------------------------------------
 
         if (
             !bitrixAuth.domain &&
@@ -3140,10 +3597,6 @@ if (
                 BITRIX_DOMAIN;
         }
 
-        // ------------------------------------------------
-        // Если client_endpoint не пришёл — формируем его.
-        // ------------------------------------------------
-
         if (
             !bitrixAuth.client_endpoint &&
             bitrixAuth.domain
@@ -3152,10 +3605,6 @@ if (
             bitrixAuth.client_endpoint =
                 `https://${bitrixAuth.domain}/rest/`;
         }
-
-        // ------------------------------------------------
-        // SAVE OAUTH
-        // ------------------------------------------------
 
         try {
 
@@ -3192,13 +3641,6 @@ if (
 
             return;
         }
-
-        // ------------------------------------------------
-        // CONNECTOR SETUP
-        //
-        // Не задерживаем installation callback.
-        // Bitrix получает 200 сразу.
-        // ------------------------------------------------
 
         setImmediate(
             () => {
@@ -3246,10 +3688,6 @@ if (
             }
         );
 
-        // ------------------------------------------------
-        // RESPONSE
-        // ------------------------------------------------
-
         res.writeHead(
             200,
             {
@@ -3268,16 +3706,10 @@ if (
         return;
     }
 
-    // --------------------------------------------------
-    // OAUTH NOT FOUND
-    // --------------------------------------------------
-
     error(
         '❌ Bitrix installation callback did not contain OAuth auth'
     );
 
-    // Для диагностики показываем только имена полей,
-    // НИКОГДА значения токенов.
     try {
 
         log(
@@ -3329,22 +3761,12 @@ if (
 
                 // ==================================================
                 // BITRIX CONNECTOR HANDLER
-                //
-                // GET:
-                // Bitrix открывает настройки Connector.
-                //
-                // POST:
-                // OnImConnectorMessageAdd
                 // ==================================================
 
                 if (
                     url.pathname ===
                     '/bitrix/handler'
                 ) {
-
-                    // ------------------------------------------------
-                    // GET — SETTINGS_CONNECTOR
-                    // ------------------------------------------------
 
                     if (
                         req.method === 'GET'
@@ -3386,8 +3808,6 @@ if (
                             bitrixOpenLineId =
                                 line;
 
-                            // Bitrix settings page.
-                            // Активируем канал.
                             setImmediate(
                                 async () => {
 
@@ -3480,10 +3900,6 @@ body {
                         return;
                     }
 
-                                       // ------------------------------------------------
-                    // POST — EVENTS
-                    // ------------------------------------------------
-
                     if (
                         req.method === 'POST'
                     ) {
@@ -3494,12 +3910,6 @@ body {
                             );
 
                         let payload = {};
-
-                        /*
-                        ==================================================
-                        BITRIX FORM / JSON PARSER
-                        ==================================================
-                        */
 
                         try {
 
@@ -3582,23 +3992,11 @@ body {
                             payload = {};
                         }
 
-                        /*
-                        ==================================================
-                        BITRIX EVENT
-                        ==================================================
-                        */
-
                         log(
                             '📥 Bitrix Connector POST:',
                             payload.event ||
                             'unknown'
                         );
-
-                        /*
-                        ==================================================
-                        ONIMCONNECTORMESSAGEADD
-                        ==================================================
-                        */
 
                         if (
                             String(
@@ -3670,12 +4068,6 @@ body {
                                 );
                             }
 
-                            /*
-                            ------------------------------------------------
-                            Отвечаем Bitrix сразу.
-                            ------------------------------------------------
-                            */
-
                             res.writeHead(
                                 200,
                                 {
@@ -3692,13 +4084,6 @@ body {
                                     }
                                 )
                             );
-
-                            /*
-                            ------------------------------------------------
-                            Обрабатываем событие отдельно,
-                            чтобы Bitrix не ждал Telegram/DeepSeek.
-                            ------------------------------------------------
-                            */
 
                             setImmediate(
                                 () => {
@@ -3718,12 +4103,6 @@ body {
 
                             return;
                         }
-
-                        /*
-                        ==================================================
-                        OTHER BITRIX EVENTS
-                        ==================================================
-                        */
 
                         res.writeHead(
                             200,
@@ -3907,10 +4286,6 @@ async function startup() {
         '========================================'
     );
 
-    // ----------------------------------------------------------
-    // HTTP
-    // ----------------------------------------------------------
-
     server.listen(
         PORT,
         '0.0.0.0',
@@ -3922,10 +4297,6 @@ async function startup() {
         }
     );
 
-    // ----------------------------------------------------------
-    // TELEGRAM
-    // ----------------------------------------------------------
-
     telegramPoll()
         .catch(
             e =>
@@ -3935,10 +4306,6 @@ async function startup() {
                 )
         );
 
-    // ----------------------------------------------------------
-    // BITRIX FETCH
-    // ----------------------------------------------------------
-
     bitrixFetchPoll()
         .catch(
             e =>
@@ -3947,10 +4314,6 @@ async function startup() {
                     e.message
                 )
         );
-
-    // ----------------------------------------------------------
-    // CONNECTOR
-    // ----------------------------------------------------------
 
     if (
         BITRIX_CONNECTOR_ENABLED
