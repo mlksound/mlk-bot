@@ -529,6 +529,36 @@ async function telegramCall(
     );
 }
 
+// ============================================================
+// TYPING ACTION
+// ============================================================
+
+async function sendTelegramTyping(
+    chatId
+) {
+
+    try {
+
+        await telegramCall(
+            'sendChatAction',
+            {
+                chat_id:
+                    String(chatId),
+
+                action:
+                    'typing'
+            }
+        );
+
+    } catch (e) {
+
+        warn(
+            'Telegram typing error:',
+            e.message
+        );
+    }
+}
+
 async function sendTelegramMessage(
     chatId,
     text,
@@ -861,89 +891,162 @@ async function sendTelegramFile(
 ) {
 
     if (!fileUrl) {
-        return null;
+        throw new Error(
+            'Bitrix file URL is empty'
+        );
     }
 
     const lowerName =
-        String(
-            fileName
-        ).toLowerCase();
+        String(fileName || 'file')
+            .toLowerCase();
 
-    const imageExtensions = [
-        '.jpg',
-        '.jpeg',
-        '.png',
-        '.gif',
-        '.webp',
-        '.bmp'
-    ];
+    // --------------------------------------------------------
+    // 1. Скачиваем файл с Bitrix на наш сервер
+    // --------------------------------------------------------
 
-    const isImage =
-        imageExtensions.some(
-            ext =>
-                lowerName.endsWith(ext)
-        );
+    console.log(
+        '📥 Downloading Bitrix file:',
+        fileName
+    );
 
-    if (isImage) {
+    const fileResponse =
+        await fetch(fileUrl);
 
-        return telegramCall(
-            'sendPhoto',
-            {
-                chat_id:
-                    String(chatId),
+    if (!fileResponse.ok) {
 
-                photo:
-                    fileUrl
-            }
+        throw new Error(
+            `Bitrix file download HTTP ${fileResponse.status}`
         );
     }
 
+    const buffer =
+        Buffer.from(
+            await fileResponse.arrayBuffer()
+        );
+
+    if (!buffer.length) {
+
+        throw new Error(
+            'Bitrix file downloaded but is empty'
+        );
+    }
+
+    // --------------------------------------------------------
+    // 2. Определяем тип отправки
+    // --------------------------------------------------------
+
+    let method = 'sendDocument';
+
+    const fieldName = 'document';
+
     if (
+        lowerName.endsWith('.jpg') ||
+        lowerName.endsWith('.jpeg') ||
+        lowerName.endsWith('.png') ||
+        lowerName.endsWith('.gif') ||
+        lowerName.endsWith('.webp') ||
+        lowerName.endsWith('.bmp')
+    ) {
+        method = 'sendPhoto';
+    }
+
+    else if (
         lowerName.endsWith('.mp4') ||
         lowerName.endsWith('.mov') ||
         lowerName.endsWith('.m4v')
     ) {
-
-        return telegramCall(
-            'sendVideo',
-            {
-                chat_id:
-                    String(chatId),
-
-                video:
-                    fileUrl
-            }
-        );
+        method = 'sendVideo';
     }
 
-    if (
+    else if (
         lowerName.endsWith('.mp3') ||
         lowerName.endsWith('.wav') ||
         lowerName.endsWith('.m4a')
     ) {
+        method = 'sendAudio';
+    }
 
-        return telegramCall(
-            'sendAudio',
+    const telegramField =
+        method === 'sendPhoto'
+            ? 'photo'
+            : method === 'sendVideo'
+                ? 'video'
+                : method === 'sendAudio'
+                    ? 'audio'
+                    : fieldName;
+
+    // --------------------------------------------------------
+    // 3. Загружаем файл НЕ по URL,
+    //    а непосредственно в Telegram
+    // --------------------------------------------------------
+
+    const form =
+        new FormData();
+
+    form.append(
+        'chat_id',
+        String(chatId)
+    );
+
+    form.append(
+        telegramField,
+        new Blob([buffer]),
+        String(fileName || 'file')
+    );
+
+    console.log(
+        '📤 Uploading file to Telegram:',
+        fileName,
+        'via',
+        method
+    );
+
+    const response =
+        await fetch(
+            `${TELEGRAM_API}/${method}`,
             {
-                chat_id:
-                    String(chatId),
-
-                audio:
-                    fileUrl
+                method: 'POST',
+                body: form
             }
+        );
+
+    const raw =
+        await response.text();
+
+    let data;
+
+    try {
+
+        data =
+            JSON.parse(raw);
+
+    } catch {
+
+        data = {
+            ok: false,
+            description: raw
+        };
+    }
+
+    if (
+        !response.ok ||
+        !data.ok
+    ) {
+
+        throw new Error(
+            `Telegram ${method} failed: ${
+                data.description ||
+                `HTTP ${response.status}`
+            }`
         );
     }
 
-    return telegramCall(
-        'sendDocument',
-        {
-            chat_id:
-                String(chatId),
-
-            document:
-                fileUrl
-        }
+    console.log(
+        '✅ Telegram file upload OK:',
+        fileName
     );
+
+    return data;
 }
 
 // ============================================================
@@ -1911,6 +2014,10 @@ async function processTelegramClientMessage(
                     client.name || ''
             };
         }
+
+        await sendTelegramTyping(
+            clientId
+        );
 
         const result =
             await processSalesMessage(
