@@ -396,7 +396,84 @@ async function refreshBitrixOAuth() {
 
     log('✅ Bitrix OAuth refreshed');
 
+    try {
+
+        await diagnoseBitrixOAuthContext();
+
+    } catch (e) {
+
+        error(
+            '❌ OAuth diagnostic error:',
+            e.message
+        );
+    }
+
     return bitrixAuth;
+}
+
+async function diagnoseBitrixOAuthContext() {
+
+    log('🔎 BITRIX OAUTH DIAGNOSTIC');
+    log('----------------------------------------');
+
+    // 1. Проверяем сам OAuth
+    try {
+
+        const profile =
+            await bitrixOAuthCall(
+                'profile',
+                {},
+                false
+            );
+
+        log(
+            '✅ OAuth profile: OK',
+            profile?.result?.ID
+                ? `user=${profile.result.ID}`
+                : ''
+        );
+
+    } catch (e) {
+
+        error(
+            '❌ OAuth profile ERROR:',
+            e.message
+        );
+    }
+
+
+    // 2. Проверяем именно Connector
+    try {
+
+        const status =
+            await bitrixOAuthCall(
+                'imconnector.status',
+                {
+                    CONNECTOR:
+                        BITRIX_CONNECTOR_ID,
+
+                    LINE:
+                        Number(
+                            bitrixOpenLineId || 0
+                        )
+                },
+                false
+            );
+
+        log(
+            '✅ Connector status: OK',
+            JSON.stringify(status)
+        );
+
+    } catch (e) {
+
+        error(
+            '❌ Connector status ERROR:',
+            e.message
+        );
+    }
+
+    log('----------------------------------------');
 }
 
 async function bitrixOAuthCall(
