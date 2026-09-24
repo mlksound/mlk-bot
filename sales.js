@@ -472,6 +472,50 @@ function hasDateAndTime(value) {
 }
 
 
+function hasExplicitTimeInText(text) {
+
+    if (!text) {
+        return false;
+    }
+
+    return /\b\d{1,2}[:.]\d{2}\b/.test(
+        String(text)
+    );
+}
+
+
+function isNotAnAddress(value) {
+
+    if (!value) {
+        return true;
+    }
+
+    const normalized =
+        String(value)
+            .trim()
+            .toLowerCase()
+            .replace(/[.!?]+$/g, '');
+
+    const invalidValues = [
+        'улица',
+        'на улице',
+        'помещение',
+        'в помещении',
+        'под навесом',
+        'навес',
+        'газон',
+        'трава',
+        'грунт',
+        'асфальт',
+        'плитка'
+    ];
+
+    return invalidValues.includes(
+        normalized
+    );
+}
+
+
 function normalizeNotRequired(value) {
 
     if (
@@ -637,7 +681,10 @@ function getEquipmentLabels(items) {
 // NORMALIZE AI DATA
 // ============================================================
 
-function normalizeExtractedData(raw) {
+function normalizeExtractedData(
+    raw,
+    sourceText = ''
+) {
 
     if (
         !raw ||
@@ -721,19 +768,60 @@ function normalizeExtractedData(raw) {
     // DATES
     // --------------------------------------------------------
 
-    if (p.dateStart !== undefined) {
-        data.dateStart =
+    const sourceHasExplicitTime =
+        hasExplicitTimeInText(
+            sourceText
+        );
+
+
+    if (
+        p.dateStart !== undefined &&
+        sourceHasExplicitTime
+    ) {
+
+        const value =
             cleanString(p.dateStart);
+
+        if (
+            value &&
+            hasDateAndTime(value)
+        ) {
+            data.dateStart = value;
+        }
     }
 
-    if (p.dateEnd !== undefined) {
-        data.dateEnd =
+
+    if (
+        p.dateEnd !== undefined &&
+        sourceHasExplicitTime
+    ) {
+
+        const value =
             cleanString(p.dateEnd);
+
+        if (
+            value &&
+            hasDateAndTime(value)
+        ) {
+            data.dateEnd = value;
+        }
     }
 
-    if (p.readyDate !== undefined) {
-        data.readyDate =
+
+    if (
+        p.readyDate !== undefined &&
+        sourceHasExplicitTime
+    ) {
+
+        const value =
             cleanString(p.readyDate);
+
+        if (
+            value &&
+            hasDateAndTime(value)
+        ) {
+            data.readyDate = value;
+        }
     }
 
 
@@ -742,8 +830,16 @@ function normalizeExtractedData(raw) {
     // --------------------------------------------------------
 
     if (p.location !== undefined) {
-        data.location =
+
+        const value =
             cleanString(p.location);
+
+        if (
+            value &&
+            !isNotAnAddress(value)
+        ) {
+            data.location = value;
+        }
     }
 
 
@@ -1400,25 +1496,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 2. EQUIPMENT
-    // --------------------------------------------------------
-
-    if (
-        !Array.isArray(p.equipment) ||
-        p.equipment.length === 0
-    ) {
-
-        missing.push({
-            field: 'equipment',
-            action: 'ask_equipment'
-        });
-
-        return missing;
-    }
-
-
-    // --------------------------------------------------------
-    // 3. LEVEL / GUEST COUNT
+    // 2. LEVEL / GUEST COUNT
     // --------------------------------------------------------
 
     if (
@@ -1452,6 +1530,24 @@ function calculateMissing(state) {
 
             return missing;
         }
+    }
+
+
+    // --------------------------------------------------------
+    // 3. EQUIPMENT
+    // --------------------------------------------------------
+
+    if (
+        !Array.isArray(p.equipment) ||
+        p.equipment.length === 0
+    ) {
+
+        missing.push({
+            field: 'equipment',
+            action: 'ask_equipment'
+        });
+
+        return missing;
     }
 
 
@@ -2022,13 +2118,13 @@ function getNextAction(state) {
 
 
 // ============================================================
-// GET MULTIPLE ACTIONS
+// GET ACTIONS
 // ============================================================
 //
-// Для монтажа + демонтажа по ТЗ нужно показать одновременно.
+// Возвращает одно следующее действие,
+// определённое Sales Engine.
 //
-// В обычной последовательной воронке достаточно одной
-// следующей кнопки.
+// Порядок вопросов контролируется calculateMissing().
 //
 
 function getActions(state) {
@@ -2264,6 +2360,25 @@ demount:
 - any
 - deadline
 
+ВАЖНО ПО МОНТАЖУ И ДЕМОНТАЖУ:
+
+Упоминание клиентом слов «монтаж», «демонтаж»,
+«нужен монтаж», «нужен демонтаж» или «монтаж-демонтаж»
+САМО ПО СЕБЕ НЕ означает, что поле mount или demount заполнено.
+
+Поле mount можно заполнять ТОЛЬКО если клиент явно
+сообщил условия или время монтажа.
+
+Поле demount можно заполнять ТОЛЬКО если клиент явно
+сообщил условия или время демонтажа.
+
+Если клиент сказал только «нужен монтаж и демонтаж» —
+не заполняй mount и demount.
+
+Если клиент сказал «в любое время» без указания,
+относится ли это к монтажу или демонтажу,
+не заполняй одновременно оба поля.
+
 equipment:
 - sound
 - led
@@ -2454,7 +2569,8 @@ specialConditions — особые условия:
 
 
     return normalizeExtractedData(
-        parsed
+        parsed,
+        userText
     );
 }
 
@@ -2817,6 +2933,22 @@ ${JSON.stringify(
 
 8. Если следующий обязательный вопрос определён JS,
    не заменяй его другим вопросом.
+
+8.1. Текущий контролируемый вопрос ниже является
+обязательным следующим вопросом.
+
+Если он указан — обязательно задай именно его
+после краткого ответа или подтверждения.
+
+Не задавай вместо него вопрос по другой теме.
+
+Не предлагай клиенту самому выбрать следующий этап.
+
+Не пропускай текущий контролируемый вопрос.
+
+Если клиент сообщил сразу несколько следующих данных,
+учти их, но порядок следующего шага всё равно
+определяет JS Sales Engine.
 
 9. Не перечисляй клиенту всю внутреннюю структуру
    Sales Engine.
@@ -4931,6 +5063,27 @@ addHistory(
                 state,
                 userText
             );
+
+
+        const currentMissing =
+            calculateMissing(state);
+
+        const expectedField =
+            currentMissing[0]?.field || null;
+
+
+        if (
+            expectedField === 'mount'
+        ) {
+            extracted.demount = undefined;
+        }
+
+
+        if (
+            expectedField === 'demount'
+        ) {
+            extracted.mount = undefined;
+        }
 
 
         mergeProjectData(
