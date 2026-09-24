@@ -101,27 +101,27 @@ try {
 const EVENT_TYPES = {
     concerts: {
         value: 'concerts',
-        label: 'Концерты & Фестивали'
+        label: 'Концерты & Фестивали (Open air, городские праздники, гастрольные туры, сольные выступления, шоу-программы)'
     },
 
     conferences: {
         value: 'conferences',
-        label: 'Конференции & Презентации & TV-проекты'
+        label: 'Конференции & Презентации & TV-проекты (Бизнес-форумы, презентации продуктов, пресс-конференции, саммиты, конгрессы, семинары, кинофестивали, премии, телевизионные программы)'
     },
 
     corporate: {
         value: 'corporate',
-        label: 'Корпоративы & Торжества'
+        label: 'Корпоративы & Торжества (Юбилеи, тимбилдинги, свадьбы, выездные мероприятия, награждения, открытия магазинов и заведений)'
     },
 
     exhibitions: {
         value: 'exhibitions',
-        label: 'Выставки'
+        label: 'Выставки (Промо-акции, стенды компаний, презентационные зоны, конференц-зоны)'
     },
 
     sports: {
         value: 'sports',
-        label: 'Спортивные мероприятия'
+        label: 'Спортивные мероприятия (Спортивные матчи, турниры, спартакиады, спортивные праздники, марафоны)'
     }
 };
 
@@ -129,17 +129,20 @@ const EVENT_TYPES = {
 const LEVELS = {
     standard: {
         value: 'standard',
-        label: 'Стандартный'
+        label: 'Стандартный',
+        description: 'обычные требования к оборудованию и документации'
     },
 
     high: {
         value: 'high',
-        label: 'Высокие требования'
+        label: 'Высокие требования',
+        description: 'повышенные требования к оборудованию и документации, прямые ТВ-трансляции'
     },
 
     highest: {
         value: 'highest',
-        label: 'Высший уровень'
+        label: 'Высший уровень',
+        description: 'с высшими должностными лицами, масштабные и международные мероприятия'
     }
 };
 
@@ -147,7 +150,7 @@ const LEVELS = {
 const PERSONNEL = {
     management: {
         value: 'management',
-        label: 'Управление оборудованием'
+        label: 'Полное управление оборудованием'
     },
 
     duty_technician: {
@@ -285,6 +288,23 @@ function createSalesState(clientId, clientName = '') {
             equipment: [],
 
             equipmentDetails: null,
+
+            stageDetails: null,
+            stageSurface: null,
+
+            soundDetails: null,
+            backline: null,
+            soundRider: null,
+
+            lightDetails: null,
+            lightFixtures: null,
+
+            ledDetails: null,
+            ledContent: null,
+            ledSuspension: null,
+
+            additionalServices: null,
+            specialConditions: null,
 
             personnel: null,
             personnelDetails: null,
@@ -440,6 +460,68 @@ function cleanString(value) {
 }
 
 
+function hasDateAndTime(value) {
+
+    if (!value) {
+        return false;
+    }
+
+    return /\d{1,2}:\d{2}/.test(
+        String(value)
+    );
+}
+
+
+function normalizeNotRequired(value) {
+
+    if (
+        value === null ||
+        value === undefined
+    ) {
+        return value;
+    }
+
+    const normalized =
+        String(value)
+            .trim()
+            .toLowerCase()
+            .replace(/[.!?]+$/g, '');
+
+    const notRequired = [
+        'нет',
+        'не требуется',
+        'не нужно',
+        'не нужен',
+        'не нужна',
+        'не нужны',
+        'не надо',
+        'не понадобится'
+    ];
+
+    if (
+        notRequired.includes(
+            normalized
+        )
+    ) {
+        return 'not_required';
+    }
+
+    return value;
+}
+
+
+function displayProjectValue(value) {
+
+    if (
+        value === 'not_required'
+    ) {
+        return 'Не требуется';
+    }
+
+    return value;
+}
+
+
 function normalizeNumber(value) {
 
     if (
@@ -483,14 +565,24 @@ function normalizeEquipment(value) {
 
     const allowed = Object.keys(EQUIPMENT);
 
+    const normalized = value
+        .map(item => String(item).trim())
+        .filter(item =>
+            allowed.includes(item)
+        );
+
+    // "Полный комплекс" = все четыре направления
+    if (normalized.includes('all')) {
+        return [
+            'sound',
+            'led',
+            'light',
+            'stage'
+        ];
+    }
+
     return [
-        ...new Set(
-            value
-                .map(item => String(item).trim())
-                .filter(item =>
-                    allowed.includes(item)
-                )
-        )
+        ...new Set(normalized)
     ];
 }
 
@@ -753,8 +845,123 @@ function normalizeExtractedData(raw) {
         p.equipmentDetails !== undefined
     ) {
         data.equipmentDetails =
-            cleanString(
-                p.equipmentDetails
+            normalizeNotRequired(
+                cleanString(
+                    p.equipmentDetails
+                )
+            );
+    }
+
+
+    // --------------------------------------------------------
+    // EQUIPMENT DETAILS
+    // --------------------------------------------------------
+
+    if (p.stageDetails !== undefined) {
+        data.stageDetails =
+            normalizeNotRequired(
+                cleanString(
+                    p.stageDetails
+                )
+            );
+    }
+
+    if (p.stageSurface !== undefined) {
+        data.stageSurface =
+            normalizeNotRequired(
+                cleanString(
+                    p.stageSurface
+                )
+            );
+    }
+
+    if (p.soundDetails !== undefined) {
+        data.soundDetails =
+            normalizeNotRequired(
+                cleanString(
+                    p.soundDetails
+                )
+            );
+    }
+
+    if (p.backline !== undefined) {
+        data.backline =
+            normalizeNotRequired(
+                cleanString(
+                    p.backline
+                )
+            );
+    }
+
+    if (p.soundRider !== undefined) {
+        data.soundRider =
+            normalizeNotRequired(
+                cleanString(
+                    p.soundRider
+                )
+            );
+    }
+
+    if (p.lightDetails !== undefined) {
+        data.lightDetails =
+            normalizeNotRequired(
+                cleanString(
+                    p.lightDetails
+                )
+            );
+    }
+
+    if (p.lightFixtures !== undefined) {
+        data.lightFixtures =
+            normalizeNotRequired(
+                cleanString(
+                    p.lightFixtures
+                )
+            );
+    }
+
+    if (p.ledDetails !== undefined) {
+        data.ledDetails =
+            normalizeNotRequired(
+                cleanString(
+                    p.ledDetails
+                )
+            );
+    }
+
+    if (p.ledContent !== undefined) {
+        data.ledContent =
+            normalizeNotRequired(
+                cleanString(
+                    p.ledContent
+                )
+            );
+    }
+
+    if (p.ledSuspension !== undefined) {
+        data.ledSuspension =
+            normalizeNotRequired(
+                cleanString(
+                    p.ledSuspension
+                )
+            );
+    }
+
+    if (p.additionalServices !== undefined) {
+        data.additionalServices =
+            normalizeNotRequired(
+                cleanString(
+                    p.additionalServices
+                )
+            );
+    }
+
+    if (p.specialConditions !== undefined) {
+        data.specialConditions =
+            normalizeNotRequired(
+                cleanString(
+                    p.specialConditions
+                )
             );
     }
 
@@ -784,8 +991,10 @@ function normalizeExtractedData(raw) {
         p.personnelDetails !== undefined
     ) {
         data.personnelDetails =
-            cleanString(
-                p.personnelDetails
+            normalizeNotRequired(
+                cleanString(
+                    p.personnelDetails
+                )
             );
     }
 
@@ -923,13 +1132,34 @@ function mergeProjectData(
         'floor',
         'lift',
         'liftDimensions',
+
         'equipmentDetails',
+
+        'stageDetails',
+        'stageSurface',
+
+        'soundDetails',
+        'backline',
+        'soundRider',
+
+        'lightDetails',
+        'lightFixtures',
+
+        'ledDetails',
+        'ledContent',
+        'ledSuspension',
+
         'personnel',
         'personnelDetails',
+
         'mount',
         'mountTime',
         'demount',
         'demountTime',
+
+        'additionalServices',
+        'specialConditions',
+
         'clientRequest',
         'additionalInfo'
     ];
@@ -1031,6 +1261,77 @@ function cleanDependentFields(state) {
 
 
     // --------------------------------------------------------
+    // LIFT DIMENSIONS
+    // --------------------------------------------------------
+    // Размеры лифта нужны только при:
+    // 2+ этаж + грузовой лифт + сценические конструкции
+
+    if (
+        p.place !== 'indoor' ||
+        typeof p.floor !== 'number' ||
+        p.floor < 2 ||
+        p.lift !== 'has_lift' ||
+        !p.equipment.includes('stage')
+    ) {
+        p.liftDimensions = null;
+    }
+
+
+    // --------------------------------------------------------
+    // STAGE
+    // --------------------------------------------------------
+
+    if (!p.equipment.includes('stage')) {
+        p.stageDetails = null;
+        p.stageSurface = null;
+    }
+
+
+    // --------------------------------------------------------
+    // STAGE SURFACE
+    // --------------------------------------------------------
+
+    if (
+        !p.equipment.includes('stage') ||
+        p.place !== 'outdoor'
+    ) {
+        p.stageSurface = null;
+    }
+
+
+    // --------------------------------------------------------
+    // SOUND
+    // --------------------------------------------------------
+
+    if (!p.equipment.includes('sound')) {
+        p.soundDetails = null;
+        p.backline = null;
+        p.soundRider = null;
+    }
+
+
+    // --------------------------------------------------------
+    // LIGHT
+    // --------------------------------------------------------
+
+    if (!p.equipment.includes('light')) {
+        p.lightDetails = null;
+        p.lightFixtures = null;
+    }
+
+
+    // --------------------------------------------------------
+    // LED
+    // --------------------------------------------------------
+
+    if (!p.equipment.includes('led')) {
+        p.ledDetails = null;
+        p.ledContent = null;
+        p.ledSuspension = null;
+    }
+
+
+    // --------------------------------------------------------
     // MOUNT TIME
     // --------------------------------------------------------
 
@@ -1060,29 +1361,28 @@ function cleanDependentFields(state) {
 // Порядок здесь — это фактический порядок воронки.
 //
 // 1. Формат
-// 2. Уровень / гости
-// 3. Персонал
-// 4. Даты
-// 5. Адрес
-// 6. Место
-// 7. Этаж
-// 8. Лифт
-// 9. Размеры лифта
-// 10. Оборудование
-// 11. Монтаж
-// 12. Демонтаж
-//
-// Важно:
-// функция возвращает только ПЕРВОЕ реально необходимое
-// действие, кроме специальных случаев.
-//
+// 2. Оборудование
+// 3. Уровень / гости
+// 4. Персонал
+// 5. Дата + время начала
+// 6. Дата + время окончания
+// 7. Готовность оборудования
+// 8. Адрес
+// 9. Место
+// 10. Этаж
+// 11. Лифт
+// 12. Размеры лифта
+// 13. Детали оборудования
+// 14. Монтаж
+// 15. Демонтаж
+// 16. Дополнительные услуги
+// 17. Особые условия
 
 function calculateMissing(state) {
 
     const p = state.project;
 
     const missing = [];
-
 
     // --------------------------------------------------------
     // 1. EVENT TYPE
@@ -1100,7 +1400,25 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 2. LEVEL / GUEST COUNT
+    // 2. EQUIPMENT
+    // --------------------------------------------------------
+
+    if (
+        !Array.isArray(p.equipment) ||
+        p.equipment.length === 0
+    ) {
+
+        missing.push({
+            field: 'equipment',
+            action: 'ask_equipment'
+        });
+
+        return missing;
+    }
+
+
+    // --------------------------------------------------------
+    // 3. LEVEL / GUEST COUNT
     // --------------------------------------------------------
 
     if (
@@ -1138,7 +1456,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 3. PERSONNEL
+    // 4. PERSONNEL
     // --------------------------------------------------------
 
     if (!p.personnel) {
@@ -1153,10 +1471,28 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 4. DATES
+    // 4.1 PERSONNEL DETAILS
     // --------------------------------------------------------
 
-    if (!p.dateStart) {
+    if (
+        p.personnel === 'other' &&
+        !p.personnelDetails
+    ) {
+
+        missing.push({
+            field: 'personnelDetails',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // --------------------------------------------------------
+    // 5. DATES + TIME
+    // --------------------------------------------------------
+
+    if (!hasDateAndTime(p.dateStart)) {
 
         missing.push({
             field: 'dateStart',
@@ -1167,7 +1503,7 @@ function calculateMissing(state) {
     }
 
 
-    if (!p.dateEnd) {
+    if (!hasDateAndTime(p.dateEnd)) {
 
         missing.push({
             field: 'dateEnd',
@@ -1178,7 +1514,7 @@ function calculateMissing(state) {
     }
 
 
-    if (!p.readyDate) {
+    if (!hasDateAndTime(p.readyDate)) {
 
         missing.push({
             field: 'readyDate',
@@ -1190,7 +1526,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 5. LOCATION
+    // 6. LOCATION
     // --------------------------------------------------------
 
     if (!p.location) {
@@ -1205,7 +1541,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 6. PLACE
+    // 7. PLACE
     // --------------------------------------------------------
 
     if (!p.place) {
@@ -1220,7 +1556,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 7. FLOOR
+    // 8. FLOOR
     // --------------------------------------------------------
 
     if (
@@ -1238,13 +1574,15 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 8. LIFT
+    // 9. LIFT
+    // --------------------------------------------------------
+    // Помещение + 2 этаж и выше
     // --------------------------------------------------------
 
     if (
         p.place === 'indoor' &&
         typeof p.floor === 'number' &&
-        p.floor > 2 &&
+        p.floor >= 2 &&
         !p.lift
     ) {
 
@@ -1258,11 +1596,20 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 9. LIFT DIMENSIONS
+    // 10. LIFT DIMENSIONS
+    // --------------------------------------------------------
+    // Только:
+    // 2+ этаж
+    // + грузовой лифт
+    // + сценические конструкции
     // --------------------------------------------------------
 
     if (
+        p.place === 'indoor' &&
+        typeof p.floor === 'number' &&
+        p.floor >= 2 &&
         p.lift === 'has_lift' &&
+        p.equipment.includes('stage') &&
         !p.liftDimensions
     ) {
 
@@ -1276,17 +1623,122 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 10. EQUIPMENT
+    // 11. EQUIPMENT DETAILS
     // --------------------------------------------------------
 
+    // STAGE
     if (
-        !Array.isArray(p.equipment) ||
-        p.equipment.length === 0
+        p.equipment.includes('stage') &&
+        !p.stageDetails
     ) {
 
         missing.push({
-            field: 'equipment',
-            action: 'ask_equipment'
+            field: 'stageDetails',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // STAGE SURFACE
+    if (
+        p.equipment.includes('stage') &&
+        p.place === 'outdoor' &&
+        !p.stageSurface
+    ) {
+
+        missing.push({
+            field: 'stageSurface',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // SOUND
+    if (
+        p.equipment.includes('sound') &&
+        !p.soundDetails
+    ) {
+
+        missing.push({
+            field: 'soundDetails',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // BACKLINE
+    if (
+        p.equipment.includes('sound') &&
+        !p.backline
+    ) {
+
+        missing.push({
+            field: 'backline',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // LIGHT
+    if (
+        p.equipment.includes('light') &&
+        !p.lightDetails
+    ) {
+
+        missing.push({
+            field: 'lightDetails',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // LED
+    if (
+        p.equipment.includes('led') &&
+        !p.ledDetails
+    ) {
+
+        missing.push({
+            field: 'ledDetails',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    if (
+        p.equipment.includes('led') &&
+        !p.ledContent
+    ) {
+
+        missing.push({
+            field: 'ledContent',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    if (
+        p.equipment.includes('led') &&
+        !p.ledSuspension
+    ) {
+
+        missing.push({
+            field: 'ledSuspension',
+            action: 'text_question'
         });
 
         return missing;
@@ -1294,7 +1746,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 11. MOUNT
+    // 12. MOUNT
     // --------------------------------------------------------
 
     if (!p.mount) {
@@ -1309,22 +1761,7 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 12. DEMOUNT
-    // --------------------------------------------------------
-
-    if (!p.demount) {
-
-        missing.push({
-            field: 'demount',
-            action: 'ask_demount'
-        });
-
-        return missing;
-    }
-
-
-    // --------------------------------------------------------
-    // 13. NIGHT / EARLY MOUNT TIME
+    // 13. MOUNT TIME
     // --------------------------------------------------------
 
     if (
@@ -1342,7 +1779,22 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 14. DEMOUNT DEADLINE
+    // 14. DEMOUNT
+    // --------------------------------------------------------
+
+    if (!p.demount) {
+
+        missing.push({
+            field: 'demount',
+            action: 'ask_demount'
+        });
+
+        return missing;
+    }
+
+
+    // --------------------------------------------------------
+    // 15. DEMOUNT TIME
     // --------------------------------------------------------
 
     if (
@@ -1352,6 +1804,36 @@ function calculateMissing(state) {
 
         missing.push({
             field: 'demountTime',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // --------------------------------------------------------
+    // 16. ADDITIONAL SERVICES
+    // --------------------------------------------------------
+
+    if (!p.additionalServices) {
+
+        missing.push({
+            field: 'additionalServices',
+            action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // --------------------------------------------------------
+    // 17. SPECIAL CONDITIONS
+    // --------------------------------------------------------
+
+    if (!p.specialConditions) {
+
+        missing.push({
+            field: 'specialConditions',
             action: 'text_question'
         });
 
@@ -1558,54 +2040,16 @@ function getActions(state) {
         return [];
     }
 
-
-    const actions = [];
-
-
-    // Если одновременно нужны монтаж и демонтаж,
-    // отдаём обе кнопки.
-    const mountMissing =
-        missing.find(
-            x => x.field === 'mount'
-        );
-
-    const demountMissing =
-        missing.find(
-            x => x.field === 'demount'
-        );
-
-
-    if (
-        mountMissing &&
-        demountMissing
-    ) {
-
-        actions.push({
-            type: 'quick_reply',
-            tag: 'ask_mount'
-        });
-
-        actions.push({
-            type: 'quick_reply',
-            tag: 'ask_demount'
-        });
-
-        return actions;
-    }
-
-
     const next =
         getNextAction(state);
 
-
     if (
-        next.type !== 'summary'
+        next.type === 'summary'
     ) {
-        actions.push(next);
+        return [];
     }
 
-
-    return actions;
+    return [next];
 }
 
 
@@ -1833,8 +2277,59 @@ equipment:
 Если клиент явно сказал, что не знает значение,
 можно использовать "unknown".
 
+Если клиент явно ответил "нет", "не требуется", "не нужно",
+"не нужен", "не нужна", "не нужны", "не надо" или смысловой
+эквивалент для текстового поля, сохрани это как значение
+"not_required". Не оставляй такие ответы пустыми.
+
 Если клиент исправляет ранее сказанное значение —
 верни новое значение.
+
+Если клиент сообщает технические детали оборудования,
+распредели их по соответствующим полям:
+
+stageDetails — тип и размеры сценических конструкций,
+крыша, боковые уши, подиум, пультовая, фермы и другие конструкции.
+
+stageSurface — поверхность установки сценических конструкций:
+плитка, асфальт, грунт, трава и т. п.
+
+soundDetails — группы, коллективы, артисты, ведущие,
+спикеры, солисты, живые группы, оркестры, кавер-бэнды,
+фонограммы и другие сведения о звуковом обеспечении.
+
+backline — информация о необходимости или составе бэклайна:
+мониторы, барабаны, комбо, инструменты и т. п.
+
+soundRider — информация из звукового райдера,
+если клиент её сообщил или описал.
+
+lightDetails — задачи по свету:
+подсветка сцены, атмосфера, аплайтинг и т. п.
+
+lightFixtures — требования к типу и количеству световых приборов,
+если клиент их сообщил.
+
+ledDetails — тип, размеры и количество LED-экранов.
+
+ledContent — информация о том, что планируется транслировать
+на LED-экраны.
+
+ledSuspension — возможность подвеса оборудования
+или необходимость напольной конструкции.
+
+additionalServices — дополнительные услуги,
+спецэффекты, видеотрансляции, выполнение райдера
+и другие дополнительные работы.
+
+specialConditions — особые условия:
+ночной монтаж/демонтаж, ограничения по въезду,
+пропуска, допуски, условия оплаты, требования к документам
+и т. п.
+
+Не переноси информацию между этими полями без основания.
+Если клиент сообщил конкретную информацию — сохрани её
+в наиболее соответствующем поле.
 
 Структура:
 
@@ -1846,9 +2341,9 @@ equipment:
     "eventType": "...",
     "eventLevel": "...",
     "guestCount": 0,
-    "dateStart": "YYYY-MM-DD",
-    "dateEnd": "YYYY-MM-DD",
-    "readyDate": "YYYY-MM-DD",
+    "dateStart": "YYYY-MM-DD HH:mm",
+    "dateEnd": "YYYY-MM-DD HH:mm",
+    "readyDate": "YYYY-MM-DD HH:mm",
     "location": "...",
     "place": "...",
     "floor": 3,
@@ -1856,12 +2351,33 @@ equipment:
     "liftDimensions": "...",
     "equipment": [],
     "equipmentDetails": "...",
+
+    "stageDetails": "...",
+    "stageSurface": "...",
+
+    "soundDetails": "...",
+    "backline": "...",
+    "soundRider": "...",
+
+    "lightDetails": "...",
+    "lightFixtures": "...",
+
+    "ledDetails": "...",
+    "ledContent": "...",
+    "ledSuspension": "...",
+
     "personnel": "...",
     "personnelDetails": "...",
+
     "mount": "...",
     "mountTime": "...",
+
     "demount": "...",
     "demountTime": "...",
+
+    "additionalServices": "...",
+    "specialConditions": "...",
+
     "clientRequest": "...",
     "additionalInfo": "..."
   }
@@ -1873,7 +2389,10 @@ equipment:
 - Не извлекай информацию из старой истории, если её нет
   в последнем сообщении.
 - Не меняй значения только потому, что они кажутся логичными.
-- Даты приводи к YYYY-MM-DD, если дата однозначно понятна.
+- Если клиент сообщил дату и время, сохраняй и дату, и время.
+- Не отбрасывай время.
+- Используй формат YYYY-MM-DD HH:mm, если дата и время однозначно понятны.
+- Если клиент сообщил только дату без времени, сохрани известную дату, но не придумывай время.
 `;
 
 
@@ -1969,6 +2488,7 @@ async function detectIntent(
 - manager_request
 - greeting
 - correction
+- out_of_scope
 - other
 
 Правила:
@@ -1995,11 +2515,27 @@ manager_request —
 correction —
 клиент исправляет ранее сообщённые данные.
 
+out_of_scope —
+сообщение не относится к техническому оснащению,
+подготовке, организации или сопровождению мероприятия
+и не связано с заявкой клиента в MLK.
+
 greeting —
 приветствие без содержательной информации.
 
 other —
 если ничего выше не подходит.
+
+Если сообщение относится к посторонней теме
+(например, политика, личные советы, развлечения,
+новости, бытовые вопросы и т. п.) —
+используй out_of_scope.
+
+Если сообщение связано с мероприятием MLK,
+его техническим оснащением, оборудованием,
+подготовкой заявки, площадкой, монтажом,
+демонтажом, персоналом, техническими требованиями
+или портфолио MLK — не используй out_of_scope.
 
 Не додумывай.
 `;
@@ -2130,22 +2666,25 @@ function buildControlledQuestion(
             return 'Подскажите, пожалуйста, какой у вас формат мероприятия?';
 
         case 'eventLevel':
-            return 'Какой уровень технического оснащения планируется?';
+            return 'Какой уровень мероприятия?';
 
         case 'guestCount':
             return 'Подскажите, пожалуйста, ориентировочное количество гостей.';
 
         case 'personnel':
-            return 'Какой формат технического персонала вам нужен?';
+            return 'Какой персонал требуется?';
+
+        case 'personnelDetails':
+            return 'Уточните, пожалуйста, какой именно персонал вам требуется.';
 
         case 'dateStart':
-            return 'Выберите, пожалуйста, дату начала мероприятия.';
+            return 'Дата и время начала мероприятия/репетиции?';
 
         case 'dateEnd':
-            return 'Выберите, пожалуйста, дату окончания мероприятия.';
+            return 'Дата и время окончания мероприятия?';
 
         case 'readyDate':
-            return 'К какой дате оборудование должно быть готово на площадке?';
+            return 'Дата и время готовности оборудования?';
 
         case 'location':
             return 'Подскажите, пожалуйста, адрес площадки.';
@@ -2165,17 +2704,47 @@ function buildControlledQuestion(
         case 'equipment':
             return 'Какое оборудование вам необходимо?';
 
+        case 'stageDetails':
+            return 'Укажите, пожалуйста, тип и размеры сценических конструкций. Например: конструкция крыши, боковые уши, подиум, пультовая, фермы и другие конструкции.';
+
+        case 'stageSurface':
+            return 'Укажите, пожалуйста, поверхность установки конструкций: плитка, асфальт, грунт, трава и т. д.';
+
+        case 'soundDetails':
+            return 'Какие группы, коллективы и артисты планируются? Укажите, пожалуйста, ведущих, спикеров, солистов, живые группы, оркестры, кавер-бэнды или использование фонограмм. Если есть звуковой райдер — можете его прислать или описать.';
+
+        case 'backline':
+            return 'Нужно ли оборудование для бэклайна: мониторы, барабаны, комбо, инструменты и т. д.? Если не требуется — так и напишите.';
+
+        case 'lightDetails':
+            return 'Какие задачи по свету необходимо решить? Например: подсветка сцены, создание атмосферы в помещении, аплайтинг и т. д.';
+
+        case 'ledDetails':
+            return 'Укажите, пожалуйста, тип, размеры и количество светодиодных экранов: центральный, боковые, кулисы, юбки сцены и т. д.';
+
+        case 'ledContent':
+            return 'Что планируется транслировать на светодиодные экраны?';
+
+        case 'ledSuspension':
+            return 'Есть ли на площадке возможность подвеса оборудования или необходима напольная конструкция? Если подвес не требуется — так и напишите.';
+
         case 'mount':
-            return 'Когда удобно выполнить монтаж?';
+            return 'Когда возможен монтаж?';
 
         case 'demount':
-            return 'Когда планируется демонтаж?';
+            return 'Когда возможен демонтаж?';
 
         case 'mountTime':
             return 'Подскажите, пожалуйста, во сколько можно начать монтаж.';
 
         case 'demountTime':
             return 'До какого времени необходимо завершить демонтаж?';
+
+        case 'additionalServices':
+            return 'Есть ли дополнительные услуги, требования или пожелания, которые необходимо учесть? Например: спецэффекты, видеотрансляции, выполнение райдера и т. д. Если ничего не требуется — так и напишите.';
+
+        case 'specialConditions':
+            return 'Есть ли особые условия, которые необходимо учесть: ограничения по въезду, пропуска и допуски, условия оплаты, требования к документам и т. д.? Если особых условий нет — так и напишите.';
 
         default:
             return 'Подскажите, пожалуйста, дополнительную информацию по проекту.';
@@ -2503,7 +3072,9 @@ function buildManagerSummary(
 
         lines.push(
             `Персонал / детали: ${
-                p.personnelDetails
+                displayProjectValue(
+                    p.personnelDetails
+                )
             }`
         );
     }
@@ -2655,7 +3226,153 @@ function buildManagerSummary(
 
         lines.push(
             `Дополнительно: ${
-                p.equipmentDetails
+                displayProjectValue(
+                    p.equipmentDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.stageDetails) {
+
+        lines.push(
+            `Сценические конструкции: ${
+                displayProjectValue(
+                    p.stageDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.stageSurface) {
+
+        lines.push(
+            `Поверхность установки: ${
+                displayProjectValue(
+                    p.stageSurface
+                )
+            }`
+        );
+    }
+
+
+    if (p.soundDetails) {
+
+        lines.push(
+            `Звуковая программа: ${
+                displayProjectValue(
+                    p.soundDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.backline) {
+
+        lines.push(
+            `Бэклайн: ${
+                displayProjectValue(
+                    p.backline
+                )
+            }`
+        );
+    }
+
+
+    if (p.soundRider) {
+
+        lines.push(
+            `Звуковой райдер: ${
+                displayProjectValue(
+                    p.soundRider
+                )
+            }`
+        );
+    }
+
+
+    if (p.lightDetails) {
+
+        lines.push(
+            `Задачи по свету: ${
+                displayProjectValue(
+                    p.lightDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.lightFixtures) {
+
+        lines.push(
+            `Световые приборы: ${
+                displayProjectValue(
+                    p.lightFixtures
+                )
+            }`
+        );
+    }
+
+
+    if (p.ledDetails) {
+
+        lines.push(
+            `LED-экраны: ${
+                displayProjectValue(
+                    p.ledDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.ledContent) {
+
+        lines.push(
+            `Контент LED: ${
+                displayProjectValue(
+                    p.ledContent
+                )
+            }`
+        );
+    }
+
+
+    if (p.ledSuspension) {
+
+        lines.push(
+            `Подвес LED: ${
+                displayProjectValue(
+                    p.ledSuspension
+                )
+            }`
+        );
+    }
+
+
+    if (p.additionalServices) {
+
+        lines.push(
+            `Дополнительные услуги: ${
+                displayProjectValue(
+                    p.additionalServices
+                )
+            }`
+        );
+    }
+
+
+    if (p.specialConditions) {
+
+        lines.push(
+            `Особые условия: ${
+                displayProjectValue(
+                    p.specialConditions
+                )
             }`
         );
     }
@@ -2828,7 +3545,11 @@ function buildClientSummary(
     ) {
 
         lines.push(
-            `• Персонал: ${p.personnelDetails}`
+            `• Персонал: ${
+                displayProjectValue(
+                    p.personnelDetails
+                )
+            }`
         );
     }
 
@@ -2932,7 +3653,155 @@ function buildClientSummary(
     ) {
 
         lines.push(
-            `• Дополнительно: ${p.equipmentDetails}`
+            `• Дополнительно: ${
+                displayProjectValue(
+                    p.equipmentDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.stageDetails) {
+
+        lines.push(
+            `• Сценические конструкции: ${
+                displayProjectValue(
+                    p.stageDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.stageSurface) {
+
+        lines.push(
+            `• Поверхность установки: ${
+                displayProjectValue(
+                    p.stageSurface
+                )
+            }`
+        );
+    }
+
+
+    if (p.soundDetails) {
+
+        lines.push(
+            `• Звуковая программа: ${
+                displayProjectValue(
+                    p.soundDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.backline) {
+
+        lines.push(
+            `• Бэклайн: ${
+                displayProjectValue(
+                    p.backline
+                )
+            }`
+        );
+    }
+
+
+    if (p.soundRider) {
+
+        lines.push(
+            `• Звуковой райдер: ${
+                displayProjectValue(
+                    p.soundRider
+                )
+            }`
+        );
+    }
+
+
+    if (p.lightDetails) {
+
+        lines.push(
+            `• Задачи по свету: ${
+                displayProjectValue(
+                    p.lightDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.lightFixtures) {
+
+        lines.push(
+            `• Световые приборы: ${
+                displayProjectValue(
+                    p.lightFixtures
+                )
+            }`
+        );
+    }
+
+
+    if (p.ledDetails) {
+
+        lines.push(
+            `• LED-экраны: ${
+                displayProjectValue(
+                    p.ledDetails
+                )
+            }`
+        );
+    }
+
+
+    if (p.ledContent) {
+
+        lines.push(
+            `• Контент LED: ${
+                displayProjectValue(
+                    p.ledContent
+                )
+            }`
+        );
+    }
+
+
+    if (p.ledSuspension) {
+
+        lines.push(
+            `• Подвес LED: ${
+                displayProjectValue(
+                    p.ledSuspension
+                )
+            }`
+        );
+    }
+
+
+    if (p.additionalServices) {
+
+        lines.push(
+            `• Дополнительные услуги: ${
+                displayProjectValue(
+                    p.additionalServices
+                )
+            }`
+        );
+    }
+
+
+    if (p.specialConditions) {
+
+        lines.push(
+            `• Особые условия: ${
+                displayProjectValue(
+                    p.specialConditions
+                )
+            }`
         );
     }
 
@@ -3132,39 +4001,39 @@ function actionToText(
         ask_format: {
 
             concerts:
-                'Формат: Концерты & Фестивали',
+                `Формат: ${EVENT_TYPES.concerts.label}`,
 
             conferences:
-                'Формат: Конференции & Презентации & TV-проекты',
+                `Формат: ${EVENT_TYPES.conferences.label}`,
 
             corporate:
-                'Формат: Корпоративы & Торжества',
+                `Формат: ${EVENT_TYPES.corporate.label}`,
 
             exhibitions:
-                'Формат: Выставки',
+                `Формат: ${EVENT_TYPES.exhibitions.label}`,
 
             sports:
-                'Формат: Спортивные мероприятия'
+                `Формат: ${EVENT_TYPES.sports.label}`
         },
 
 
         ask_level: {
 
             standard:
-                'Уровень: Стандартный',
+                `Уровень: ${LEVELS.standard.label} (${LEVELS.standard.description})`,
 
             high:
-                'Уровень: Высокие требования',
+                `Уровень: ${LEVELS.high.label} (${LEVELS.high.description})`,
 
             highest:
-                'Уровень: Высший уровень'
+                `Уровень: ${LEVELS.highest.label} (${LEVELS.highest.description})`
         },
 
 
         ask_personnel: {
 
             management:
-                'Персонал: Управление оборудованием',
+                'Персонал: Полное управление оборудованием',
 
             duty_technician:
                 'Персонал: Дежурный техник',
@@ -3296,18 +4165,21 @@ function getGreeting(
         state.client.name ||
         '';
 
-
     return `Здравствуйте${
         name
             ? `, ${name}`
             : ''
-    }! Рад приветствовать вас в MLK. Меня зовут Дмитрий, я ваш менеджер по техническому оснащению мероприятий «под ключ».
+    }! 👋
 
-Если у вас есть готовое техническое задание, райдер или любые другие файлы, вы можете отправить их мне, и я сразу передам их в отдел подготовки КП.
+Я Дмитрий, AI-консультант MLK по техническому оснащению мероприятий.
 
-Если же вы пока не знаете всех деталей, я задам несколько уточняющих вопросов — это займёт всего пару минут и поможет подготовить для вас точное и честное предложение.
+Помогу собрать информацию по вашему проекту и подготовить заявку для команды MLK.
 
-С чего начнём?`;
+Если у вас уже есть ТЗ, райдер, схема, презентация или другие материалы по проекту — можете отправить их сюда.
+
+Если готовых материалов нет — можем просто обсудить проект здесь, в удобном для вас формате.
+
+Как вам удобнее начать?`;
 }
 
 
@@ -3325,7 +4197,7 @@ function getStartActions() {
 
         {
             type: 'quick_reply',
-            tag: 'ask_format'
+            tag: 'discuss_project'
         }
 
     ];
@@ -3362,7 +4234,7 @@ function processStart(
 
 
     state.lastAction =
-        'ask_format';
+        'start_menu';
 
     state.updatedAt =
         new Date().toISOString();
@@ -3919,6 +4791,47 @@ async function processSalesMessage(
     let userText = '';
 
 
+    // --------------------------------------------------------
+    // START DISCUSSION FROM START MENU
+    // --------------------------------------------------------
+
+    if (
+        normalized.type === 'action' &&
+        normalized.tag === 'discuss_project'
+    ) {
+
+        addHistory(
+            state,
+            'user',
+            'Обсудить проект'
+        );
+
+        const question =
+            buildControlledQuestion(
+                state
+            );
+
+
+addHistory(
+    state,
+    'assistant',
+    question
+);
+
+        return prepareResult(
+            state,
+            initialGreeting
+                ? `${initialGreeting}\n\n${question}`
+                : question,
+            'qualification'
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // OTHER ACTIONS
+    // --------------------------------------------------------
+
     if (
         normalized.type === 'action'
     ) {
@@ -3928,13 +4841,11 @@ async function processSalesMessage(
                 normalized
             );
 
-
         const applied =
             applyAction(
                 state,
                 normalized
             );
-
 
         if (
             applied
@@ -4101,6 +5012,42 @@ async function processSalesMessage(
                 `${initialGreeting}\n\n${result.text}`;
         }
 
+
+        return result;
+    }
+
+
+    // --------------------------------------------------------
+    // OUT OF SCOPE
+    // --------------------------------------------------------
+
+    if (
+        intent === 'out_of_scope'
+    ) {
+
+        const text =
+            'Я занимаюсь техническим оснащением мероприятий MLK. Давайте лучше вернёмся к вашей заявке.';
+
+        addHistory(
+            state,
+            'assistant',
+            text
+        );
+
+        const result =
+            prepareResult(
+                state,
+                text,
+                intent
+            );
+
+        if (
+            initialGreeting
+        ) {
+
+            result.text =
+                `${initialGreeting}\n\n${result.text}`;
+        }
 
         return result;
     }

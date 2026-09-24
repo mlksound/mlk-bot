@@ -674,6 +674,53 @@ async function sendTelegramMessage(
     return last;
 }
 
+function buildTelegramReplyMarkup(actions) {
+    if (!Array.isArray(actions) || !actions.length) {
+        return null;
+    }
+
+    const keyboard = [];
+
+    for (const action of actions) {
+        if (!action || !action.type) {
+            continue;
+        }
+
+        if (action.type === 'send_files') {
+            keyboard.push([
+                {
+                    text: '📎 Отправить ТЗ / файлы',
+                    callback_data: 'sales:send_files'
+                }
+            ]);
+
+            continue;
+        }
+
+        if (
+            action.type === 'quick_reply' &&
+            action.tag === 'discuss_project'
+        ) {
+            keyboard.push([
+                {
+                    text: '💬 Обсудить проект',
+                    callback_data: 'sales:discuss_project'
+                }
+            ]);
+
+            continue;
+        }
+    }
+
+    if (!keyboard.length) {
+        return null;
+    }
+
+    return {
+        inline_keyboard: keyboard
+    };
+}
+
 async function answerTelegramCallback(
     callbackQueryId,
     text = ''
@@ -2118,9 +2165,19 @@ async function processTelegramClientMessage(
             `intent=${result?.intent || ''}`
         );
 
+        const replyMarkup =
+            buildTelegramReplyMarkup(
+                result?.actions
+            );
+
         await sendTelegramMessage(
             clientId,
-            answer
+            answer,
+            replyMarkup
+                ? {
+                    reply_markup: replyMarkup
+                }
+                : {}
         );
 
         await mirrorToAdmin(
@@ -2297,15 +2354,6 @@ async function processTelegramCallback(
         return;
     }
 
-    if (
-        !ADMIN_CHAT_ID ||
-        String(
-            callbackQuery.message?.chat?.id
-        ) !== String(ADMIN_CHAT_ID)
-    ) {
-        return;
-    }
-
     const data =
         callbackQuery.data;
 
@@ -2314,6 +2362,98 @@ async function processTelegramCallback(
 
     const action =
         parts[0];
+
+    // --------------------------------------------------------
+    // CLIENT SALES BUTTONS
+    // --------------------------------------------------------
+
+    if (
+        action === 'sales'
+    ) {
+
+        const salesAction =
+            parts[1];
+
+        const clientId =
+            String(
+                callbackQuery
+                    .message
+                    ?.chat
+                    ?.id
+            );
+
+        if (
+            !clientId ||
+            !salesAction
+        ) {
+            return;
+        }
+
+        if (
+            salesAction === 'send_files'
+        ) {
+
+            await answerTelegramCallback(
+                callbackQuery.id,
+                'Можно отправить файл'
+            );
+
+            await sendTelegramMessage(
+                clientId,
+                'Отлично. Отправляйте ТЗ, райдер или другие материалы по проекту. Я передам их команде MLK.'
+            );
+
+            return;
+        }
+
+        if (
+            salesAction === 'discuss_project'
+        ) {
+
+            await answerTelegramCallback(
+                callbackQuery.id,
+                'Начинаем'
+            );
+
+            const result =
+                await processSalesMessage(
+                    clientId,
+                    {
+                        type:
+                            'action',
+
+                        tag:
+                            'discuss_project'
+                    }
+                );
+
+            await sendTelegramMessage(
+                clientId,
+                result.text,
+                buildTelegramReplyMarkup(
+                    result.actions
+                )
+            );
+
+            return;
+        }
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // ADMIN BUTTONS
+    // --------------------------------------------------------
+
+    if (
+        !ADMIN_CHAT_ID ||
+        String(
+            callbackQuery.message?.chat?.id
+        ) !== String(ADMIN_CHAT_ID)
+    ) {
+        return;
+    }
 
     const clientId =
         parts.slice(1).join(':');
