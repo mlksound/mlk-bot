@@ -1496,24 +1496,52 @@ async function bindConnectorEvent() {
         '🔔 Binding ONIMCONNECTORMESSAGEADD...'
     );
 
-    const result =
-        await bitrixOAuthCall(
-            'event.bind',
-            {
-                event:
-                    'OnImConnectorMessageAdd',
+    try {
 
-                handler:
-                    BITRIX_HANDLER_URL
-            }
+        const result =
+            await bitrixOAuthCall(
+                'event.bind',
+                {
+                    event:
+                        'OnImConnectorMessageAdd',
+
+                    handler:
+                        BITRIX_HANDLER_URL
+                }
+            );
+
+        log(
+            '✅ Event bind result:',
+            JSON.stringify(result)
         );
 
-    log(
-        '✅ Event bind result:',
-        JSON.stringify(result)
-    );
+        return result;
 
-    return result;
+    } catch (e) {
+
+        const message =
+            String(e?.message || '').toLowerCase();
+
+        // Bitrix сообщает, что обработчик уже существует.
+        // Это НЕ ошибка для нашего сценария:
+        // значит обработчик был зарегистрирован ранее.
+        if (
+            message.includes('handler already binded')
+        ) {
+
+            warn(
+                '⚠️ ONIMCONNECTORMESSAGEADD already bound — continuing'
+            );
+
+            return {
+                alreadyBound: true
+            };
+        }
+
+        // Любая другая ошибка действительно должна
+        // остановить настройку Connector.
+        throw e;
+    }
 }
 
 async function activateConnector(
@@ -3399,6 +3427,152 @@ async function confirmConnectorDelivery(
 }
 
 // ============================================================
+// BITRIX CONNECTOR PAYLOAD PARSER
+// ============================================================
+
+function parseBitrixFormBody(body) {
+
+    const payload = {};
+
+    const params =
+        new URLSearchParams(
+            String(body || '')
+        );
+
+    for (
+        const [key, value]
+        of params.entries()
+    ) {
+
+        const parts =
+            String(key)
+                .replace(
+                    /\[([^\]]*)\]/g,
+                    '.$1'
+                )
+                .split('.')
+                .filter(Boolean);
+
+        if (!parts.length) {
+            continue;
+        }
+
+        let current =
+            payload;
+
+        for (
+            let i = 0;
+            i < parts.length - 1;
+            i++
+        ) {
+
+            const part =
+                parts[i];
+
+            const next =
+                parts[i + 1];
+
+            if (
+                current[part] === undefined ||
+                current[part] === null ||
+                typeof current[part] !== 'object'
+            ) {
+
+                current[part] =
+                    /^\d+$/.test(next)
+                        ? []
+                        : {};
+            }
+
+            current =
+                current[part];
+        }
+
+        current[
+            parts[parts.length - 1]
+        ] = value;
+    }
+
+    return payload;
+}
+
+
+function normalizeConnectorPayload(payload) {
+
+    if (
+        !payload ||
+        typeof payload !== 'object'
+    ) {
+        return {};
+    }
+
+    // --------------------------------------------------------
+    // JSON payload уже имеет нормальную структуру
+    // --------------------------------------------------------
+
+    const normalized = {
+        ...payload
+    };
+
+    // --------------------------------------------------------
+    // Иногда Bitrix присылает data как JSON-строку
+    // --------------------------------------------------------
+
+    if (
+        typeof normalized.data === 'string'
+    ) {
+
+        try {
+
+            const parsed =
+                JSON.parse(
+                    normalized.data
+                );
+
+            if (
+                parsed &&
+                typeof parsed === 'object'
+            ) {
+
+                normalized.data =
+                    parsed;
+            }
+
+        } catch (e) {
+            // Оставляем исходное значение.
+        }
+    }
+
+    // --------------------------------------------------------
+    // Иногда event приходит в другом регистре
+    // --------------------------------------------------------
+
+    if (
+        !normalized.event &&
+        normalized.EVENT
+    ) {
+
+        normalized.event =
+            normalized.EVENT;
+    }
+
+    // --------------------------------------------------------
+    // Нормализуем DATA
+    // --------------------------------------------------------
+
+    if (
+        !normalized.data &&
+        normalized.DATA
+    ) {
+
+        normalized.data =
+            normalized.DATA;
+    }
+
+    return normalized;
+}
+
+// ============================================================
 // 20. HTTP SERVER
 // ============================================================
 
@@ -4247,64 +4421,14 @@ body {
 
                             } else {
 
-                                const params =
-                                    new URLSearchParams(body);
-
-                                for (
-                                    const [
-                                        key,
-                                        value
-                                    ] of params.entries()
-                                ) {
-
-                                    const parts =
-                                        String(key)
-                                            .replace(
-                                                /\[([^\]]*)\]/g,
-                                                '.$1'
-                                            )
-                                            .split('.')
-                                            .filter(Boolean);
-
-                                    let current =
-                                        payload;
-
-                                    for (
-                                        let i = 0;
-                                        i < parts.length - 1;
-                                        i++
-                                    ) {
-
-                                        const part =
-                                            parts[i];
-
-                                        const next =
-                                            parts[i + 1];
-
-                                        if (
-                                            current[part] === undefined ||
-                                            current[part] === null ||
-                                            typeof current[part] !== 'object'
-                                        ) {
-
-                                            current[part] =
-                                                /^\d+$/.test(next)
-                                                    ? []
-                                                    : {};
-                                        }
-
-                                        current =
-                                            current[part];
-                                    }
-
-                                    if (parts.length) {
-
-                                        current[
-                                            parts[parts.length - 1]
-                                        ] = value;
-                                    }
-                                }
+                                payload =
+                                    parseBitrixFormBody(body);
                             }
+
+                            payload =
+                                normalizeConnectorPayload(
+                                    payload
+                                );
 
                         } catch (e) {
 
