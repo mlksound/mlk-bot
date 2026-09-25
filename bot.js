@@ -326,6 +326,61 @@ async function bitrixWebhookCall(
 // 6. BITRIX OAUTH
 // ============================================================
 
+function logOAuthRefreshDiagnostics(data) {
+
+    log('🔎 BITRIX OAUTH REFRESH DIAGNOSTIC');
+    log('----------------------------------------');
+
+    if (!data || typeof data !== 'object') {
+        log('❌ OAuth response is not an object');
+        log('----------------------------------------');
+        return;
+    }
+
+    const safeFields = [
+        'domain',
+        'client_endpoint',
+        'server_endpoint',
+        'scope',
+        'member_id',
+        'status',
+        'expires_in',
+        'token_type'
+    ];
+
+    for (const field of safeFields) {
+
+        if (data[field] !== undefined) {
+
+            log(
+                `OAuth ${field}:`,
+                String(data[field])
+            );
+        }
+    }
+
+    log(
+        'OAuth response keys:',
+        Object.keys(data).join(', ')
+    );
+
+    log(
+        'OAuth access_token:',
+        data.access_token
+            ? `PRESENT (${String(data.access_token).length} chars)`
+            : 'MISSING'
+    );
+
+    log(
+        'OAuth refresh_token:',
+        data.refresh_token
+            ? `PRESENT (${String(data.refresh_token).length} chars)`
+            : 'MISSING'
+    );
+
+    log('----------------------------------------');
+}
+
 async function refreshBitrixOAuth() {
 
     if (
@@ -386,6 +441,8 @@ async function refreshBitrixOAuth() {
             'OAuth refresh returned invalid data'
         );
     }
+
+    logOAuthRefreshDiagnostics(data);
 
     bitrixAuth = {
         ...bitrixAuth,
@@ -495,6 +552,14 @@ async function bitrixOAuthCall(
         bitrixAuth.domain ||
         BITRIX_DOMAIN;
 
+    log(
+        '🔐 BITRIX REST AUTH CONTEXT:',
+        `method=${method}`,
+        `domain=${domain}`,
+        `token=${bitrixAuth.access_token ? 'PRESENT' : 'MISSING'}`,
+        `tokenLength=${bitrixAuth.access_token ? String(bitrixAuth.access_token).length : 0}`
+    );
+
     const endpoint =
         `https://${domain}/rest/${method}`;
 
@@ -529,6 +594,16 @@ async function bitrixOAuthCall(
             retry
         ) {
 
+            log('🔄 BITRIX OAUTH REFRESH TRIGGERED');
+            log('----------------------------------------');
+            log('REST METHOD:', method);
+            log('BITRIX ERROR:', data.error);
+            log(
+                'BITRIX ERROR DESCRIPTION:',
+                data.error_description || ''
+            );
+            log('----------------------------------------');
+
             await refreshBitrixOAuth();
 
             return bitrixOAuthCall(
@@ -557,6 +632,12 @@ async function bitrixOAuthCall(
                 e.message.includes('NO_AUTH_FOUND')
             )
         ) {
+
+            log('🔄 BITRIX OAUTH REFRESH TRIGGERED FROM CATCH');
+            log('----------------------------------------');
+            log('REST METHOD:', method);
+            log('ERROR:', e.message);
+            log('----------------------------------------');
 
             await refreshBitrixOAuth();
 
