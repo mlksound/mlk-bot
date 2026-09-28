@@ -207,28 +207,325 @@ function readRequestBody(req) {
     });
 }
 
-async function fetchJson(url, options = {}) {
-    const response = await fetch(url, options);
-
-    const text = await response.text();
-
-    let data = {};
+function getFetchDiagnosticUrl(url) {
 
     try {
-        data = text ? JSON.parse(text) : {};
+
+        const parsed =
+            new URL(url);
+
+        let pathname =
+            parsed.pathname;
+
+        if (
+            pathname.includes('/bot')
+        ) {
+
+            pathname =
+                pathname.replace(
+                    /\/bot[^/]+/,
+                    '/bot[REDACTED]'
+                );
+        }
+
+        return (
+            parsed.protocol +
+            '//' +
+            parsed.hostname +
+            pathname
+        );
+
     } catch (e) {
-        throw new Error(
-            `Invalid JSON response: ${text.slice(0, 500)}`
-        );
-    }
 
-    if (!response.ok) {
-        throw new Error(
-            `HTTP ${response.status}: ${JSON.stringify(data).slice(0, 1000)}`
-        );
+        return '[invalid-url]';
     }
+}
 
-    return data;
+
+function getErrorDiagnostics(error) {
+
+    const cause =
+        error?.cause;
+
+    return {
+
+        name:
+            error?.name ||
+            'Error',
+
+        message:
+            error?.message ||
+            String(error),
+
+        code:
+            error?.code ||
+            cause?.code ||
+            null,
+
+        errno:
+            error?.errno ||
+            cause?.errno ||
+            null,
+
+        syscall:
+            error?.syscall ||
+            cause?.syscall ||
+            null,
+
+        causeName:
+            cause?.name ||
+            null,
+
+        causeMessage:
+            cause?.message ||
+            null,
+
+        causeCode:
+            cause?.code ||
+            null,
+
+        stack:
+            error?.stack ||
+            null
+    };
+}
+
+
+async function fetchJson(
+    url,
+    options = {}
+) {
+
+    const startedAt =
+        Date.now();
+
+    const method =
+        String(
+            options?.method ||
+            'GET'
+        ).toUpperCase();
+
+    const target =
+        getFetchDiagnosticUrl(
+            url
+        );
+
+    try {
+
+        const response =
+            await fetch(
+                url,
+                options
+            );
+
+        const durationMs =
+            Date.now() -
+            startedAt;
+
+        const text =
+            await response.text();
+
+        let data = {};
+
+        try {
+
+            data =
+                text
+                    ? JSON.parse(text)
+                    : {};
+
+        } catch (e) {
+
+            error(
+                '⚠️ FETCH INVALID JSON'
+            );
+
+            error(
+                'TARGET:',
+                target
+            );
+
+            error(
+                'METHOD:',
+                method
+            );
+
+            error(
+                'HTTP STATUS:',
+                response.status
+            );
+
+            error(
+                'DURATION MS:',
+                durationMs
+            );
+
+            error(
+                'BODY:',
+                text.slice(0, 1000)
+            );
+
+            throw new Error(
+                `Invalid JSON response: ${text.slice(0, 500)}`
+            );
+        }
+
+        if (!response.ok) {
+
+            error(
+                '⚠️ FETCH HTTP ERROR'
+            );
+
+            error(
+                'TARGET:',
+                target
+            );
+
+            error(
+                'METHOD:',
+                method
+            );
+
+            error(
+                'HTTP STATUS:',
+                response.status
+            );
+
+            error(
+                'DURATION MS:',
+                durationMs
+            );
+
+            error(
+                'RESPONSE:',
+                JSON.stringify(data).slice(0, 1000)
+            );
+
+            throw new Error(
+                `HTTP ${response.status}: ${JSON.stringify(data).slice(0, 1000)}`
+            );
+        }
+
+        return data;
+
+    } catch (e) {
+
+        const durationMs =
+            Date.now() -
+            startedAt;
+
+        const diagnostics =
+            getErrorDiagnostics(
+                e
+            );
+
+        error(
+            '========================================'
+        );
+
+        error(
+            '❌ FETCH FAILED'
+        );
+
+        error(
+            'TARGET:',
+            target
+        );
+
+        error(
+            'METHOD:',
+            method
+        );
+
+        error(
+            'DURATION MS:',
+            durationMs
+        );
+
+        error(
+            'ERROR NAME:',
+            diagnostics.name
+        );
+
+        error(
+            'ERROR MESSAGE:',
+            diagnostics.message
+        );
+
+        error(
+            'ERROR CODE:',
+            diagnostics.code
+        );
+
+        error(
+            'ERROR ERRNO:',
+            diagnostics.errno
+        );
+
+        error(
+            'ERROR SYSCALL:',
+            diagnostics.syscall
+        );
+
+        error(
+            'CAUSE NAME:',
+            diagnostics.causeName
+        );
+
+        error(
+            'CAUSE MESSAGE:',
+            diagnostics.causeMessage
+        );
+
+        error(
+            'CAUSE CODE:',
+            diagnostics.causeCode
+        );
+
+        error(
+            'UPTIME SEC:',
+            Math.round(
+                process.uptime()
+            )
+        );
+
+        const memory =
+            process.memoryUsage();
+
+        error(
+            'MEMORY RSS MB:',
+            Math.round(
+                memory.rss /
+                1024 /
+                1024
+            )
+        );
+
+        error(
+            'HEAP USED MB:',
+            Math.round(
+                memory.heapUsed /
+                1024 /
+                1024
+            )
+        );
+
+        if (
+            diagnostics.stack
+        ) {
+
+            error(
+                'STACK:',
+                diagnostics.stack
+            );
+        }
+
+        error(
+            '========================================'
+        );
+
+        throw e;
+    }
 }
 
 // ============================================================
@@ -2613,6 +2910,9 @@ async function processTelegramCallback(
 
 let telegramOffset = 0;
 
+let telegramConsecutiveErrors = 0;
+let telegramLastSuccessAt = null;
+
 async function telegramPoll() {
 
     if (!BOT_TOKEN) {
@@ -2653,6 +2953,11 @@ async function telegramPoll() {
                             ]
                     }
                 );
+
+            telegramConsecutiveErrors = 0;
+
+            telegramLastSuccessAt =
+                new Date().toISOString();
 
             const updates =
                 result?.result || [];
@@ -2710,9 +3015,67 @@ async function telegramPoll() {
 
         } catch (e) {
 
+            telegramConsecutiveErrors++;
+
             error(
-                'Telegram polling error:',
+                '========================================'
+            );
+
+            error(
+                `⚠️ Telegram polling error #${telegramConsecutiveErrors}`
+            );
+
+            error(
+                'ERROR:',
                 e.message
+            );
+
+            error(
+                'LAST SUCCESS:',
+                telegramLastSuccessAt ||
+                    'NEVER'
+            );
+
+            error(
+                'UPTIME SEC:',
+                Math.round(
+                    process.uptime()
+                )
+            );
+
+            const memory =
+                process.memoryUsage();
+
+            error(
+                'MEMORY RSS MB:',
+                Math.round(
+                    memory.rss /
+                    1024 /
+                    1024
+                )
+            );
+
+            error(
+                'HEAP USED MB:',
+                Math.round(
+                    memory.heapUsed /
+                    1024 /
+                    1024
+                )
+            );
+
+            if (
+                e.stack
+            ) {
+
+                error(
+                    'STACK:',
+                    e.stack
+                );
+            }
+
+            error(
+                '========================================'
             );
 
             await new Promise(
@@ -2731,6 +3094,9 @@ async function telegramPoll() {
 // ============================================================
 
 let bitrixOffset = 0;
+
+let bitrixConsecutiveErrors = 0;
+let bitrixLastSuccessAt = null;
 
 function loadBitrixOffset() {
 
@@ -2833,6 +3199,11 @@ async function bitrixFetchPoll() {
                     }
                 );
 
+            bitrixConsecutiveErrors = 0;
+
+            bitrixLastSuccessAt =
+                new Date().toISOString();
+
             const payload =
                 result?.result || {};
 
@@ -2920,9 +3291,67 @@ async function bitrixFetchPoll() {
 
         } catch (e) {
 
+            bitrixConsecutiveErrors++;
+
             error(
-                'Bitrix fetch error:',
+                '========================================'
+            );
+
+            error(
+                `⚠️ Bitrix FETCH error #${bitrixConsecutiveErrors}`
+            );
+
+            error(
+                'ERROR:',
                 e.message
+            );
+
+            error(
+                'LAST SUCCESS:',
+                bitrixLastSuccessAt ||
+                    'NEVER'
+            );
+
+            error(
+                'UPTIME SEC:',
+                Math.round(
+                    process.uptime()
+                )
+            );
+
+            const memory =
+                process.memoryUsage();
+
+            error(
+                'MEMORY RSS MB:',
+                Math.round(
+                    memory.rss /
+                    1024 /
+                    1024
+                )
+            );
+
+            error(
+                'HEAP USED MB:',
+                Math.round(
+                    memory.heapUsed /
+                    1024 /
+                    1024
+                )
+            );
+
+            if (
+                e.stack
+            ) {
+
+                error(
+                    'STACK:',
+                    e.stack
+                );
+            }
+
+            error(
+                '========================================'
             );
         }
 
@@ -3833,6 +4262,92 @@ const server =
                     '/health'
                 ) {
 
+                    const memory =
+                        process.memoryUsage();
+
+                    const health = {
+                        ok: true,
+
+                        timestamp:
+                            new Date().toISOString(),
+
+                        uptimeSec:
+                            Math.round(
+                                process.uptime()
+                            ),
+
+                        pid:
+                            process.pid,
+
+                        memory: {
+                            rssMb:
+                                Math.round(
+                                    memory.rss /
+                                    1024 /
+                                    1024
+                                ),
+
+                            heapUsedMb:
+                                Math.round(
+                                    memory.heapUsed /
+                                    1024 /
+                                    1024
+                                ),
+
+                            heapTotalMb:
+                                Math.round(
+                                    memory.heapTotal /
+                                    1024 /
+                                    1024
+                                )
+                        },
+
+                        telegram: {
+                            configured:
+                                !!BOT_TOKEN,
+
+                            consecutiveErrors:
+                                telegramConsecutiveErrors,
+
+                            lastSuccessAt:
+                                telegramLastSuccessAt
+                        },
+
+                        bitrixFetch: {
+                            configured:
+                                !!(
+                                    BITRIX_WEBHOOK_URL &&
+                                    BITRIX_BOT_TOKEN
+                                ),
+
+                            consecutiveErrors:
+                                bitrixConsecutiveErrors,
+
+                            lastSuccessAt:
+                                bitrixLastSuccessAt
+                        },
+
+                        connector: {
+                            enabled:
+                                BITRIX_CONNECTOR_ENABLED,
+
+                            oauth:
+                                !!(
+                                    bitrixAuth &&
+                                    bitrixAuth.access_token
+                                ),
+
+                            ready:
+                                connectorReady,
+
+                            openLine:
+                                bitrixOpenLineId,
+
+                            connectorId:
+                                BITRIX_CONNECTOR_ID
+                        }
+                    };
+
                     res.writeHead(
                         200,
                         {
@@ -3843,37 +4358,7 @@ const server =
 
                     res.end(
                         JSON.stringify(
-                            {
-
-                                ok: true,
-
-                                telegram:
-                                    !!BOT_TOKEN,
-
-                                bitrixFetch:
-                                    !!(
-                                        BITRIX_WEBHOOK_URL &&
-                                        BITRIX_BOT_TOKEN
-                                    ),
-
-                                connector:
-                                    BITRIX_CONNECTOR_ENABLED,
-
-                                oauth:
-                                    !!(
-                                        bitrixAuth &&
-                                        bitrixAuth.access_token
-                                    ),
-
-                                connectorReady:
-                                    connectorReady,
-
-                                openLine:
-                                    bitrixOpenLineId,
-
-                                connectorId:
-                                    BITRIX_CONNECTOR_ID
-                            }
+                            health
                         )
                     );
 
@@ -4888,8 +5373,63 @@ async function startup() {
 
 function shutdown(signal) {
 
-    log(
-        `🛑 ${signal}`
+    error(
+        '========================================'
+    );
+
+    error(
+        `🛑 ${signal} RECEIVED`
+    );
+
+    error(
+        'PID:',
+        process.pid
+    );
+
+    error(
+        'UPTIME SEC:',
+        Math.round(
+            process.uptime()
+        )
+    );
+
+    const memory =
+        process.memoryUsage();
+
+    error(
+        'MEMORY RSS MB:',
+        Math.round(
+            memory.rss /
+            1024 /
+            1024
+        )
+    );
+
+    error(
+        'HEAP USED MB:',
+        Math.round(
+            memory.heapUsed /
+            1024 /
+            1024
+        )
+    );
+
+    error(
+        'HEAP TOTAL MB:',
+        Math.round(
+            memory.heapTotal /
+            1024 /
+            1024
+        )
+    );
+
+    error(
+        'TIMESTAMP:',
+        new Date().toISOString()
+    );
+
+    error(
+        '========================================'
     );
 
     server.close(
@@ -4922,22 +5462,153 @@ process.on(
         shutdown('SIGINT')
 );
 
-process.on(
-    'unhandledRejection',
-    reason =>
-        error(
-            'Unhandled rejection:',
-            reason
+process.on('unhandledRejection', reason => {
+    error('========================================');
+    error('💥 UNHANDLED REJECTION');
+
+    error(
+        'NAME:',
+        reason?.name || 'Unknown'
+    );
+
+    error(
+        'MESSAGE:',
+        reason?.message || String(reason)
+    );
+
+    error(
+        'CODE:',
+        reason?.code || reason?.cause?.code || null
+    );
+
+    error(
+        'ERRNO:',
+        reason?.errno || reason?.cause?.errno || null
+    );
+
+    error(
+        'SYSCALL:',
+        reason?.syscall || reason?.cause?.syscall || null
+    );
+
+    error(
+        'CAUSE NAME:',
+        reason?.cause?.name || null
+    );
+
+    error(
+        'CAUSE MESSAGE:',
+        reason?.cause?.message || null
+    );
+
+    error(
+        'CAUSE CODE:',
+        reason?.cause?.code || null
+    );
+
+    error(
+        'UPTIME SEC:',
+        Math.round(process.uptime())
+    );
+
+    const memory = process.memoryUsage();
+
+    error(
+        'MEMORY RSS MB:',
+        Math.round(
+            memory.rss / 1024 / 1024
         )
-);
+    );
+
+    error(
+        'HEAP USED MB:',
+        Math.round(
+            memory.heapUsed / 1024 / 1024
+        )
+    );
+
+    if (reason?.stack) {
+        error(
+            'STACK:',
+            reason.stack
+        );
+    }
+
+    error('========================================');
+});
 
 process.on(
     'uncaughtException',
-    err =>
+    err => {
+
         error(
-            'Uncaught exception:',
-            err.message
-        )
+            '========================================'
+        );
+
+        error(
+            '💥 UNCAUGHT EXCEPTION'
+        );
+
+        error(
+            'NAME:',
+            err?.name ||
+                'Error'
+        );
+
+        error(
+            'MESSAGE:',
+            err?.message ||
+                String(err)
+        );
+
+        error(
+            'CODE:',
+            err?.code ||
+                null
+        );
+
+        error(
+            'UPTIME SEC:',
+            Math.round(
+                process.uptime()
+            )
+        );
+
+        const memory =
+            process.memoryUsage();
+
+        error(
+            'MEMORY RSS MB:',
+            Math.round(
+                memory.rss /
+                1024 /
+                1024
+            )
+        );
+
+        error(
+            'HEAP USED MB:',
+            Math.round(
+                memory.heapUsed /
+                1024 /
+                1024
+            )
+        );
+
+        if (
+            err?.stack
+        ) {
+
+            error(
+                'STACK:',
+                err.stack
+            );
+        }
+
+        error(
+            '========================================'
+        );
+    }
 );
 
 // ============================================================
