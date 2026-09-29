@@ -1052,6 +1052,74 @@ async function sendTelegramMessage(
     return last;
 }
 
+// ============================================================
+// EQUIPMENT MULTI-SELECT MARKUP
+// ============================================================
+
+function buildEquipmentMultiSelectMarkup(selected = []) {
+
+    const equipment = [
+        ['🔊 Звуковое оборудование', 'sound'],
+        ['📺 LED-экраны', 'led'],
+        ['💡 Световое оборудование', 'light'],
+        ['🎪 Сценические конструкции', 'stage']
+    ];
+
+    const selectedSet = new Set(
+        Array.isArray(selected)
+            ? selected
+            : []
+    );
+
+    const keyboard = [];
+
+    for (const [label, value] of equipment) {
+
+        const isSelected =
+            selectedSet.has(value);
+
+        keyboard.push([
+            {
+                text:
+                    `${isSelected ? '✅' : '⬜'} ${label}`,
+
+                callback_data:
+                    `sales:equipment:toggle:${value}:${Array.from(selectedSet).join(',')}`
+            }
+        ]);
+    }
+
+    const allSelected =
+        equipment.every(
+            ([, value]) =>
+                selectedSet.has(value)
+        );
+
+    keyboard.push([
+        {
+            text:
+                `${allSelected ? '✅' : '⬜'} 🎛 Полный комплекс`,
+
+            callback_data:
+                `sales:equipment:all:${Array.from(selectedSet).join(',')}`
+        }
+    ]);
+
+    keyboard.push([
+        {
+            text: '✅ Готово',
+
+            callback_data:
+                `sales:equipment:done:${Array.from(selectedSet).join(',')}`
+        }
+    ]);
+
+    return {
+        inline_keyboard: keyboard
+    };
+}
+
+
 function buildTelegramReplyMarkup(actions) {
 
     if (!Array.isArray(actions) || !actions.length) {
@@ -1071,9 +1139,18 @@ function buildTelegramReplyMarkup(actions) {
         ],
 
         ask_level: [
-            ['Стандартный', 'standard'],
-            ['Высокие требования', 'high'],
-            ['Высший уровень', 'highest']
+            [
+                'Стандартный (обычные требования к оборудованию и документации)',
+                'standard'
+            ],
+            [
+                'Высокие требования (повышенные требования к оборудованию и документации, прямые ТВ-трансляции)',
+                'high'
+            ],
+            [
+                'Высший уровень (с высшими должностными лицами, масштабные и международные мероприятия)',
+                'highest'
+            ]
         ],
 
         ask_personnel: [
@@ -1208,6 +1285,19 @@ function buildTelegramReplyMarkup(actions) {
                             'sales:manager_handoff'
                     }
                 ]);
+
+                continue;
+            }
+
+
+            if (
+                action.tag === 'ask_equipment'
+            ) {
+
+                keyboard.push(
+                    ...buildEquipmentMultiSelectMarkup()
+                        .inline_keyboard
+                );
 
                 continue;
             }
@@ -3302,6 +3392,181 @@ async function processTelegramCallback(
             !clientId ||
             !salesAction
         ) {
+            return;
+        }
+
+
+        // ----------------------------------------------------
+        // EQUIPMENT MULTI-SELECT
+        // ----------------------------------------------------
+
+        if (
+            salesAction === 'equipment'
+        ) {
+
+            const equipmentAction =
+                parts[2];
+
+            const equipmentValue =
+                parts[3] || '';
+
+            const selected =
+                parts[4]
+                    ? parts[4]
+                        .split(',')
+                        .filter(Boolean)
+                    : [];
+
+
+            // ----------------------------------------------
+            // TOGGLE
+            // ----------------------------------------------
+
+            if (
+                equipmentAction === 'toggle'
+            ) {
+
+                const nextSelected =
+                    new Set(selected);
+
+                if (
+                    nextSelected.has(
+                        equipmentValue
+                    )
+                ) {
+                    nextSelected.delete(
+                        equipmentValue
+                    );
+                } else {
+                    nextSelected.add(
+                        equipmentValue
+                    );
+                }
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildEquipmentMultiSelectMarkup(
+                        Array.from(nextSelected)
+                    )
+                );
+
+                return;
+            }
+
+
+            // ----------------------------------------------
+            // ALL
+            // ----------------------------------------------
+
+            if (
+                equipmentAction === 'all'
+            ) {
+
+                const allEquipment = [
+                    'sound',
+                    'led',
+                    'light',
+                    'stage'
+                ];
+
+                const allSelected =
+                    allEquipment.every(
+                        value =>
+                            selected.includes(value)
+                    );
+
+                const nextSelected =
+                    allSelected
+                        ? []
+                        : allEquipment;
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildEquipmentMultiSelectMarkup(
+                        nextSelected
+                    )
+                );
+
+                return;
+            }
+
+
+            // ----------------------------------------------
+            // DONE
+            // ----------------------------------------------
+
+            if (
+                equipmentAction === 'done'
+            ) {
+
+                if (!selected.length) {
+
+                    await answerTelegramCallback(
+                        callbackQuery.id,
+                        'Выберите хотя бы один вариант'
+                    );
+
+                    return;
+                }
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id,
+                    'Оборудование выбрано'
+                );
+
+
+                const result =
+                    await processSalesMessage(
+                        clientId,
+                        {
+                            type: 'action',
+
+                            tag:
+                                'ask_equipment',
+
+                            value:
+                                selected
+                        }
+                    );
+
+
+                const replyMarkup =
+                    buildTelegramReplyMarkup(
+                        result?.actions
+                    );
+
+
+                await sendTelegramMessage(
+                    clientId,
+                    result?.text || '',
+
+                    replyMarkup
+                        ? {
+                            reply_markup:
+                                replyMarkup
+                        }
+                        : {}
+                );
+
+
+                return;
+            }
+
             return;
         }
 
