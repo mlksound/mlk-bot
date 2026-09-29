@@ -1053,50 +1053,560 @@ async function sendTelegramMessage(
 }
 
 function buildTelegramReplyMarkup(actions) {
+
     if (!Array.isArray(actions) || !actions.length) {
         return null;
     }
 
     const keyboard = [];
 
+    const quickReplyOptions = {
+
+        ask_format: [
+            ['🎵 Концерты / фестивали', 'concerts'],
+            ['🎤 Конференции / презентации', 'conferences'],
+            ['🎉 Корпоративы / торжества', 'corporate'],
+            ['🏢 Выставки', 'exhibitions'],
+            ['🏆 Спортивные мероприятия', 'sports']
+        ],
+
+        ask_level: [
+            ['Стандартный', 'standard'],
+            ['Высокие требования', 'high'],
+            ['Высший уровень', 'highest']
+        ],
+
+        ask_personnel: [
+            ['Полное управление оборудованием', 'management'],
+            ['Дежурный техник', 'duty_technician'],
+            ['Только монтаж / демонтаж', 'installation_dismantling'],
+            ['Другое', 'other']
+        ],
+
+        ask_place: [
+            ['🌳 Улица', 'outdoor'],
+            ['🏢 Помещение', 'indoor'],
+            ['⛺ Под навесом', 'covered']
+        ],
+
+        ask_lift: [
+            ['🏗 Есть грузовой лифт', 'has_lift'],
+            ['🪜 По лестнице', 'stairs'],
+            ['❓ Не знаю', 'unknown']
+        ],
+
+        ask_equipment: [
+            ['🔊 Звуковое оборудование', 'sound'],
+            ['📺 LED-экраны', 'led'],
+            ['💡 Световое оборудование', 'light'],
+            ['🎪 Сценические конструкции', 'stage'],
+            ['🎛 Полный комплекс', 'all']
+        ],
+
+        ask_sound_rider: [
+            ['✅ Да, есть', 'yes'],
+            ['❌ Нет', 'no']
+        ],
+
+        ask_light_fixtures: [
+            ['✅ Да, есть', 'yes'],
+            ['❌ Нет', 'no']
+        ],
+
+        ask_mount: [
+            ['По согласованию', 'any'],
+            ['🌙 Ночью / рано утром', 'night']
+        ],
+
+        ask_demount: [
+            ['По согласованию', 'any'],
+            ['⏰ До определённого времени', 'deadline']
+        ]
+    };
+
+
     for (const action of actions) {
+
         if (!action || !action.type) {
             continue;
         }
 
+
+        // ----------------------------------------------------
+        // FILES
+        // ----------------------------------------------------
+
         if (action.type === 'send_files') {
+
             keyboard.push([
                 {
                     text: '📎 Отправить ТЗ / файлы',
-                    callback_data: 'sales:send_files'
+                    callback_data:
+                        'sales:send_files'
                 }
             ]);
 
             continue;
         }
 
-        if (
-            action.type === 'quick_reply' &&
-            action.tag === 'discuss_project'
-        ) {
-            keyboard.push([
-                {
-                    text: '💬 Обсудить проект',
-                    callback_data: 'sales:discuss_project'
-                }
-            ]);
+
+        // ----------------------------------------------------
+        // CALENDAR
+        // ----------------------------------------------------
+
+        if (action.type === 'calendar') {
+
+            if (
+                action.tag === 'ask_date_start' ||
+                action.tag === 'ask_date_end' ||
+                action.tag === 'ask_ready_date'
+            ) {
+
+                keyboard.push([
+                    {
+                        text: '📅 Выбрать дату',
+                        callback_data:
+                            `sales:calendar:${action.tag}`
+                    }
+                ]);
+            }
+
+            continue;
+        }
+
+
+        // ----------------------------------------------------
+        // QUICK REPLY
+        // ----------------------------------------------------
+
+        if (action.type === 'quick_reply') {
+
+            if (
+                action.tag === 'discuss_project'
+            ) {
+
+                keyboard.push([
+                    {
+                        text: '💬 Обсудить проект',
+                        callback_data:
+                            'sales:discuss_project'
+                    }
+                ]);
+
+                continue;
+            }
+
+
+            if (
+                action.tag === 'manager_handoff'
+            ) {
+
+                keyboard.push([
+                    {
+                        text: '👨‍💼 Передать менеджеру',
+                        callback_data:
+                            'sales:manager_handoff'
+                    }
+                ]);
+
+                continue;
+            }
+
+
+            const options =
+                quickReplyOptions[action.tag];
+
+
+            if (!options) {
+                continue;
+            }
+
+
+            for (
+                const [label, value]
+                of options
+            ) {
+
+                keyboard.push([
+                    {
+                        text: label,
+
+                        callback_data:
+                            `sales:action:${action.tag}:${value}`
+                    }
+                ]);
+            }
 
             continue;
         }
     }
+
 
     if (!keyboard.length) {
         return null;
     }
 
+
     return {
-        inline_keyboard: keyboard
+        inline_keyboard:
+            keyboard
     };
+}
+
+// ============================================================
+// TELEGRAM SALES CALENDAR
+// ============================================================
+
+const SALES_MONTHS = [
+    'Январь',
+    'Февраль',
+    'Март',
+    'Апрель',
+    'Май',
+    'Июнь',
+    'Июль',
+    'Август',
+    'Сентябрь',
+    'Октябрь',
+    'Ноябрь',
+    'Декабрь'
+];
+
+
+const SALES_WEEKDAYS = [
+    'Пн',
+    'Вт',
+    'Ср',
+    'Чт',
+    'Пт',
+    'Сб',
+    'Вс'
+];
+
+
+// ------------------------------------------------------------
+// DATE HELPERS
+// ------------------------------------------------------------
+
+function pad2(value) {
+
+    return String(value)
+        .padStart(2, '0');
+}
+
+
+function salesDateValue(
+    year,
+    month,
+    day
+) {
+
+    return `${year}-${pad2(month + 1)}-${pad2(day)}`;
+}
+
+
+function getDaysInMonth(
+    year,
+    month
+) {
+
+    return new Date(
+        year,
+        month + 1,
+        0
+    ).getDate();
+}
+
+
+function getMonthMondayIndex(
+    year,
+    month
+) {
+
+    const day =
+        new Date(
+            year,
+            month,
+            1
+        ).getDay();
+
+    return day === 0
+        ? 6
+        : day - 1;
+}
+
+
+// ------------------------------------------------------------
+// CALENDAR
+// ------------------------------------------------------------
+
+function buildSalesCalendar(
+    tag,
+    year,
+    month
+) {
+
+    const keyboard = [];
+
+
+    // HEADER
+    keyboard.push([
+        {
+            text:
+                '‹',
+            callback_data:
+                `sales:calendar:${tag}:prev:${year}-${pad2(month)}`
+        },
+
+        {
+            text:
+                `${SALES_MONTHS[month]} ${year}`,
+            callback_data:
+                'sales:noop'
+        },
+
+        {
+            text:
+                '›',
+            callback_data:
+                `sales:calendar:${tag}:next:${year}-${pad2(month + 2)}`
+        }
+    ]);
+
+
+    // WEEKDAYS
+    keyboard.push(
+        SALES_WEEKDAYS.map(
+            day => ({
+                text: day,
+                callback_data:
+                    'sales:noop'
+            })
+        )
+    );
+
+
+    const firstDay =
+        getMonthMondayIndex(
+            year,
+            month
+        );
+
+    const daysInMonth =
+        getDaysInMonth(
+            year,
+            month
+        );
+
+
+    let row = [];
+
+
+    // EMPTY CELLS
+    for (
+        let i = 0;
+        i < firstDay;
+        i++
+    ) {
+
+        row.push({
+            text: ' ',
+            callback_data:
+                'sales:noop'
+        });
+    }
+
+
+    // DAYS
+    for (
+        let day = 1;
+        day <= daysInMonth;
+        day++
+    ) {
+
+        const value =
+            salesDateValue(
+                year,
+                month,
+                day
+            );
+
+
+        row.push({
+            text:
+                String(day),
+
+            callback_data:
+                `sales:calendar:${tag}:day:${value}`
+        });
+
+
+        if (row.length === 7) {
+
+            keyboard.push(row);
+
+            row = [];
+        }
+    }
+
+
+    // LAST ROW
+    if (row.length) {
+
+        while (
+            row.length < 7
+        ) {
+
+            row.push({
+                text: ' ',
+                callback_data:
+                    'sales:noop'
+            });
+        }
+
+        keyboard.push(row);
+    }
+
+
+    // TODAY
+    keyboard.push([
+        {
+            text:
+                '📅 Сегодня',
+            callback_data:
+                `sales:calendar:${tag}:today`
+        }
+    ]);
+
+
+    return {
+        inline_keyboard:
+            keyboard
+    };
+}
+
+
+// ------------------------------------------------------------
+// TIME PICKER
+// ------------------------------------------------------------
+
+function buildSalesTimePicker(
+    tag,
+    date
+) {
+
+    const keyboard = [];
+
+    const times = [];
+
+
+    // 30 минут
+    for (
+        let hour = 0;
+        hour < 24;
+        hour++
+    ) {
+
+        for (
+            let minute = 0;
+            minute < 60;
+            minute += 30
+        ) {
+
+            times.push(
+                `${pad2(hour)}:${pad2(minute)}`
+            );
+        }
+    }
+
+
+    // 4 кнопки в ряд
+    let row = [];
+
+
+    for (
+        const time of times
+    ) {
+
+        row.push({
+            text:
+                time,
+
+            callback_data:
+                `sales:calendar:${tag}:time:${date}:${time}`
+        });
+
+
+        if (row.length === 4) {
+
+            keyboard.push(row);
+
+            row = [];
+        }
+    }
+
+
+    if (row.length) {
+        keyboard.push(row);
+    }
+
+
+    keyboard.push([
+        {
+            text:
+                '⬅️ Назад к дате',
+
+            callback_data:
+                `sales:calendar:${tag}:back:${date}`
+        }
+    ]);
+
+
+    return {
+        inline_keyboard:
+            keyboard
+    };
+}
+
+
+async function editTelegramMessageReplyMarkup(
+    callbackQuery,
+    replyMarkup
+) {
+
+    const chatId =
+        callbackQuery
+            ?.message
+            ?.chat
+            ?.id;
+
+    const messageId =
+        callbackQuery
+            ?.message
+            ?.message_id;
+
+
+    if (
+        !chatId ||
+        !messageId
+    ) {
+        return;
+    }
+
+
+    await telegramCall(
+        'editMessageReplyMarkup',
+        {
+            chat_id:
+                chatId,
+
+            message_id:
+                messageId,
+
+            reply_markup:
+                replyMarkup
+        }
+    );
 }
 
 async function answerTelegramCallback(
@@ -2795,6 +3305,422 @@ async function processTelegramCallback(
             return;
         }
 
+
+        // ----------------------------------------------------
+        // SALES ENGINE ACTION
+        // ----------------------------------------------------
+
+        if (
+            salesAction === 'action'
+        ) {
+
+            const salesTag =
+                parts[2];
+
+            const salesValue =
+                parts.slice(3).join(':');
+
+
+            if (
+                !salesTag ||
+                !salesValue
+            ) {
+                return;
+            }
+
+
+            await answerTelegramCallback(
+                callbackQuery.id,
+                'Принято'
+            );
+
+
+            const result =
+                await processSalesMessage(
+                    clientId,
+                    {
+                        type:
+                            'action',
+
+                        tag:
+                            salesTag,
+
+                        value:
+                            salesValue
+                    }
+                );
+
+
+            const replyMarkup =
+                buildTelegramReplyMarkup(
+                    result?.actions
+                );
+
+
+            await sendTelegramMessage(
+                clientId,
+                result?.text || '',
+
+                replyMarkup
+                    ? {
+                        reply_markup:
+                            replyMarkup
+                    }
+                    : {}
+            );
+
+
+            return;
+        }
+
+
+        // ----------------------------------------------------
+        // SALES CALENDAR
+        // ----------------------------------------------------
+
+        if (
+            salesAction === 'calendar'
+        ) {
+
+            const calendarTag =
+                parts[2];
+
+            const calendarAction =
+                parts[3];
+
+
+            if (!calendarTag) {
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // OPEN CALENDAR
+            // ------------------------------------------------
+
+            if (
+                !calendarAction
+            ) {
+
+                const now =
+                    new Date();
+
+                const year =
+                    now.getFullYear();
+
+                const month =
+                    now.getMonth();
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildSalesCalendar(
+                        calendarTag,
+                        year,
+                        month
+                    )
+                );
+
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // PREVIOUS MONTH
+            // ------------------------------------------------
+
+            if (
+                calendarAction === 'prev'
+            ) {
+
+                const [year, month] =
+                    parts[4]
+                        .split('-')
+                        .map(Number);
+
+
+                const date =
+                    new Date(
+                        year,
+                        month - 1,
+                        1
+                    );
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildSalesCalendar(
+                        calendarTag,
+                        date.getFullYear(),
+                        date.getMonth()
+                    )
+                );
+
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // NEXT MONTH
+            // ------------------------------------------------
+
+            if (
+                calendarAction === 'next'
+            ) {
+
+                const [year, month] =
+                    parts[4]
+                        .split('-')
+                        .map(Number);
+
+
+                const date =
+                    new Date(
+                        year,
+                        month - 1,
+                        1
+                    );
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildSalesCalendar(
+                        calendarTag,
+                        date.getFullYear(),
+                        date.getMonth()
+                    )
+                );
+
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // TODAY
+            // ------------------------------------------------
+
+            if (
+                calendarAction === 'today'
+            ) {
+
+                const now =
+                    new Date();
+
+                const date =
+                    salesDateValue(
+                        now.getFullYear(),
+                        now.getMonth(),
+                        now.getDate()
+                    );
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id,
+                    'Дата выбрана'
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildSalesTimePicker(
+                        calendarTag,
+                        date
+                    )
+                );
+
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // DATE SELECTED
+            // ------------------------------------------------
+
+            if (
+                calendarAction === 'day'
+            ) {
+
+                const selectedDate =
+                    parts[4];
+
+
+                if (
+                    !selectedDate
+                ) {
+                    return;
+                }
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id,
+                    'Дата выбрана'
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildSalesTimePicker(
+                        calendarTag,
+                        selectedDate
+                    )
+                );
+
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // BACK TO DATE
+            // ------------------------------------------------
+
+            if (
+                calendarAction === 'back'
+            ) {
+
+                const selectedDate =
+                    parts[4];
+
+
+                if (
+                    !selectedDate
+                ) {
+                    return;
+                }
+
+
+                const [
+                    year,
+                    month
+                ] =
+                    selectedDate
+                        .split('-')
+                        .map(Number);
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id
+                );
+
+
+                await editTelegramMessageReplyMarkup(
+                    callbackQuery,
+
+                    buildSalesCalendar(
+                        calendarTag,
+                        year,
+                        month - 1
+                    )
+                );
+
+
+                return;
+            }
+
+
+            // ------------------------------------------------
+            // TIME SELECTED
+            // ------------------------------------------------
+
+            if (
+                calendarAction === 'time'
+            ) {
+
+                const selectedDate =
+                    parts[4];
+
+                const hour =
+                    parts[5];
+
+                const minute =
+                    parts[6];
+
+
+                if (
+                    !selectedDate ||
+                    !hour ||
+                    !minute
+                ) {
+                    return;
+                }
+
+
+                const value =
+                    `${selectedDate} ${hour}:${minute}`;
+
+
+                await answerTelegramCallback(
+                    callbackQuery.id,
+                    'Время выбрано'
+                );
+
+
+                const result =
+                    await processSalesMessage(
+                        clientId,
+                        {
+                            type:
+                                'action',
+
+                            tag:
+                                calendarTag,
+
+                            value
+                        }
+                    );
+
+
+                const replyMarkup =
+                    buildTelegramReplyMarkup(
+                        result?.actions
+                    );
+
+
+                await sendTelegramMessage(
+                    clientId,
+                    result?.text || '',
+
+                    replyMarkup
+                        ? {
+                            reply_markup:
+                                replyMarkup
+                        }
+                        : {}
+                );
+
+
+                return;
+            }
+
+
+            return;
+        }
+
+
         if (
             salesAction === 'send_files'
         ) {
@@ -2833,12 +3759,20 @@ async function processTelegramCallback(
                     }
                 );
 
+            const replyMarkup =
+                buildTelegramReplyMarkup(
+                    result?.actions
+                );
+
             await sendTelegramMessage(
                 clientId,
-                result.text,
-                buildTelegramReplyMarkup(
-                    result.actions
-                )
+                result?.text || '',
+                replyMarkup
+                    ? {
+                        reply_markup:
+                            replyMarkup
+                    }
+                    : {}
             );
 
             return;

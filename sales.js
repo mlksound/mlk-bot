@@ -40,6 +40,13 @@
 const fs = require('fs');
 const path = require('path');
 
+const {
+    initStorage,
+    loadSalesState,
+    saveSalesState,
+    deleteSalesState
+} = require('./storage.js');
+
 // ============================================================
 // CONFIG
 // ============================================================
@@ -256,6 +263,104 @@ const salesStates = new Map();
 
 
 // ============================================================
+// LOAD STATE FROM TURSO
+// ============================================================
+
+async function hydrateSalesState(
+    clientId,
+    clientName = ''
+) {
+    const key = String(clientId || '');
+
+    if (!key) {
+        return createSalesState(
+            key,
+            clientName
+        );
+    }
+
+    // Если состояние уже загружено в RAM —
+    // Turso повторно не трогаем.
+    if (salesStates.has(key)) {
+        const state = salesStates.get(key);
+
+        if (
+            clientName &&
+            !state.client.name
+        ) {
+            state.client.name = clientName;
+        }
+
+        return state;
+    }
+
+    const savedState =
+        await loadSalesState(key);
+
+    if (savedState) {
+
+        salesStates.set(
+            key,
+            savedState
+        );
+
+        const state =
+            salesStates.get(key);
+
+        if (
+            clientName &&
+            !state.client.name
+        ) {
+            state.client.name =
+                clientName;
+        }
+
+        return state;
+    }
+
+    const state =
+        createSalesState(
+            key,
+            clientName
+        );
+
+    salesStates.set(
+        key,
+        state
+    );
+
+    return state;
+}
+
+
+// ============================================================
+// SAVE STATE TO TURSO
+// ============================================================
+
+async function persistSalesState(
+    state
+) {
+    if (!state) {
+        return;
+    }
+
+    try {
+
+        await saveSalesState(
+            state
+        );
+
+    } catch (error) {
+
+        console.warn(
+            '⚠️ Sales State save error:',
+            error.message
+        );
+    }
+}
+
+
+// ============================================================
 // CREATE STATE
 // ============================================================
 
@@ -368,14 +473,19 @@ function getSalesState(clientId, clientName = '') {
 // DELETE / RESET
 // ============================================================
 
-function resetSalesClient(clientId, clientName = '') {
+function resetSalesClient(
+    clientId,
+    clientName = ''
+) {
 
-    const key = String(clientId || '');
+    const key =
+        String(clientId || '');
 
-    const state = createSalesState(
-        key,
-        clientName
-    );
+    const state =
+        createSalesState(
+            key,
+            clientName
+        );
 
     salesStates.set(
         key,
@@ -1496,59 +1606,59 @@ function calculateMissing(state) {
 
 
     // --------------------------------------------------------
-    // 2. LEVEL / GUEST COUNT
-    // --------------------------------------------------------
+// 2. EQUIPMENT
+// --------------------------------------------------------
 
-    if (
-        p.eventType === 'concerts' ||
-        p.eventType === 'sports'
-    ) {
+if (
+    !Array.isArray(p.equipment) ||
+    p.equipment.length === 0
+) {
 
-        if (!p.eventLevel) {
+    missing.push({
+        field: 'equipment',
+        action: 'ask_equipment'
+    });
 
-            missing.push({
-                field: 'eventLevel',
-                action: 'ask_level'
-            });
-
-            return missing;
-        }
-
-    } else if (
-        p.eventType === 'corporate'
-    ) {
-
-        if (
-            p.guestCount === null ||
-            p.guestCount === undefined
-        ) {
-
-            missing.push({
-                field: 'guestCount',
-                action: 'ask_guest_count'
-            });
-
-            return missing;
-        }
-    }
+    return missing;
+}
 
 
-    // --------------------------------------------------------
-    // 3. EQUIPMENT
-    // --------------------------------------------------------
+// --------------------------------------------------------
+// 3. LEVEL / GUEST COUNT
+// --------------------------------------------------------
 
-    if (
-        !Array.isArray(p.equipment) ||
-        p.equipment.length === 0
-    ) {
+if (
+    p.eventType === 'concerts' ||
+    p.eventType === 'sports'
+) {
+
+    if (!p.eventLevel) {
 
         missing.push({
-            field: 'equipment',
-            action: 'ask_equipment'
+            field: 'eventLevel',
+            action: 'ask_level'
         });
 
         return missing;
     }
+
+} else if (
+    p.eventType === 'corporate'
+) {
+
+    if (
+        p.guestCount === null ||
+        p.guestCount === undefined
+    ) {
+
+        missing.push({
+            field: 'guestCount',
+            action: 'ask_guest_count'
+        });
+
+        return missing;
+    }
+}
 
 
     // --------------------------------------------------------
@@ -1768,6 +1878,21 @@ function calculateMissing(state) {
     }
 
 
+    // SOUND RIDER
+    if (
+        p.equipment.includes('sound') &&
+        !p.soundRider
+    ) {
+
+        missing.push({
+            field: 'soundRider',
+            action: 'ask_sound_rider'
+        });
+
+        return missing;
+    }
+
+
     // BACKLINE
     if (
         p.equipment.includes('sound') &&
@@ -1792,6 +1917,21 @@ function calculateMissing(state) {
         missing.push({
             field: 'lightDetails',
             action: 'text_question'
+        });
+
+        return missing;
+    }
+
+
+    // LIGHT FIXTURES
+    if (
+        p.equipment.includes('light') &&
+        !p.lightFixtures
+    ) {
+
+        missing.push({
+            field: 'lightFixtures',
+            action: 'ask_light_fixtures'
         });
 
         return missing;
@@ -2048,6 +2188,30 @@ function getNextAction(state) {
 
     if (
         first.action ===
+        'ask_sound_rider'
+    ) {
+
+        return {
+            type: 'quick_reply',
+            tag: 'ask_sound_rider'
+        };
+    }
+
+
+    if (
+        first.action ===
+        'ask_light_fixtures'
+    ) {
+
+        return {
+            type: 'quick_reply',
+            tag: 'ask_light_fixtures'
+        };
+    }
+
+
+    if (
+        first.action ===
         'ask_mount'
     ) {
 
@@ -2143,6 +2307,14 @@ function getActions(state) {
         next.type === 'summary'
     ) {
         return [];
+    }
+
+    if (
+        state.lastAction !== 'ask_sound_rider_yes' &&
+        state.lastAction !== 'ask_light_fixtures_yes'
+    ) {
+        state.lastAction =
+            missing[0]?.action || null;
     }
 
     return [next];
@@ -2827,13 +2999,27 @@ function buildControlledQuestion(
             return 'Укажите, пожалуйста, поверхность установки конструкций: плитка, асфальт, грунт, трава и т. д.';
 
         case 'soundDetails':
-            return 'Какие группы, коллективы и артисты планируются? Укажите, пожалуйста, ведущих, спикеров, солистов, живые группы, оркестры, кавер-бэнды или использование фонограмм. Если есть звуковой райдер — можете его прислать или описать.';
+            return 'Какие группы, коллективы и артисты планируются? Укажите, пожалуйста, ведущих, спикеров, солистов, живые группы, оркестры, кавер-бэнды или использование фонограмм.';
+
+        case 'soundRider':
+            if (state.lastAction === 'ask_sound_rider_yes') {
+                return 'Тогда, пожалуйста, пришлите звуковой райдер или опишите его требования.';
+            }
+
+            return 'Есть ли звуковой райдер?';
 
         case 'backline':
             return 'Нужно ли оборудование для бэклайна: мониторы, барабаны, комбо, инструменты и т. д.? Если не требуется — так и напишите.';
 
         case 'lightDetails':
             return 'Какие задачи по свету необходимо решить? Например: подсветка сцены, создание атмосферы в помещении, аплайтинг и т. д.';
+
+        case 'lightFixtures':
+            if (state.lastAction === 'ask_light_fixtures_yes') {
+                return 'Тогда, пожалуйста, пришлите или опишите требования к типу и количеству световых приборов.';
+            }
+
+            return 'Есть ли требования к типу и количеству световых приборов?';
 
         case 'ledDetails':
             return 'Укажите, пожалуйста, тип, размеры и количество светодиодных экранов: центральный, боковые, кулисы, юбки сцены и т. д.';
@@ -4240,6 +4426,26 @@ function actionToText(
 
             all:
                 'Оборудование: Полный комплекс'
+        },
+
+
+        ask_sound_rider: {
+
+            yes:
+                'Звуковой райдер: есть',
+
+            no:
+                'Звуковой райдер: нет'
+        },
+
+
+        ask_light_fixtures: {
+
+            yes:
+                'Требования к световым приборам: есть',
+
+            no:
+                'Требования к световым приборам: нет'
         }
 
     };
@@ -4340,7 +4546,7 @@ function getStartActions() {
 // PROCESS START
 // ============================================================
 
-function processStart(
+async function processStart(
     clientId,
     clientName = ''
 ) {
@@ -4370,6 +4576,10 @@ function processStart(
 
     state.updatedAt =
         new Date().toISOString();
+
+    await persistSalesState(
+        state
+    );
 
 
     return {
@@ -4544,6 +4754,60 @@ function applyAction(
             return actionToText(
                 message
             );
+        }
+    }
+
+
+    // SOUND RIDER
+    if (
+        tag === 'ask_sound_rider' &&
+        value
+    ) {
+
+        if (value === 'yes') {
+
+            state.lastAction =
+                'ask_sound_rider_yes';
+
+            return 'Звуковой райдер есть.';
+        }
+
+        if (value === 'no') {
+
+            state.project.soundRider =
+                'not_required';
+
+            state.lastAction =
+                'ask_sound_rider_no';
+
+            return 'Звукового райдера нет.';
+        }
+    }
+
+
+    // LIGHT FIXTURES
+    if (
+        tag === 'ask_light_fixtures' &&
+        value
+    ) {
+
+        if (value === 'yes') {
+
+            state.lastAction =
+                'ask_light_fixtures_yes';
+
+            return 'Требования к световым приборам есть.';
+        }
+
+        if (value === 'no') {
+
+            state.project.lightFixtures =
+                'not_required';
+
+            state.lastAction =
+                'ask_light_fixtures_no';
+
+            return 'Отдельных требований к световым приборам нет.';
         }
     }
 
@@ -4804,8 +5068,8 @@ async function processSalesMessage(
     // GET STATE
     // --------------------------------------------------------
 
-    const state =
-        getSalesState(
+    let state =
+        await hydrateSalesState(
             clientId,
             clientName
         );
@@ -4819,129 +5083,136 @@ async function processSalesMessage(
         normalized.type === 'start'
     ) {
 
-        return processStart(
+        return await processStart(
             clientId,
             clientName
         );
     }
 
+    try {
 
-    // --------------------------------------------------------
-    // FIRST REAL MESSAGE
-    // --------------------------------------------------------
+        // --------------------------------------------------------
+        // FIRST REAL MESSAGE
+        // --------------------------------------------------------
 
-    let initialGreeting =
-        null;
-
-
-    if (
-        state.history.length === 0
-    ) {
-
-        const startResult =
-            processStart(
-                clientId,
-                clientName
-            );
-
-        initialGreeting =
-            startResult.text;
-    }
+        let initialGreeting =
+            null;
 
 
-    // --------------------------------------------------------
-    // FILE
-    // --------------------------------------------------------
+        if (
+            state.history.length === 0
+        ) {
 
-    if (
-        normalized.type === 'file'
-    ) {
+            const startResult =
+                await processStart(
+                    clientId,
+                    clientName
+                );
 
-        const fileText =
-            await processFileMessage(
+            initialGreeting =
+                startResult.text;
+
+            state =
+                await hydrateSalesState(
+                    clientId,
+                    clientName
+                );
+        }
+
+
+        // --------------------------------------------------------
+        // FILE
+        // --------------------------------------------------------
+
+        if (
+            normalized.type === 'file'
+        ) {
+
+            const fileText =
+                await processFileMessage(
+                    state,
+                    normalized
+                );
+
+
+            const missing =
+                calculateMissing(
+                    state
+                );
+
+
+            state.missing =
+                missing;
+
+
+            const actions =
+                getActions(
+                    state
+                );
+
+
+            const text =
+                initialGreeting
+                    ? `${initialGreeting}\n\n${fileText}`
+                    : fileText;
+
+
+            return {
+
+                text,
+
+                actions,
+
+                project:
+                    state.project,
+
+                missing,
+
+                stage:
+                    state.stage,
+
+                intent:
+                    'qualification',
+
+                readyForManager:
+                    missing.length === 0,
+
+                managerSummary:
+                    missing.length === 0
+                        ? buildManagerSummary(
+                            state
+                        )
+                        : null
+            };
+        }
+
+
+        // --------------------------------------------------------
+        // ACTION
+        // --------------------------------------------------------
+
+        let userText = '';
+
+
+        // --------------------------------------------------------
+        // START DISCUSSION FROM START MENU
+        // --------------------------------------------------------
+
+        if (
+            normalized.type === 'action' &&
+            normalized.tag === 'discuss_project'
+        ) {
+
+            addHistory(
                 state,
-                normalized
+                'user',
+                'Обсудить проект'
             );
 
-
-        const missing =
-            calculateMissing(
-                state
-            );
-
-
-        state.missing =
-            missing;
-
-
-        const actions =
-            getActions(
-                state
-            );
-
-
-        const text =
-            initialGreeting
-                ? `${initialGreeting}\n\n${fileText}`
-                : fileText;
-
-
-        return {
-
-            text,
-
-            actions,
-
-            project:
-                state.project,
-
-            missing,
-
-            stage:
-                state.stage,
-
-            intent:
-                'qualification',
-
-            readyForManager:
-                missing.length === 0,
-
-            managerSummary:
-                missing.length === 0
-                    ? buildManagerSummary(
-                        state
-                    )
-                    : null
-        };
-    }
-
-
-    // --------------------------------------------------------
-    // ACTION
-    // --------------------------------------------------------
-
-    let userText = '';
-
-
-    // --------------------------------------------------------
-    // START DISCUSSION FROM START MENU
-    // --------------------------------------------------------
-
-    if (
-        normalized.type === 'action' &&
-        normalized.tag === 'discuss_project'
-    ) {
-
-        addHistory(
-            state,
-            'user',
-            'Обсудить проект'
-        );
-
-        const question =
-            buildControlledQuestion(
-                state
-            );
+            const question =
+                buildControlledQuestion(
+                    state
+                );
 
 
 addHistory(
@@ -4950,329 +5221,336 @@ addHistory(
     question
 );
 
-        return prepareResult(
-            state,
-            initialGreeting
-                ? `${initialGreeting}\n\n${question}`
-                : question,
-            'qualification'
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // OTHER ACTIONS
-    // --------------------------------------------------------
-
-    if (
-        normalized.type === 'action'
-    ) {
-
-        userText =
-            actionToText(
-                normalized
-            );
-
-        const applied =
-            applyAction(
+            return prepareResult(
                 state,
-                normalized
+                initialGreeting
+                    ? `${initialGreeting}\n\n${question}`
+                    : question,
+                'qualification'
             );
-
-        if (
-            applied
-        ) {
-            userText =
-                applied;
         }
 
-    } else {
 
-        userText =
-            normalized.text ||
-            '';
-    }
+        // --------------------------------------------------------
+        // OTHER ACTIONS
+        // --------------------------------------------------------
+
+        if (
+            normalized.type === 'action'
+        ) {
+
+            userText =
+                actionToText(
+                    normalized
+                );
+
+            const applied =
+                applyAction(
+                    state,
+                    normalized
+                );
+
+            if (
+                applied
+            ) {
+                userText =
+                    applied;
+            }
+
+        } else {
+
+            userText =
+                normalized.text ||
+                '';
+        }
 
 
-    // --------------------------------------------------------
-    // EMPTY
-    // --------------------------------------------------------
+        // --------------------------------------------------------
+        // EMPTY
+        // --------------------------------------------------------
 
-    if (!userText) {
+        if (!userText) {
 
-        const fallback =
-            buildControlledQuestion(
+            const fallback =
+                buildControlledQuestion(
+                    state
+                );
+
+
+            return {
+
+                text:
+                    initialGreeting
+                        ? `${initialGreeting}\n\n${fallback}`
+                        : fallback,
+
+                actions:
+                    getActions(
+                        state
+                    ),
+
+                project:
+                    state.project,
+
+                missing:
+                    calculateMissing(
+                        state
+                    ),
+
+                stage:
+                    state.stage,
+
+                intent:
+                    'other',
+
+                readyForManager:
+                    false,
+
+                managerSummary:
+                    null
+            };
+        }
+
+
+        // --------------------------------------------------------
+        // ADD USER HISTORY
+        // --------------------------------------------------------
+
+        addHistory(
+            state,
+            'user',
+            userText
+        );
+
+
+        // --------------------------------------------------------
+        // AI EXTRACTION
+        // --------------------------------------------------------
+
+        try {
+
+            const extracted =
+                await extractClientData(
+                    state,
+                    userText
+                );
+
+
+            const currentMissing =
+                calculateMissing(state);
+
+            const expectedField =
+                currentMissing[0]?.field || null;
+
+
+            if (
+                expectedField === 'mount'
+            ) {
+                extracted.demount = undefined;
+            }
+
+
+            if (
+                expectedField === 'demount'
+            ) {
+                extracted.mount = undefined;
+            }
+
+
+            mergeProjectData(
+                state,
+                extracted
+            );
+
+
+            cleanDependentFields(
                 state
             );
 
+        } catch (error) {
 
-        return {
-
-            text:
-                initialGreeting
-                    ? `${initialGreeting}\n\n${fallback}`
-                    : fallback,
-
-            actions:
-                getActions(
-                    state
-                ),
-
-            project:
-                state.project,
-
-            missing:
-                calculateMissing(
-                    state
-                ),
-
-            stage:
-                state.stage,
-
-            intent:
-                'other',
-
-            readyForManager:
-                false,
-
-            managerSummary:
-                null
-        };
-    }
+            console.warn(
+                '⚠️ Sales Engine extraction error:',
+                error.message
+            );
+        }
 
 
-    // --------------------------------------------------------
-    // ADD USER HISTORY
-    // --------------------------------------------------------
+        // --------------------------------------------------------
+        // INTENT
+        // --------------------------------------------------------
 
-    addHistory(
-        state,
-        'user',
-        userText
-    );
+        let intent =
+            'qualification';
 
 
-    // --------------------------------------------------------
-    // AI EXTRACTION
-    // --------------------------------------------------------
+        try {
 
-    try {
+            intent =
+                await detectIntent(
+                    state,
+                    userText
+                );
 
-        const extracted =
-            await extractClientData(
+        } catch (error) {
+
+            console.warn(
+                '⚠️ Sales Engine intent error:',
+                error.message
+            );
+        }
+
+
+        // --------------------------------------------------------
+        // MANAGER REQUEST
+        // --------------------------------------------------------
+
+        if (
+            intent === 'manager_request'
+        ) {
+
+            const text =
+                'Конечно. Передам ваш запрос менеджеру.';
+
+
+            addHistory(
                 state,
-                userText
+                'assistant',
+                text
             );
 
 
-        const currentMissing =
-            calculateMissing(state);
+            const result =
+                prepareResult(
+                    state,
+                    text,
+                    intent
+                );
 
-        const expectedField =
-            currentMissing[0]?.field || null;
+
+            if (
+                initialGreeting
+            ) {
+
+                result.text =
+                    `${initialGreeting}\n\n${result.text}`;
+            }
 
 
-        if (
-            expectedField === 'mount'
-        ) {
-            extracted.demount = undefined;
+            return result;
         }
 
 
+        // --------------------------------------------------------
+        // OUT OF SCOPE
+        // --------------------------------------------------------
+
         if (
-            expectedField === 'demount'
+            intent === 'out_of_scope'
         ) {
-            extracted.mount = undefined;
+
+            const text =
+                'Я занимаюсь техническим оснащением мероприятий MLK. Давайте лучше вернёмся к вашей заявке.';
+
+            addHistory(
+                state,
+                'assistant',
+                text
+            );
+
+            const result =
+                prepareResult(
+                    state,
+                    text,
+                    intent
+                );
+
+            if (
+                initialGreeting
+            ) {
+
+                result.text =
+                    `${initialGreeting}\n\n${result.text}`;
+            }
+
+            return result;
         }
 
 
-        mergeProjectData(
+        // --------------------------------------------------------
+        // GENERATE RESPONSE
+        // --------------------------------------------------------
+
+        let assistantText = '';
+
+
+        try {
+
+            assistantText =
+                await generateAssistantText(
+                    state,
+                    userText
+                );
+
+        } catch (error) {
+
+            console.warn(
+                '⚠️ Sales Engine response error:',
+                error.message
+            );
+
+            assistantText =
+                buildControlledQuestion(
+                    state
+                ) ||
+                'Спасибо. Информация зафиксирована.';
+        }
+
+
+        // --------------------------------------------------------
+        // HISTORY
+        // --------------------------------------------------------
+
+        addHistory(
             state,
-            extracted
+            'assistant',
+            assistantText
         );
 
 
-        cleanDependentFields(
+        // --------------------------------------------------------
+        // RESULT
+        // --------------------------------------------------------
+
+        const result =
+            prepareResult(
+                state,
+                assistantText,
+                intent
+            );
+
+
+        // --------------------------------------------------------
+        // INITIAL GREETING
+        // --------------------------------------------------------
+
+        if (
+            initialGreeting
+        ) {
+
+            result.text =
+                `${initialGreeting}\n\n${result.text}`;
+        }
+
+
+        return result;
+
+    } finally {
+
+        await persistSalesState(
             state
         );
-
-    } catch (error) {
-
-        console.warn(
-            '⚠️ Sales Engine extraction error:',
-            error.message
-        );
     }
-
-
-    // --------------------------------------------------------
-    // INTENT
-    // --------------------------------------------------------
-
-    let intent =
-        'qualification';
-
-
-    try {
-
-        intent =
-            await detectIntent(
-                state,
-                userText
-            );
-
-    } catch (error) {
-
-        console.warn(
-            '⚠️ Sales Engine intent error:',
-            error.message
-        );
-    }
-
-
-    // --------------------------------------------------------
-    // MANAGER REQUEST
-    // --------------------------------------------------------
-
-    if (
-        intent === 'manager_request'
-    ) {
-
-        const text =
-            'Конечно. Передам ваш запрос менеджеру.';
-
-
-        addHistory(
-            state,
-            'assistant',
-            text
-        );
-
-
-        const result =
-            prepareResult(
-                state,
-                text,
-                intent
-            );
-
-
-        if (
-            initialGreeting
-        ) {
-
-            result.text =
-                `${initialGreeting}\n\n${result.text}`;
-        }
-
-
-        return result;
-    }
-
-
-    // --------------------------------------------------------
-    // OUT OF SCOPE
-    // --------------------------------------------------------
-
-    if (
-        intent === 'out_of_scope'
-    ) {
-
-        const text =
-            'Я занимаюсь техническим оснащением мероприятий MLK. Давайте лучше вернёмся к вашей заявке.';
-
-        addHistory(
-            state,
-            'assistant',
-            text
-        );
-
-        const result =
-            prepareResult(
-                state,
-                text,
-                intent
-            );
-
-        if (
-            initialGreeting
-        ) {
-
-            result.text =
-                `${initialGreeting}\n\n${result.text}`;
-        }
-
-        return result;
-    }
-
-
-    // --------------------------------------------------------
-    // GENERATE RESPONSE
-    // --------------------------------------------------------
-
-    let assistantText = '';
-
-
-    try {
-
-        assistantText =
-            await generateAssistantText(
-                state,
-                userText
-            );
-
-    } catch (error) {
-
-        console.warn(
-            '⚠️ Sales Engine response error:',
-            error.message
-        );
-
-        assistantText =
-            buildControlledQuestion(
-                state
-            ) ||
-            'Спасибо. Информация зафиксирована.';
-    }
-
-
-    // --------------------------------------------------------
-    // HISTORY
-    // --------------------------------------------------------
-
-    addHistory(
-        state,
-        'assistant',
-        assistantText
-    );
-
-
-    // --------------------------------------------------------
-    // RESULT
-    // --------------------------------------------------------
-
-    const result =
-        prepareResult(
-            state,
-            assistantText,
-            intent
-        );
-
-
-    // --------------------------------------------------------
-    // INITIAL GREETING
-    // --------------------------------------------------------
-
-    if (
-        initialGreeting
-    ) {
-
-        result.text =
-            `${initialGreeting}\n\n${result.text}`;
-    }
-
-
-    return result;
 }
 
 
