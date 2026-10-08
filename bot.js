@@ -804,9 +804,23 @@ async function refreshBitrixOAuth() {
 
     logOAuthRefreshDiagnostics(data);
 
+    // OAuth refresh may return its own technical domain (for example oauth.bitrix.info).
+    // It must NOT replace the Bitrix24 portal domain used for REST API calls.
+    const portalDomain =
+        bitrixAuth.domain ||
+        BITRIX_DOMAIN;
+
+    const portalClientEndpoint =
+        bitrixAuth.client_endpoint ||
+        (portalDomain
+            ? `https://${portalDomain}/rest/`
+            : null);
+
     bitrixAuth = {
         ...bitrixAuth,
-        ...data
+        ...data,
+        domain: portalDomain,
+        client_endpoint: portalClientEndpoint
     };
 
     saveAuth(bitrixAuth);
