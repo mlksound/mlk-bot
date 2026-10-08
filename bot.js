@@ -957,8 +957,7 @@ async function bitrixOAuthCall(
 
         bitrixDiag('REST CALL RESULT', {
             method,
-            httpStatus: response.status,
-            ok: response.ok,
+            ok: true,
             error: data?.error || null,
             errorDescription: data?.error_description || null
         });
@@ -2813,10 +2812,9 @@ async function setupConnector() {
             e.message
         );
         bitrixDiagnosticState.lastConnectorSetupResult = `error: ${e.message}`;
-        bitrixDiag('CONNECTOR SETUP ERROR', { error: e.message });
-
-        bitrixDiagnosticState.lastConnectorSetupResult = 'success';
-        bitrixDiag('CONNECTOR SETUP SUCCESS', {
+        bitrixDiag('CONNECTOR SETUP ERROR', {
+            error: e.message,
+            stack: e.stack || null,
             connectorReady,
             openLine: bitrixOpenLineId
         });
@@ -3184,23 +3182,46 @@ async function processTelegramClientMessage(
     );
 
     // 2. Telegram -> Bitrix
-    bitrixDiagnosticState.lastOutboundResult = 'success';
-    bitrixDiag('OUTBOUND SUCCESS', {
+    bitrixDiagnosticState.lastOutboundAt = new Date().toISOString();
+    bitrixDiag('OUTBOUND START', {
         clientId: String(clientId),
-        chatId: result?.result?.DATA?.RESULT?.[0]?.session?.CHAT_ID || null
+        hasText: !!text,
+        files: telegramFiles.length
     });
 
     try {
 
-        await sendToBitrixConnector(
-            clientId,
-            text,
-            'client',
-            message.from,
-            telegramFiles
-        );
+        const outboundResult =
+            await sendToBitrixConnector(
+                clientId,
+                text,
+                'client',
+                message.from,
+                telegramFiles
+            );
+
+        bitrixDiagnosticState.lastOutboundResult = 'success';
+        bitrixDiag('OUTBOUND SUCCESS', {
+            clientId: String(clientId),
+            chatId:
+                outboundResult
+                    ?.result
+                    ?.DATA
+                    ?.RESULT
+                    ?.[0]
+                    ?.session
+                    ?.CHAT_ID || null
+        });
 
     } catch (e) {
+
+        bitrixDiagnosticState.lastOutboundResult =
+            `error: ${e.message}`;
+
+        bitrixDiag('OUTBOUND ERROR', {
+            error: e.message,
+            stack: e.stack || null
+        });
 
         error(
             'Telegram -> Bitrix error:',
@@ -4327,6 +4348,13 @@ async function telegramPoll() {
                         'Telegram update error:',
                         e.message
                     );
+
+                    if (e.stack) {
+                        error(
+                            'Telegram update stack:',
+                            e.stack
+                        );
+                    }
                 }
             }
 
@@ -6090,9 +6118,19 @@ if (
                                 '========================================'
                             );
 
-                            log(
-                                '✅ BITRIX CONNECTOR READY AFTER INSTALL'
-                            );
+                            if (connectorReady) {
+
+                                log(
+                                    '✅ BITRIX CONNECTOR READY AFTER INSTALL'
+                                );
+
+                            } else {
+
+                                warn(
+                                    '⚠️ BITRIX CONNECTOR NOT READY AFTER INSTALL'
+                                );
+
+                            }
 
                             log(
                                 'CONNECTOR:',
