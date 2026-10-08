@@ -83,6 +83,33 @@ const BITRIX_CONNECTOR_ENABLED =
     String(process.env.BITRIX_CONNECTOR_ENABLED || 'false')
         .toLowerCase() === 'true';
 
+// ------------------------------------------------------------
+// BITRIX DIAGNOSTIC SWITCHES
+// По умолчанию все включены — рабочее поведение не меняется.
+// Во время тестов отключаем только один контур за раз.
+// ------------------------------------------------------------
+const BITRIX_DIAGNOSTIC_MODE =
+    String(process.env.BITRIX_DIAGNOSTIC_MODE || 'false')
+        .toLowerCase() === 'true';
+const BITRIX_DIAG_FETCH_ENABLED =
+    String(process.env.BITRIX_DIAG_FETCH_ENABLED || 'true')
+        .toLowerCase() === 'true';
+const BITRIX_DIAG_CONNECTOR_SETUP_ENABLED =
+    String(process.env.BITRIX_DIAG_CONNECTOR_SETUP_ENABLED || 'true')
+        .toLowerCase() === 'true';
+const BITRIX_DIAG_OUTBOUND_ENABLED =
+    String(process.env.BITRIX_DIAG_OUTBOUND_ENABLED || 'true')
+        .toLowerCase() === 'true';
+const BITRIX_DIAG_INBOUND_ENABLED =
+    String(process.env.BITRIX_DIAG_INBOUND_ENABLED || 'true')
+        .toLowerCase() === 'true';
+const BITRIX_DIAG_DELIVERY_ENABLED =
+    String(process.env.BITRIX_DIAG_DELIVERY_ENABLED || 'true')
+        .toLowerCase() === 'true';
+const BITRIX_DIAG_OAUTH_REFRESH_ENABLED =
+    String(process.env.BITRIX_DIAG_OAUTH_REFRESH_ENABLED || 'true')
+        .toLowerCase() === 'true';
+
 const BITRIX_CONNECTOR_ID =
     (process.env.BITRIX_CONNECTOR_ID || 'mlk_telegram')
         .trim()
@@ -171,6 +198,35 @@ const BITRIX_POLL_INTERVAL_MS = 3000;
 
 function log(...args) {
     console.log(...args);
+}
+
+const bitrixDiagnosticState = {
+    startedAt: new Date().toISOString(),
+    lastOAuthRefreshAt: null,
+    lastOAuthError: null,
+    lastConnectorSetupAt: null,
+    lastConnectorSetupResult: null,
+    lastConnectorStatusAt: null,
+    lastConnectorStatus: null,
+    lastOutboundAt: null,
+    lastOutboundResult: null,
+    lastInboundAt: null,
+    lastInboundResult: null,
+    lastDeliveryAt: null,
+    lastDeliveryResult: null,
+    lastFetchAt: null,
+    lastFetchResult: null
+};
+
+function bitrixDiag(label, data = null) {
+    if (!BITRIX_DIAGNOSTIC_MODE) return;
+    const prefix = `[BITRIX DIAG][uptime=${Math.round(process.uptime())}s] ${label}`;
+    if (data === null || data === undefined) {
+        log(prefix);
+        return;
+    }
+    try { log(prefix, JSON.stringify(data)); }
+    catch (e) { log(prefix, data); }
 }
 
 function warn(...args) {
@@ -680,6 +736,13 @@ function logOAuthRefreshDiagnostics(data) {
 
 async function refreshBitrixOAuth() {
 
+    bitrixDiag('OAUTH REFRESH START');
+
+    if (!BITRIX_DIAG_OAUTH_REFRESH_ENABLED) {
+        warn('🧪 BITRIX DIAG: OAuth refresh is DISABLED');
+        throw new Error('Bitrix OAuth refresh disabled by diagnostic switch');
+    }
+
     if (
         !BITRIX_CLIENT_ID ||
         !BITRIX_CLIENT_SECRET ||
@@ -747,6 +810,14 @@ async function refreshBitrixOAuth() {
     };
 
     saveAuth(bitrixAuth);
+
+    bitrixDiagnosticState.lastOAuthRefreshAt = new Date().toISOString();
+        bitrixDiagnosticState.lastOAuthError = null;
+        bitrixDiag('OAUTH REFRESH SUCCESS', {
+            domain: bitrixAuth.domain || null,
+            hasAccessToken: !!bitrixAuth.access_token,
+            hasRefreshToken: !!bitrixAuth.refresh_token
+        });
 
     log('✅ Bitrix OAuth refreshed');
 
@@ -836,6 +907,8 @@ async function bitrixOAuthCall(
     retry = true
 ) {
 
+    bitrixDiag('REST CALL START', { method, retry });
+
     if (
         !bitrixAuth ||
         !bitrixAuth.access_token
@@ -881,6 +954,14 @@ async function bitrixOAuthCall(
                     body: JSON.stringify(body)
                 }
             );
+
+        bitrixDiag('REST CALL RESULT', {
+            method,
+            httpStatus: response.status,
+            ok: response.ok,
+            error: data?.error || null,
+            errorDescription: data?.error_description || null
+        });
 
         if (
             data &&
@@ -2632,6 +2713,15 @@ async function connectorStatus(
 
 async function setupConnector() {
 
+    bitrixDiagnosticState.lastConnectorSetupAt = new Date().toISOString();
+    bitrixDiag('CONNECTOR SETUP START');
+
+    if (!BITRIX_DIAG_CONNECTOR_SETUP_ENABLED) {
+        warn('🧪 BITRIX DIAG: Connector setup is DISABLED');
+        bitrixDiagnosticState.lastConnectorSetupResult = 'disabled';
+        return;
+    }
+
     if (!BITRIX_CONNECTOR_ENABLED) {
         return;
     }
@@ -2682,9 +2772,13 @@ async function setupConnector() {
             bitrixOpenLineId
         );
 
-        await connectorStatus(
-            bitrixOpenLineId
-        );
+        const statusResult =
+            await connectorStatus(
+                bitrixOpenLineId
+            );
+
+        bitrixDiagnosticState.lastConnectorStatusAt = new Date().toISOString();
+        bitrixDiagnosticState.lastConnectorStatus = statusResult || 'ok';
 
         connectorReady = true;
 
@@ -2718,6 +2812,14 @@ async function setupConnector() {
             '❌ Connector setup error:',
             e.message
         );
+        bitrixDiagnosticState.lastConnectorSetupResult = `error: ${e.message}`;
+        bitrixDiag('CONNECTOR SETUP ERROR', { error: e.message });
+
+        bitrixDiagnosticState.lastConnectorSetupResult = 'success';
+        bitrixDiag('CONNECTOR SETUP SUCCESS', {
+            connectorReady,
+            openLine: bitrixOpenLineId
+        });
 
     } finally {
 
@@ -2737,7 +2839,17 @@ async function sendToBitrixConnector(
     files = []
 ) {
 
+    bitrixDiagnosticState.lastOutboundAt = new Date().toISOString();
+    bitrixDiag('OUTBOUND START', { clientId: String(clientId), senderType });
+
+    if (!BITRIX_DIAG_OUTBOUND_ENABLED) {
+        warn('🧪 BITRIX DIAG: Connector outbound is DISABLED');
+        bitrixDiagnosticState.lastOutboundResult = 'disabled';
+        return null;
+    }
+
     if (!BITRIX_CONNECTOR_ENABLED) {
+        bitrixDiagnosticState.lastOutboundResult = 'connector_disabled';
         return null;
     }
 
@@ -3072,6 +3184,12 @@ async function processTelegramClientMessage(
     );
 
     // 2. Telegram -> Bitrix
+    bitrixDiagnosticState.lastOutboundResult = 'success';
+    bitrixDiag('OUTBOUND SUCCESS', {
+        clientId: String(clientId),
+        chatId: result?.result?.DATA?.RESULT?.[0]?.session?.CHAT_ID || null
+    });
+
     try {
 
         await sendToBitrixConnector(
@@ -4359,6 +4477,12 @@ function saveBitrixOffset(
 
 async function bitrixFetchPoll() {
 
+    if (!BITRIX_DIAG_FETCH_ENABLED) {
+        warn('🧪 BITRIX DIAG: Bitrix FETCH loop is DISABLED');
+        bitrixDiagnosticState.lastFetchResult = 'disabled';
+        return;
+    }
+
     if (
         !BITRIX_WEBHOOK_URL ||
         !BITRIX_BOT_TOKEN
@@ -4376,6 +4500,8 @@ async function bitrixFetchPoll() {
     );
 
     while (true) {
+
+        bitrixDiagnosticState.lastFetchAt = new Date().toISOString();
 
         try {
 
@@ -4569,6 +4695,19 @@ async function bitrixFetchPoll() {
 // ============================================================
 
 async function processConnectorManagerEvent(payload) {
+    bitrixDiagnosticState.lastInboundAt = new Date().toISOString();
+    bitrixDiag('INBOUND START', {
+        event: payload?.event || null,
+        connector: payload?.data?.CONNECTOR || null,
+        line: payload?.data?.LINE || null
+    });
+
+    if (!BITRIX_DIAG_INBOUND_ENABLED) {
+        warn('🧪 BITRIX DIAG: Connector inbound processing is DISABLED');
+        bitrixDiagnosticState.lastInboundResult = 'disabled';
+        return;
+    }
+
     try {
         console.log('========================================');
         console.log('📥 BITRIX OUTBOUND EVENT');
@@ -5054,6 +5193,15 @@ async function confirmConnectorDelivery(
     item
 ) {
 
+    bitrixDiagnosticState.lastDeliveryAt = new Date().toISOString();
+    bitrixDiag('DELIVERY CONFIRM START');
+
+    if (!BITRIX_DIAG_DELIVERY_ENABLED) {
+        warn('🧪 BITRIX DIAG: Connector delivery confirmation is DISABLED');
+        bitrixDiagnosticState.lastDeliveryResult = 'disabled';
+        return;
+    }
+
     try {
 
         const im =
@@ -5125,6 +5273,9 @@ async function confirmConnectorDelivery(
                 ]
             }
         );
+
+        bitrixDiagnosticState.lastDeliveryResult = 'success';
+        bitrixDiag('DELIVERY CONFIRM SUCCESS');
 
     } catch (e) {
 
@@ -5544,6 +5695,29 @@ const server =
 
                             connectorId:
                                 BITRIX_CONNECTOR_ID
+                        },
+
+                        diagnostic: {
+                            enabled:
+                                BITRIX_DIAGNOSTIC_MODE,
+
+                            switches: {
+                                fetch:
+                                    BITRIX_DIAG_FETCH_ENABLED,
+                                connectorSetup:
+                                    BITRIX_DIAG_CONNECTOR_SETUP_ENABLED,
+                                outbound:
+                                    BITRIX_DIAG_OUTBOUND_ENABLED,
+                                inbound:
+                                    BITRIX_DIAG_INBOUND_ENABLED,
+                                delivery:
+                                    BITRIX_DIAG_DELIVERY_ENABLED,
+                                oauthRefresh:
+                                    BITRIX_DIAG_OAUTH_REFRESH_ENABLED
+                            },
+
+                            state:
+                                bitrixDiagnosticState
                         }
                     };
 
@@ -6498,6 +6672,21 @@ async function startup() {
     log(
         '========================================'
     );
+
+    bitrixDiag('STARTUP CONFIG', {
+        connectorEnabled: BITRIX_CONNECTOR_ENABLED,
+        diagnosticMode: BITRIX_DIAGNOSTIC_MODE,
+        fetchEnabled: BITRIX_DIAG_FETCH_ENABLED,
+        connectorSetupEnabled: BITRIX_DIAG_CONNECTOR_SETUP_ENABLED,
+        outboundEnabled: BITRIX_DIAG_OUTBOUND_ENABLED,
+        inboundEnabled: BITRIX_DIAG_INBOUND_ENABLED,
+        deliveryEnabled: BITRIX_DIAG_DELIVERY_ENABLED,
+        oauthRefreshEnabled: BITRIX_DIAG_OAUTH_REFRESH_ENABLED,
+        dataDir: DATA_DIR,
+        authFile: AUTH_FILE,
+        authLoaded: !!(bitrixAuth && bitrixAuth.access_token),
+        authDomain: bitrixAuth?.domain || BITRIX_DOMAIN || null
+    });
 
     server.listen(
         PORT,
