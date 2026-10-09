@@ -92,7 +92,7 @@ const BITRIX_DIAGNOSTIC_MODE =
     String(process.env.BITRIX_DIAGNOSTIC_MODE || 'false')
         .toLowerCase() === 'true';
 const BITRIX_DIAG_FETCH_ENABLED =
-    String(process.env.BITRIX_DIAG_FETCH_ENABLED || 'true')
+    String(process.env.BITRIX_DIAG_FETCH_ENABLED || 'false')
         .toLowerCase() === 'true';
 const BITRIX_DIAG_CONNECTOR_SETUP_ENABLED =
     String(process.env.BITRIX_DIAG_CONNECTOR_SETUP_ENABLED || 'true')
