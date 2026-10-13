@@ -1233,18 +1233,9 @@ function buildTelegramReplyMarkup(actions) {
         ],
 
         ask_level: [
-            [
-                'Стандартный (обычные требования к оборудованию и документации)',
-                'standard'
-            ],
-            [
-                'Высокие требования (повышенные требования к оборудованию и документации, прямые ТВ-трансляции)',
-                'high'
-            ],
-            [
-                'Высший уровень (с высшими должностными лицами, масштабные и международные мероприятия)',
-                'highest'
-            ]
+            ['Стандартный', 'standard'],
+            ['Высокие требования', 'high'],
+            ['Высший уровень', 'highest']
         ],
 
         ask_personnel: [
@@ -1262,6 +1253,7 @@ function buildTelegramReplyMarkup(actions) {
 
         ask_lift: [
             ['🏗 Есть грузовой лифт', 'has_lift'],
+            ['🛗 Только пассажирский лифт', 'passenger_lift'],
             ['🪜 По лестнице', 'stairs'],
             ['❓ Не знаю', 'unknown']
         ],
@@ -3502,6 +3494,75 @@ async function processTelegramAdminMessage(
 }
 
 // ============================================================
+// MIRROR SALES BUTTON INTERACTIONS TO BITRIX
+// ============================================================
+
+function salesButtonChoiceText(tag, value) {
+    const labels = {
+        ask_format: {
+            concerts: 'Концерты / фестивали',
+            conferences: 'Конференции / презентации / TV-проекты',
+            corporate: 'Корпоративы / торжества',
+            exhibitions: 'Выставки',
+            sports: 'Спортивные мероприятия'
+        },
+        ask_level: {
+            standard: 'Стандартный уровень',
+            high: 'Высокие требования',
+            highest: 'Высший уровень'
+        },
+        ask_personnel: {
+            management: 'Полное управление оборудованием',
+            duty_technician: 'Дежурный техник',
+            installation_dismantling: 'Только монтаж / демонтаж',
+            other: 'Другой персонал'
+        },
+        ask_place: {
+            outdoor: 'Улица', indoor: 'Помещение', covered: 'Под навесом'
+        },
+        ask_lift: {
+            has_lift: 'Есть грузовой лифт',
+            passenger_lift: 'Только пассажирский лифт',
+            stairs: 'Нужно носить по лестнице',
+            unknown: 'Не знаю'
+        },
+        ask_sound_rider: { yes: 'Звуковой райдер есть', no: 'Звукового райдера нет' },
+        ask_light_fixtures: { yes: 'Требования к световым приборам есть', no: 'Отдельных требований к световым приборам нет' },
+        ask_mount: { any: 'Монтаж по согласованию', night: 'Монтаж ночью / рано утром' },
+        ask_demount: { any: 'Демонтаж по согласованию', deadline: 'Демонтаж до определённого времени' }
+    };
+
+    if (tag === 'ask_equipment' && Array.isArray(value)) {
+        const equipmentLabels = {
+            sound: 'Звуковое оборудование', led: 'LED-экраны',
+            light: 'Световое оборудование', stage: 'Сценические конструкции'
+        };
+        return 'Выбрано оборудование: ' + value.map(v => v === 'all' ? 'Полный комплекс' : equipmentLabels[v] || v).join(', ');
+    }
+
+    return labels[tag]?.[value] || `${tag}: ${value}`;
+}
+
+async function relaySalesCallbackToBitrix(clientId, clientText, result, callbackQuery) {
+    const telegramUser = callbackQuery?.from || null;
+    const aiText = String(result?.text || '').trim();
+
+    if (clientText) {
+        try { await mirrorToAdmin(clientId, 'client', clientText); }
+        catch (e) { warn('Button choice mirror-to-admin error:', e.message); }
+        try { await sendToBitrixConnector(clientId, clientText, 'client', telegramUser, []); }
+        catch (e) { error('Button choice Telegram -> Bitrix error:', e.message); }
+    }
+
+    if (aiText) {
+        try { await mirrorToAdmin(clientId, 'ai', aiText); }
+        catch (e) { warn('Button response mirror-to-admin error:', e.message); }
+        try { await sendToBitrixConnector(clientId, aiText, 'ai', telegramUser, []); }
+        catch (e) { error('Button response AI -> Bitrix error:', e.message); }
+    }
+}
+
+// ============================================================
 // 15. TELEGRAM CALLBACK
 // ============================================================
 
@@ -3563,12 +3624,17 @@ async function processTelegramCallback(
             const equipmentValue =
                 parts[3] || '';
 
+            // toggle payload: sales:equipment:toggle:<value>:<selected>
+            // all/done payload: sales:equipment:<action>:<selected>
+            const selectedPayload =
+                equipmentAction === 'toggle'
+                    ? (parts[4] || '')
+                    : (parts[3] || '');
+
             const selected =
-                parts[4]
-                    ? parts[4]
-                        .split(',')
-                        .filter(Boolean)
-                    : [];
+                selectedPayload
+                    .split(',')
+                    .filter(Boolean);
 
 
             // ----------------------------------------------
@@ -3697,6 +3763,12 @@ async function processTelegramCallback(
                         }
                     );
 
+                await relaySalesCallbackToBitrix(
+                    clientId,
+                    salesButtonChoiceText('ask_equipment', selected),
+                    result,
+                    callbackQuery
+                );
 
                 const replyMarkup =
                     buildTelegramReplyMarkup(
@@ -3768,6 +3840,12 @@ async function processTelegramCallback(
                     }
                 );
 
+            await relaySalesCallbackToBitrix(
+                clientId,
+                salesButtonChoiceText(salesTag, salesValue),
+                result,
+                callbackQuery
+            );
 
             const replyMarkup =
                 buildTelegramReplyMarkup(
@@ -4111,6 +4189,12 @@ async function processTelegramCallback(
                         }
                     );
 
+                await relaySalesCallbackToBitrix(
+                    clientId,
+                    `${calendarTag}: ${value}`,
+                    result,
+                    callbackQuery
+                );
 
                 const replyMarkup =
                     buildTelegramReplyMarkup(
@@ -4176,6 +4260,13 @@ async function processTelegramCallback(
                             'discuss_project'
                     }
                 );
+
+            await relaySalesCallbackToBitrix(
+                clientId,
+                'Клиент нажал «Обсудить проект»',
+                result,
+                callbackQuery
+            );
 
             const replyMarkup =
                 buildTelegramReplyMarkup(

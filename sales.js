@@ -1005,6 +1005,7 @@ function normalizeExtractedData(
 
         if (
             value === 'has_lift' ||
+            value === 'passenger_lift' ||
             value === 'stairs' ||
             value === 'unknown'
         ) {
@@ -2541,6 +2542,7 @@ place:
 
 lift:
 - has_lift
+- passenger_lift
 - stairs
 - unknown
 
@@ -2977,10 +2979,28 @@ function buildControlledQuestion(
     switch (first.field) {
 
         case 'eventType':
-            return 'Подскажите, пожалуйста, какой у вас формат мероприятия?';
+            return [
+                'Подскажите, пожалуйста, какой у вас формат мероприятия?',
+                '',
+                '• Концерты и фестивали — open air, городские праздники, гастрольные туры, сольные выступления, шоу-программы.',
+                '• Конференции, презентации и TV-проекты — бизнес-форумы, презентации продуктов, пресс-конференции, саммиты, конгрессы, семинары, кинофестивали, премии и телевизионные программы.',
+                '• Корпоративы и торжества — юбилеи, тимбилдинги, свадьбы, выездные мероприятия, награждения, открытия магазинов и заведений.',
+                '• Выставки — промо-акции, стенды компаний, презентационные и конференц-зоны.',
+                '• Спортивные мероприятия — матчи, турниры, спартакиады, спортивные праздники и марафоны.',
+                '',
+                'Выберите наиболее подходящий вариант или опишите мероприятие своими словами.'
+            ].join('\n');
 
         case 'eventLevel':
-            return 'Какой уровень мероприятия?';
+            return [
+                'Какой уровень технических требований у мероприятия?',
+                '',
+                `• ${LEVELS.standard.label} — ${LEVELS.standard.description}.`,
+                `• ${LEVELS.high.label} — ${LEVELS.high.description}.`,
+                `• ${LEVELS.highest.label} — мероприятия с высшими должностными лицами, масштабные и международные.`,
+                '',
+                'Выберите наиболее подходящий вариант.'
+            ].join('\n');
 
         case 'guestCount':
             return 'Подскажите, пожалуйста, ориентировочное количество гостей.';
@@ -3505,9 +3525,11 @@ function buildManagerSummary(
             `Лифт: ${
                 p.lift === 'has_lift'
                     ? 'Есть грузовой лифт'
-                    : p.lift === 'stairs'
-                        ? 'Носить по лестнице'
-                        : p.lift
+                    : p.lift === 'passenger_lift'
+                        ? 'Есть только пассажирский лифт'
+                        : p.lift === 'stairs'
+                            ? 'Носить по лестнице'
+                            : p.lift
             }`
         );
     }
@@ -3939,9 +3961,11 @@ function buildClientSummary(
             `• Лифт: ${
                 p.lift === 'has_lift'
                     ? 'Есть грузовой лифт'
-                    : p.lift === 'stairs'
-                        ? 'Носить по лестнице'
-                        : p.lift
+                    : p.lift === 'passenger_lift'
+                        ? 'Есть только пассажирский лифт'
+                        : p.lift === 'stairs'
+                            ? 'Носить по лестнице'
+                            : p.lift
             }`
         );
     }
@@ -4406,6 +4430,9 @@ function actionToText(
             has_lift:
                 'Подъём: Есть грузовой лифт',
 
+            passenger_lift:
+                'Подъём: Есть только пассажирский лифт',
+
             stairs:
                 'Подъём: Нужно носить по лестнице',
 
@@ -4726,6 +4753,7 @@ function applyAction(
 
         if (
             value === 'has_lift' ||
+            value === 'passenger_lift' ||
             value === 'stairs' ||
             value === 'unknown'
         ) {
@@ -5392,11 +5420,69 @@ addHistory(
                     extracted.mount = undefined;
                 }
 
+                // Когда ожидаем размеры лифта, ответ с размерами
+                // не должен случайно менять уже установленный тип лифта.
+                if (expectedField === 'liftDimensions') {
+                    extracted.lift = undefined;
+                    if (/\d/.test(userText) && /(?:м|метр|×|\bx\b|\bна\b)/i.test(userText)) {
+                        extracted.liftDimensions = userText.trim();
+                    }
+                }
+
+                // Уточняем ответ про лифт по прямому смыслу сообщения.
+                // Пассажирский лифт не приравниваем к грузовому.
+                if (expectedField === 'lift') {
+                    const lower = userText.toLowerCase();
+                    if (/(пассажирск|обычн.{0,20}лифт|обычн.{0,20}(не очень больш|небольш|маленьк)|не очень больш.{0,20}лиф|только.{0,20}пассажир)/i.test(lower)) {
+                        extracted.lift = 'passenger_lift';
+                    } else if (/(грузов.{0,20}(есть|имеется)|есть.{0,20}грузов)/i.test(lower)) {
+                        extracted.lift = 'has_lift';
+                    } else if (/(по лестниц|носить.{0,20}лестниц|без лифт)/i.test(lower)) {
+                        extracted.lift = 'stairs';
+                    } else if (/(не знаю|не уверен|не уверена)/i.test(lower)) {
+                        extracted.lift = 'unknown';
+                    }
+                }
+
+                // Если клиент подтвердил, что звуковой райдер есть,
+                // но вместо файла описывает требования текстом, сохраняем
+                // содержательный ответ напрямую. Короткие ответы вроде
+                // «текстом» не считаем самим содержанием райдера.
+                if (
+                    expectedField === 'soundRider' &&
+                    state.lastAction === 'ask_sound_rider_yes'
+                ) {
+                    const riderReply = userText.trim();
+                    const isRiderMetaReply =
+                        /^(текстом|файлом|в сообщении|позже|сейчас|пришлю|отправлю|да|есть)$/i.test(riderReply) ||
+                        /(ты на связи|вы на связи|алло|ау|привет)/i.test(riderReply);
+
+                    if (isRiderMetaReply) {
+                        // Это ответ о способе отправки или проверка связи,
+                        // а не сами требования райдера.
+                        extracted.soundRider = undefined;
+                    } else if (riderReply.length >= 5) {
+                        // Содержательный ответ (например, «требования простые»)
+                        // фиксируем напрямую, даже если модель не вернула поле.
+                        extracted.soundRider = riderReply;
+                        state.lastAction = 'ask_sound_rider_received';
+                    }
+                }
 
                 mergeProjectData(
                     state,
                     extracted
                 );
+
+                // Если модель не распознала очевидные размеры,
+                // сохраняем ответ клиента без потери исходной формулировки.
+                if (
+                    expectedField === 'liftDimensions' &&
+                    /\d/.test(userText) &&
+                    /(?:м|метр|×|\bx\b|\bна\b)/i.test(userText)
+                ) {
+                    state.project.liftDimensions = userText.trim();
+                }
 
             } catch (error) {
 
@@ -5561,18 +5647,44 @@ addHistory(
                 assistantText || ''
             ).trim();
 
+        // Если DeepSeek уже задал первую строку вопроса, не дублируем её.
+        // Для формата и уровня при этом добавляем оставшиеся пояснения,
+        // если модель их не вывела.
+        let questionToAppend = controlledQuestion || '';
+        const controlledQuestionLines = questionToAppend.split('\n');
+        const questionLead = controlledQuestionLines[0] || '';
+        const firstDetailLine = controlledQuestionLines.find(
+            line => line.trim().startsWith('•')
+        );
+
+        if (questionLead && finalAssistantText.includes(questionLead)) {
+            if (
+                firstDetailLine &&
+                !finalAssistantText.includes(firstDetailLine)
+            ) {
+                questionToAppend = controlledQuestionLines
+                    .slice(1)
+                    .join('\n')
+                    .trim();
+            } else {
+                questionToAppend = '';
+            }
+        }
+
+        const alreadyAskedForRider =
+            calculateMissing(state)[0]?.field === 'soundRider' &&
+            /райдер/i.test(finalAssistantText) &&
+            /(пришл|отправ|жду|текст|файл|требован)/i.test(finalAssistantText);
 
         if (
-            controlledQuestion &&
-            !finalAssistantText.includes(
-                controlledQuestion
-            )
+            questionToAppend &&
+            !alreadyAskedForRider
         ) {
 
             finalAssistantText =
                 [
                     finalAssistantText,
-                    controlledQuestion
+                    questionToAppend
                 ]
                 .filter(Boolean)
                 .join('\n\n');
