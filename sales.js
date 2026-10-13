@@ -3006,7 +3006,16 @@ function buildControlledQuestion(
             return 'Подскажите, пожалуйста, ориентировочное количество гостей.';
 
         case 'personnel':
-            return 'Какой персонал требуется?';
+            return [
+                'Какой персонал вам нужен на мероприятии?',
+                '',
+                '• Полное управление оборудованием — наши специалисты работают с техникой во время мероприятия.',
+                '• Дежурный техник — специалист на площадке на случай технических вопросов.',
+                '• Только монтаж и демонтаж — установка и снятие оборудования без сопровождения.',
+                '• Другое — опишите своими словами.',
+                '',
+                'Выберите подходящий вариант или опишите своими словами.'
+            ].join('\n');
 
         case 'personnelDetails':
             return 'Уточните, пожалуйста, какой именно персонал вам требуется.';
@@ -3097,6 +3106,33 @@ function buildControlledQuestion(
         default:
             return 'Подскажите, пожалуйста, дополнительную информацию по проекту.';
     }
+}
+
+
+// ============================================================
+// REMOVE STALE QUALIFICATION QUESTIONS FROM AI TEXT
+// ============================================================
+// DeepSeek иногда повторяет вопрос из старой истории, хотя Sales Engine
+// уже перешёл к следующему полю. Удаляем только вопросительную часть,
+// сохраняя предшествующее подтверждение или пояснение.
+function stripQualificationQuestions(text) {
+    const source = String(text || '').trim();
+    if (!source) return '';
+
+    const questionStart = /(?:подскажите(?:,\s*пожалуйста)?[,]?\s+(?:какой|какая|какое|какие|каком|какого|дату|дата|адрес|ориентировочное|размеры|во сколько|до какого)|какой у вас формат|какой уровень(?: технических требований)?|какое оборудование|какой персонал|дата и время|на каком этаже|есть ли на площадке|есть ли звуковой райдер|есть ли требования|мероприятие будет проходить|где будет проходить|что планируется транслировать|что именно нужно по светодиодным экранам|нужно ли оборудование|когда возможен монтаж|когда возможен демонтаж|до какого времени необходимо завершить|подскажите, пожалуйста, размеры лифта)/i;
+
+    return source
+        .split('\n')
+        .map(line => {
+            const match = questionStart.exec(line);
+            if (!match) return line;
+            const prefix = line.slice(0, match.index).trim();
+            return prefix.replace(/[\s—–,:;]+$/, '');
+        })
+        .filter(line => line.trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
 }
 
 
@@ -5642,52 +5678,26 @@ addHistory(
             );
 
 
-        let finalAssistantText =
-            String(
-                assistantText || ''
-            ).trim();
-
-        // Если DeepSeek уже задал первую строку вопроса, не дублируем её.
-        // Для формата и уровня при этом добавляем оставшиеся пояснения,
-        // если модель их не вывела.
-        let questionToAppend = controlledQuestion || '';
-        const controlledQuestionLines = questionToAppend.split('\n');
-        const questionLead = controlledQuestionLines[0] || '';
-        const firstDetailLine = controlledQuestionLines.find(
-            line => line.trim().startsWith('•')
+        // Убираем вопросы, которые DeepSeek мог скопировать из старой
+        // истории диалога. Следующий вопрос выбирается только по текущему
+        // структурированному состоянию Sales Engine.
+        let finalAssistantText = stripQualificationQuestions(
+            String(assistantText || '').trim()
         );
 
-        if (questionLead && finalAssistantText.includes(questionLead)) {
-            if (
-                firstDetailLine &&
-                !finalAssistantText.includes(firstDetailLine)
-            ) {
-                questionToAppend = controlledQuestionLines
-                    .slice(1)
-                    .join('\n')
-                    .trim();
-            } else {
-                questionToAppend = '';
-            }
-        }
+        const questionToAppend = controlledQuestion || '';
 
-        const alreadyAskedForRider =
-            calculateMissing(state)[0]?.field === 'soundRider' &&
-            /райдер/i.test(finalAssistantText) &&
-            /(пришл|отправ|жду|текст|файл|требован)/i.test(finalAssistantText);
-
-        if (
-            questionToAppend &&
-            !alreadyAskedForRider
-        ) {
-
-            finalAssistantText =
-                [
-                    finalAssistantText,
-                    questionToAppend
-                ]
+        if (questionToAppend) {
+            finalAssistantText = [
+                finalAssistantText,
+                questionToAppend
+            ]
                 .filter(Boolean)
                 .join('\n\n');
+        }
+
+        if (!finalAssistantText) {
+            finalAssistantText = questionToAppend || 'Спасибо. Информация зафиксирована.';
         }
 
 
