@@ -307,6 +307,8 @@ async function hydrateSalesState(
         const state =
             salesStates.get(key);
 
+        if (!state.deferredFields) state.deferredFields = {};
+
         if (
             clientName &&
             !state.client.name
@@ -427,6 +429,10 @@ function createSalesState(clientId, clientName = '') {
         intent: null,
 
         missing: [],
+
+        // Поля, на которые клиент уже ответил, но значение нельзя надёжно
+        // разобрать. Не спрашиваем их повторно в этом диалоге.
+        deferredFields: {},
 
         stage: 'greeting',
 
@@ -1384,6 +1390,10 @@ function mergeProjectData(
 
             p[field] =
                 extracted[field];
+
+            if (state.deferredFields) {
+                delete state.deferredFields[field];
+            }
         }
     }
 
@@ -1421,6 +1431,10 @@ function mergeProjectData(
                     ...newEquipment
                 ])
             ];
+
+        if (p.equipment.length && state.deferredFields) {
+            delete state.deferredFields.equipment;
+        }
     }
 }
 
@@ -1455,6 +1469,7 @@ function cleanDependentFields(state) {
         p.eventType !== 'sports'
     ) {
         p.eventLevel = null;
+        if (state.deferredFields) delete state.deferredFields.eventLevel;
     }
 
 
@@ -1466,6 +1481,7 @@ function cleanDependentFields(state) {
         p.eventType !== 'corporate'
     ) {
         p.guestCount = null;
+        if (state.deferredFields) delete state.deferredFields.guestCount;
     }
 
 
@@ -1479,6 +1495,11 @@ function cleanDependentFields(state) {
         p.floor = null;
         p.lift = null;
         p.liftDimensions = null;
+        if (state.deferredFields) {
+            delete state.deferredFields.floor;
+            delete state.deferredFields.lift;
+            delete state.deferredFields.liftDimensions;
+        }
     }
 
 
@@ -1490,6 +1511,7 @@ function cleanDependentFields(state) {
         p.lift !== 'has_lift'
     ) {
         p.liftDimensions = null;
+        if (state.deferredFields) delete state.deferredFields.liftDimensions;
     }
 
 
@@ -1517,6 +1539,11 @@ function cleanDependentFields(state) {
     if (!p.equipment.includes('stage')) {
         p.stageDetails = null;
         p.stageSurface = null;
+        if (state.deferredFields) {
+            delete state.deferredFields.stageDetails;
+            delete state.deferredFields.stageSurface;
+            delete state.deferredFields.liftDimensions;
+        }
     }
 
 
@@ -1540,6 +1567,11 @@ function cleanDependentFields(state) {
         p.soundDetails = null;
         p.backline = null;
         p.soundRider = null;
+        if (state.deferredFields) {
+            delete state.deferredFields.soundDetails;
+            delete state.deferredFields.backline;
+            delete state.deferredFields.soundRider;
+        }
     }
 
 
@@ -1550,6 +1582,10 @@ function cleanDependentFields(state) {
     if (!p.equipment.includes('light')) {
         p.lightDetails = null;
         p.lightFixtures = null;
+        if (state.deferredFields) {
+            delete state.deferredFields.lightDetails;
+            delete state.deferredFields.lightFixtures;
+        }
     }
 
 
@@ -1561,6 +1597,11 @@ function cleanDependentFields(state) {
         p.ledDetails = null;
         p.ledContent = null;
         p.ledSuspension = null;
+        if (state.deferredFields) {
+            delete state.deferredFields.ledDetails;
+            delete state.deferredFields.ledContent;
+            delete state.deferredFields.ledSuspension;
+        }
     }
 
 
@@ -1601,6 +1642,93 @@ function explicitlyUnknownDimensions(value) {
 
 
 // ============================================================
+// ANSWERED BUT NEEDS FOLLOW-UP
+// ============================================================
+// Если клиент ответил, но автоматическое извлечение не смогло надёжно
+// определить значение, сохраняем его исходный ответ в deferredFields.
+// Воронка продолжает работу, а менеджер видит, что нужно уточнить.
+function isDeferred(state, field) {
+    return Boolean(state && state.deferredFields && state.deferredFields[field]);
+}
+
+function deferField(state, field, rawAnswer) {
+    if (!state.deferredFields) state.deferredFields = {};
+    state.deferredFields[field] = String(rawAnswer || '').trim() || 'Ответ требует уточнения';
+}
+
+function isConversationalMetaMessage(text) {
+    const value = String(text || '').trim();
+    return /[?？]\s*$/.test(value) ||
+        /^(?:ты на связи|вы на связи|точно всё спросил|точно все спросил|а такие мероприятия вы уже работали|позови менеджера|соедини с менеджером|хочу поговорить с менеджером|кто ты|что ты умеешь)(?=$|[\s!?.,])/i.test(value);
+}
+
+function preserveUnparsedAnswer(state, field, rawAnswer) {
+    const answer = String(rawAnswer || '').trim();
+    // Поле передаётся сюда как expectedField, то есть вопрос действительно
+    // ожидал этот ответ. Не проверяем calculateMissing повторно: после частичного
+    // extraction модель могла изменить другие поля, и такая проверка мешала
+    // сохранить ответ на текущий вопрос.
+    if (!field || !answer) return false;
+
+    // Если extraction уже записал значение текущего поля, не перезаписываем
+    // нормализованный результат исходной фразой клиента.
+    if (state.project && state.project[field] !== null &&
+        state.project[field] !== undefined && state.project[field] !== '') {
+        return false;
+    }
+
+    const deferredFields = new Set([
+        'eventType', 'equipment', 'eventLevel', 'guestCount',
+        'personnel', 'place', 'floor', 'lift',
+        'dateStart', 'dateEnd', 'readyDate'
+    ]);
+    const rawTextFields = new Set([
+        'location', 'liftDimensions', 'personnelDetails',
+        'stageDetails', 'stageSurface', 'soundDetails',
+        'soundRider', 'backline', 'lightDetails', 'lightFixtures',
+        'ledDetails', 'ledContent', 'ledSuspension',
+        'mount', 'mountTime', 'demount', 'demountTime',
+        'additionalServices', 'specialConditions'
+    ]);
+    const isSoundRiderMeta = field === 'soundRider' && (
+        /^(?:текстом|файлом|в сообщении|позже|сейчас|пришлю|отправлю|да|есть)$/i.test(answer) ||
+        /(?:ты на связи|вы на связи|алло|ау|привет)/i.test(answer)
+    );
+
+    if (deferredFields.has(field) || isSoundRiderMeta) {
+        deferField(state, field, answer);
+        console.log(`[SALES] Field deferred instead of repeated: ${field}`);
+        return true;
+    }
+
+    if (rawTextFields.has(field)) {
+        state.project[field] = answer;
+        if (state.deferredFields) delete state.deferredFields[field];
+        console.log(`[SALES] Raw answer saved to ${field}`);
+        return true;
+    }
+
+    return false;
+}
+
+const DEFERRED_FIELD_LABELS = {
+    eventType: 'Формат мероприятия',
+    equipment: 'Не удалось однозначно определить оборудование',
+    eventLevel: 'Уровень технических требований',
+    guestCount: 'Количество гостей',
+    personnel: 'Требуемый персонал',
+    dateStart: 'Дата и время начала',
+    dateEnd: 'Дата и время окончания',
+    readyDate: 'Время готовности оборудования',
+    place: 'Место проведения: улица или помещение',
+    floor: 'Этаж площадки',
+    lift: 'Тип лифта / способ подъёма',
+    liftDimensions: 'Размеры лифта',
+    soundRider: 'Звуковой райдер',
+    lightFixtures: 'Требования к световым приборам'
+};
+
+// ============================================================
 // CALCULATE MISSING
 // ============================================================
 //
@@ -1627,6 +1755,7 @@ function explicitlyUnknownDimensions(value) {
 function calculateMissing(state) {
 
     const p = state.project;
+    if (!state.deferredFields) state.deferredFields = {};
 
     const missing = [];
 
@@ -1634,7 +1763,7 @@ function calculateMissing(state) {
     // 1. EVENT TYPE
     // --------------------------------------------------------
 
-    if (!p.eventType) {
+    if (!p.eventType && !isDeferred(state, 'eventType')) {
 
         missing.push({
             field: 'eventType',
@@ -1650,8 +1779,10 @@ function calculateMissing(state) {
 // --------------------------------------------------------
 
 if (
-    !Array.isArray(p.equipment) ||
-    p.equipment.length === 0
+    !isDeferred(state, 'equipment') && (
+        !Array.isArray(p.equipment) ||
+        p.equipment.length === 0
+    )
 ) {
 
     missing.push({
@@ -1672,7 +1803,7 @@ if (
     p.eventType === 'sports'
 ) {
 
-    if (!p.eventLevel) {
+    if (!p.eventLevel && !isDeferred(state, 'eventLevel')) {
 
         missing.push({
             field: 'eventLevel',
@@ -1687,8 +1818,10 @@ if (
 ) {
 
     if (
-        p.guestCount === null ||
-        p.guestCount === undefined
+        !isDeferred(state, 'guestCount') && (
+            p.guestCount === null ||
+            p.guestCount === undefined
+        )
     ) {
 
         missing.push({
@@ -1705,7 +1838,7 @@ if (
     // 4. PERSONNEL
     // --------------------------------------------------------
 
-    if (!p.personnel) {
+    if (!p.personnel && !isDeferred(state, 'personnel')) {
 
         missing.push({
             field: 'personnel',
@@ -1722,7 +1855,8 @@ if (
 
     if (
         p.personnel === 'other' &&
-        !p.personnelDetails
+        !p.personnelDetails &&
+        !isDeferred(state, 'personnelDetails')
     ) {
 
         missing.push({
@@ -1738,7 +1872,7 @@ if (
     // 5. DATES + TIME
     // --------------------------------------------------------
 
-    if (!hasDateAndTime(p.dateStart)) {
+    if (!hasDateAndTime(p.dateStart) && !isDeferred(state, 'dateStart')) {
 
         missing.push({
             field: 'dateStart',
@@ -1749,7 +1883,7 @@ if (
     }
 
 
-    if (!hasDateAndTime(p.dateEnd)) {
+    if (!hasDateAndTime(p.dateEnd) && !isDeferred(state, 'dateEnd')) {
 
         missing.push({
             field: 'dateEnd',
@@ -1760,7 +1894,7 @@ if (
     }
 
 
-    if (!hasDateAndTime(p.readyDate)) {
+    if (!hasDateAndTime(p.readyDate) && !isDeferred(state, 'readyDate')) {
 
         missing.push({
             field: 'readyDate',
@@ -1775,7 +1909,7 @@ if (
     // 6. LOCATION
     // --------------------------------------------------------
 
-    if (!p.location) {
+    if (!p.location && !isDeferred(state, 'location')) {
 
         missing.push({
             field: 'location',
@@ -1790,7 +1924,7 @@ if (
     // 7. PLACE
     // --------------------------------------------------------
 
-    if (!p.place) {
+    if (!p.place && !isDeferred(state, 'place')) {
 
         missing.push({
             field: 'place',
@@ -1807,7 +1941,8 @@ if (
 
     if (
         p.place === 'indoor' &&
-        p.floor === null
+        p.floor === null &&
+        !isDeferred(state, 'floor')
     ) {
 
         missing.push({
@@ -1829,7 +1964,8 @@ if (
         p.place === 'indoor' &&
         typeof p.floor === 'number' &&
         p.floor >= 2 &&
-        !p.lift
+        !p.lift &&
+        !isDeferred(state, 'lift')
     ) {
 
         missing.push({
@@ -1856,7 +1992,8 @@ if (
         p.floor >= 2 &&
         p.lift === 'has_lift' &&
         p.equipment.includes('stage') &&
-        !p.liftDimensions
+        !p.liftDimensions &&
+        !isDeferred(state, 'liftDimensions')
     ) {
 
         missing.push({
@@ -1875,7 +2012,8 @@ if (
     // STAGE
     if (
         p.equipment.includes('stage') &&
-        !p.stageDetails
+        !p.stageDetails &&
+        !isDeferred(state, 'stageDetails')
     ) {
 
         missing.push({
@@ -1891,7 +2029,8 @@ if (
     if (
         p.equipment.includes('stage') &&
         p.place === 'outdoor' &&
-        !p.stageSurface
+        !p.stageSurface &&
+        !isDeferred(state, 'stageSurface')
     ) {
 
         missing.push({
@@ -1906,7 +2045,8 @@ if (
     // SOUND
     if (
         p.equipment.includes('sound') &&
-        !p.soundDetails
+        !p.soundDetails &&
+        !isDeferred(state, 'soundDetails')
     ) {
 
         missing.push({
@@ -1921,7 +2061,8 @@ if (
     // SOUND RIDER
     if (
         p.equipment.includes('sound') &&
-        !p.soundRider
+        !p.soundRider &&
+        !isDeferred(state, 'soundRider')
     ) {
 
         missing.push({
@@ -1936,7 +2077,8 @@ if (
     // BACKLINE
     if (
         p.equipment.includes('sound') &&
-        !p.backline
+        !p.backline &&
+        !isDeferred(state, 'backline')
     ) {
 
         missing.push({
@@ -1951,7 +2093,8 @@ if (
     // LIGHT
     if (
         p.equipment.includes('light') &&
-        !p.lightDetails
+        !p.lightDetails &&
+        !isDeferred(state, 'lightDetails')
     ) {
 
         missing.push({
@@ -1966,7 +2109,8 @@ if (
     // LIGHT FIXTURES
     if (
         p.equipment.includes('light') &&
-        !p.lightFixtures
+        !p.lightFixtures &&
+        !isDeferred(state, 'lightFixtures')
     ) {
 
         missing.push({
@@ -1984,7 +2128,8 @@ if (
     // или оставить на техническое решение специалистов MLK.
     if (
         p.equipment.includes('led') &&
-        !p.ledDetails
+        !p.ledDetails &&
+        !isDeferred(state, 'ledDetails')
     ) {
 
         missing.push({
@@ -1998,7 +2143,8 @@ if (
 
     if (
         p.equipment.includes('led') &&
-        !p.ledContent
+        !p.ledContent &&
+        !isDeferred(state, 'ledContent')
     ) {
 
         missing.push({
@@ -2012,7 +2158,8 @@ if (
 
     if (
         p.equipment.includes('led') &&
-        !p.ledSuspension
+        !p.ledSuspension &&
+        !isDeferred(state, 'ledSuspension')
     ) {
 
         missing.push({
@@ -2028,7 +2175,7 @@ if (
     // 12. MOUNT
     // --------------------------------------------------------
 
-    if (!p.mount) {
+    if (!p.mount && !isDeferred(state, 'mount')) {
 
         missing.push({
             field: 'mount',
@@ -2045,7 +2192,8 @@ if (
 
     if (
         p.mount === 'night' &&
-        !p.mountTime
+        !p.mountTime &&
+        !isDeferred(state, 'mountTime')
     ) {
 
         missing.push({
@@ -2061,7 +2209,7 @@ if (
     // 14. DEMOUNT
     // --------------------------------------------------------
 
-    if (!p.demount) {
+    if (!p.demount && !isDeferred(state, 'demount')) {
 
         missing.push({
             field: 'demount',
@@ -2078,7 +2226,8 @@ if (
 
     if (
         p.demount === 'deadline' &&
-        !p.demountTime
+        !p.demountTime &&
+        !isDeferred(state, 'demountTime')
     ) {
 
         missing.push({
@@ -2094,7 +2243,7 @@ if (
     // 16. ADDITIONAL SERVICES
     // --------------------------------------------------------
 
-    if (!p.additionalServices) {
+    if (!p.additionalServices && !isDeferred(state, 'additionalServices')) {
 
         missing.push({
             field: 'additionalServices',
@@ -2109,7 +2258,7 @@ if (
     // 17. SPECIAL CONDITIONS
     // --------------------------------------------------------
 
-    if (!p.specialConditions) {
+    if (!p.specialConditions && !isDeferred(state, 'specialConditions')) {
 
         missing.push({
             field: 'specialConditions',
@@ -3425,7 +3574,9 @@ function buildManagerSummary(
 
 
     lines.push(
-        'ЗАЯВКА MLK — ГОТОВА К ПОДГОТОВКЕ КП'
+        Object.keys(state.deferredFields || {}).length
+            ? 'ЗАЯВКА MLK — ЕСТЬ ПУНКТЫ ДЛЯ УТОЧНЕНИЯ'
+            : 'ЗАЯВКА MLK — ГОТОВА К ПОДГОТОВКЕ КП'
     );
 
     lines.push('');
@@ -3900,8 +4051,19 @@ function buildManagerSummary(
     }
 
 
+    const deferredEntries = Object.entries(state.deferredFields || {});
+    if (deferredEntries.length) {
+        lines.push('ПУНКТЫ, КОТОРЫЕ НУЖНО УТОЧНИТЬ:');
+        for (const [field, answer] of deferredEntries) {
+            lines.push(`• ${DEFERRED_FIELD_LABELS[field] || field}: ответ клиента — «${answer}»`);
+        }
+        lines.push('');
+    }
+
     lines.push(
-        'Статус: готово к подготовке КП'
+        deferredEntries.length
+            ? 'Статус: можно готовить предварительное КП; перечисленные пункты уточнить с клиентом.'
+            : 'Статус: готово к подготовке КП'
     );
 
 
@@ -4283,9 +4445,11 @@ function buildClientSummary(
     lines.push('');
 
 
-    lines.push(
-        'Все основные данные зафиксированы.'
-    );
+    if (Object.keys(state.deferredFields || {}).length) {
+        lines.push('Некоторые детали отмечены для уточнения с командой MLK.');
+    } else {
+        lines.push('Все основные данные зафиксированы.');
+    }
 
 
     lines.push(
@@ -5457,13 +5621,18 @@ addHistory(
             normalized.type === 'action';
 
 
+        let suppressControlledQuestion = false;
+
         if (!isAction) {
+
+            let expectedField = null;
+            suppressControlledQuestion = isConversationalMetaMessage(userText);
 
             try {
 
                 // Сначала определяем, какой вопрос сейчас ожидает
                 // Sales Engine. Это нужно ДО extraction.
-                const expectedField =
+                expectedField =
                     calculateMissing(state)[0]?.field || null;
 
 
@@ -5554,6 +5723,27 @@ addHistory(
                     }
                 }
 
+                // Понимаем распространённый профессиональный жаргон по смыслу,
+                // даже если extraction не вернул структурированное поле.
+                // «Фанера/под фанеру» в контексте артистов означает фонограммы.
+                if (
+                    expectedField === 'soundDetails' &&
+                    /фанер|фонограмм|под\s+фанер/i.test(userText)
+                ) {
+                    extracted.soundDetails = /в основном|преимущественно|большинств|почти все/i.test(userText)
+                        ? 'В основном используются фонограммы'
+                        : 'Используются фонограммы';
+                }
+
+                // Короткие и разговорные отрицательные ответы на вопрос о бэклайне
+                // — полноценный ответ. Принимаем также частые опечатки.
+                if (
+                    expectedField === 'backline' &&
+                    /^\s*(?:нет|не\s+(?:надо|нужн\w*|треб\w*|труб\w*|понадоб\w*)|не\s+треб\w*)\s*[.!?]*\s*$/i.test(userText)
+                ) {
+                    extracted.backline = 'not_required';
+                }
+
                 const previousLedDetails = state.project.ledDetails;
 
                 mergeProjectData(
@@ -5596,8 +5786,10 @@ addHistory(
                     const normalizedFloorText = userText.trim().toLowerCase().replace(/ё/g, 'е');
                     if (floorMatch) {
                         state.project.floor = Number(floorMatch[1]);
+                        if (state.deferredFields) delete state.deferredFields.floor;
                     } else if (wordFloors[normalizedFloorText] !== undefined) {
                         state.project.floor = wordFloors[normalizedFloorText];
+                        if (state.deferredFields) delete state.deferredFields.floor;
                     }
                 }
 
@@ -5608,6 +5800,7 @@ addHistory(
                     /\d+\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*\d+/i.test(userText)
                 ) {
                     state.project.liftDimensions = userText.trim();
+                    if (state.deferredFields) delete state.deferredFields.liftDimensions;
                 }
 
                 // Если клиент поручает решение MLK, это полноценный ответ,
@@ -5617,6 +5810,13 @@ addHistory(
                     /(?:вы\s*(?:сами\s*)?решите|решите\s*сами|значит.{0,25}вы\s*и\s*решите|на\s*ваше\s*усмотрение|вам\s*виднее|ваша\s*(?:же\s*)?сцена|ваш(?:а|е)?\s*(?:же\s*)?(?:экран|конструкция|решение)|на\s*вашей\s*стороне|определите\s*сами|оставим\s*на\s*вас)/i.test(userText)
                 ) {
                     state.project.ledSuspension = 'Способ установки определить специалистам MLK';
+                    if (state.deferredFields) delete state.deferredFields.ledSuspension;
+                }
+
+                // Если extraction не закрыл ожидаемое поле, сохраняем исходный ответ
+                // или отмечаем его для уточнения. Один и тот же вопрос не повторяем.
+                if (!suppressControlledQuestion) {
+                    preserveUnparsedAnswer(state, expectedField, userText);
                 }
 
             } catch (error) {
@@ -5625,6 +5825,11 @@ addHistory(
                     '⚠️ Sales Engine extraction error:',
                     error.message
                 );
+
+                // Даже при ошибке DeepSeek не возвращаем клиенту тот же вопрос.
+                if (!suppressControlledQuestion) {
+                    preserveUnparsedAnswer(state, expectedField, userText);
+                }
             }
         }
 
@@ -5784,7 +5989,7 @@ addHistory(
             String(assistantText || '').trim()
         );
 
-        const questionToAppend = controlledQuestion || '';
+        const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
 
         // Если Sales Engine всё ещё требует ответ, удаляем заявления модели
         // о завершении заявки/передаче на КП. Это предотвращает противоречие
