@@ -39,6 +39,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const {
     initStorage,
@@ -308,6 +309,9 @@ async function hydrateSalesState(
             salesStates.get(key);
 
         if (!state.deferredFields) state.deferredFields = {};
+        if (!state.confirmationStatus) state.confirmationStatus = {};
+        if (!state.applicationId) state.applicationId = crypto.randomUUID();
+        if (!state.applicationCode) state.applicationCode = `MLK-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
 
         if (
             clientName &&
@@ -368,7 +372,13 @@ async function persistSalesState(
 
 function createSalesState(clientId, clientName = '') {
 
+    const applicationId = crypto.randomUUID();
+    const applicationCode = `MLK-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+
     return {
+        applicationId,
+        applicationCode,
+
         client: {
             id: String(clientId || ''),
             name: clientName || ''
@@ -433,6 +443,9 @@ function createSalesState(clientId, clientName = '') {
         // Поля, на которые клиент уже ответил, но значение нельзя надёжно
         // разобрать. Не спрашиваем их повторно в этом диалоге.
         deferredFields: {},
+
+        // Подтверждённость значений: confirmed / tentative / unknown / not_required.
+        confirmationStatus: {},
 
         stage: 'greeting',
 
@@ -577,14 +590,18 @@ function cleanString(value) {
 
 
 function hasDateAndTime(value) {
+    if (!value) return false;
+    const normalized = String(value).trim();
+    return /^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}$/.test(normalized);
+}
 
-    if (!value) {
-        return false;
-    }
-
-    return /\d{1,2}:\d{2}/.test(
-        String(value)
-    );
+function parseIsoDateTime(value) {
+    const normalized = String(value || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?$/.test(normalized)) return null;
+    const date = normalized.slice(0, 10);
+    const time = normalized.match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '00:00';
+    const parsed = new Date(`${date}T${time.length === 4 ? '0' + time : time}:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 // Для даты начала/окончания достаточно известной календарной даты.
@@ -758,13 +775,8 @@ function normalizeNotRequired(value) {
 
 
 function displayProjectValue(value) {
-
-    if (
-        value === 'not_required'
-    ) {
-        return 'Не требуется';
-    }
-
+    if (value === 'not_required') return 'Не требуется';
+    if (value === 'unknown' || value === 'не знаю' || value === 'неизвестно') return 'Нужно уточнить';
     return value;
 }
 
@@ -835,34 +847,26 @@ function normalizeEquipment(value) {
 
 
 function getEventLabel(value) {
-
-    return EVENT_TYPES[value]?.label ||
-        value ||
-        'Не указано';
+    if (isUnknown(value)) return 'Нужно уточнить';
+    return EVENT_TYPES[value]?.label || value || 'Не указано';
 }
 
 
 function getLevelLabel(value) {
-
-    return LEVELS[value]?.label ||
-        value ||
-        'Не указано';
+    if (isUnknown(value)) return 'Нужно уточнить';
+    return LEVELS[value]?.label || value || 'Не указано';
 }
 
 
 function getPersonnelLabel(value) {
-
-    return PERSONNEL[value]?.label ||
-        value ||
-        'Не указано';
+    if (isUnknown(value)) return 'Нужно уточнить';
+    return PERSONNEL[value]?.label || value || 'Не указано';
 }
 
 
 function getPlaceLabel(value) {
-
-    return PLACES[value]?.label ||
-        value ||
-        'Не указано';
+    if (isUnknown(value)) return 'Нужно уточнить';
+    return PLACES[value]?.label || value || 'Не указано';
 }
 
 
@@ -1404,10 +1408,40 @@ function normalizeExtractedData(
 
 function mergeProjectData(
     state,
-    extracted
+    extracted,
+    sourceText = ''
 ) {
 
     if (!extracted) return;
+    if (!state.confirmationStatus) state.confirmationStatus = {};
+    const source = String(sourceText || '');
+    const hasUncertainty = /\b(?:возможно|наверное|вероятно|скорее всего|предварительно|примерно|ориентировочно|не уверен(?:а)?|не точно|пока не решили|пока не определили|может быть)\b/i.test(source);
+    const fieldContext = {
+        eventType: /мероприят|концерт|выставк|корпоратив|конференц|фестивал|формат/i,
+        eventLevel: /уровен|требован|высш|стандарт/i,
+        guestCount: /гост|человек|посетител|участник/i,
+        dateStart: /начал|старт|репетиц|дата/i,
+        dateEnd: /окончан|заверш|заканч|дата/i,
+        readyDate: /готовност|готово к|оборудован/i,
+        location: /адрес|площадк|город|улиц/i,
+        place: /улиц|помещени|зал|открыт|улице/i,
+        floor: /этаж/i,
+        lift: /лифт|лестниц|подъ[её]м/i,
+        liftDimensions: /лифт|размер/i,
+        personnel: /персонал|техник|монтажник|инженер/i,
+        stageDetails: /сцен|конструкц|крыша|ферм|подиум/i,
+        soundDetails: /звук|артист|групп|фонограмм|спикер/i,
+        lightDetails: /свет|подсвет|аплайтинг/i,
+        ledDetails: /led|экран|задник|пиксел/i,
+        mount: /монтаж|установк/i,
+        demount: /демонтаж|сняти/i
+    };
+    const assignStatus = (field, value) => {
+        if (value === 'unknown' || value === 'не знаю' || value === 'неизвестно') state.confirmationStatus[field] = 'unknown';
+        else if (value === 'not_required') state.confirmationStatus[field] = 'not_required';
+        else if (hasUncertainty && fieldContext[field]?.test(source)) state.confirmationStatus[field] = 'tentative';
+        else state.confirmationStatus[field] = 'confirmed';
+    };
 
     // Client
     if (
@@ -1477,6 +1511,7 @@ function mergeProjectData(
 
             p[field] =
                 extracted[field];
+            assignStatus(field, extracted[field]);
 
             if (state.deferredFields) {
                 delete state.deferredFields[field];
@@ -1518,6 +1553,8 @@ function mergeProjectData(
                     ...newEquipment
                 ])
             ];
+        const equipmentUncertain = hasUncertainty && /сцен|конструкц|звук|акустик|свет|экран|оборудован|ферм|подиум/i.test(source);
+        state.confirmationStatus.equipment = equipmentUncertain ? 'tentative' : 'confirmed';
 
         if (p.equipment.length && state.deferredFields) {
             delete state.deferredFields.equipment;
@@ -1587,6 +1624,28 @@ function cleanDependentFields(state) {
             delete state.deferredFields.lift;
             delete state.deferredFields.liftDimensions;
         }
+        if (state.confirmationStatus) {
+            delete state.confirmationStatus.floor;
+            delete state.confirmationStatus.lift;
+            delete state.confirmationStatus.liftDimensions;
+        }
+    }
+
+
+    // Первый этаж: вопросы о лифте и его размерах не нужны.
+    // Если этаж исправили на первый, убираем ранее сохранённые
+    // ответы о лифте, чтобы они не влияли на дальнейшую квалификацию.
+    if (p.place === 'indoor' && Number(p.floor) === 1) {
+        p.lift = null;
+        p.liftDimensions = null;
+        if (state.deferredFields) {
+            delete state.deferredFields.lift;
+            delete state.deferredFields.liftDimensions;
+        }
+        if (state.confirmationStatus) {
+            delete state.confirmationStatus.lift;
+            delete state.confirmationStatus.liftDimensions;
+        }
     }
 
 
@@ -1605,14 +1664,12 @@ function cleanDependentFields(state) {
     // --------------------------------------------------------
     // LIFT DIMENSIONS
     // --------------------------------------------------------
-    // Размеры лифта нужны только при:
-    // 2+ этаж + грузовой лифт + сценические конструкции
+    // Размеры нужны только при грузовом лифте и сценических конструкциях.
 
     if (
         p.place !== 'indoor' ||
-        typeof p.floor !== 'number' ||
-        p.floor < 2 ||
         p.lift !== 'has_lift' ||
+        !Array.isArray(p.equipment) ||
         !p.equipment.includes('stage')
     ) {
         p.liftDimensions = null;
@@ -1630,6 +1687,11 @@ function cleanDependentFields(state) {
             delete state.deferredFields.stageDetails;
             delete state.deferredFields.stageSurface;
             delete state.deferredFields.liftDimensions;
+        }
+        if (state.confirmationStatus) {
+            delete state.confirmationStatus.stageDetails;
+            delete state.confirmationStatus.stageSurface;
+            delete state.confirmationStatus.liftDimensions;
         }
     }
 
@@ -1659,6 +1721,11 @@ function cleanDependentFields(state) {
             delete state.deferredFields.backline;
             delete state.deferredFields.soundRider;
         }
+        if (state.confirmationStatus) {
+            delete state.confirmationStatus.soundDetails;
+            delete state.confirmationStatus.backline;
+            delete state.confirmationStatus.soundRider;
+        }
     }
 
 
@@ -1672,6 +1739,10 @@ function cleanDependentFields(state) {
         if (state.deferredFields) {
             delete state.deferredFields.lightDetails;
             delete state.deferredFields.lightFixtures;
+        }
+        if (state.confirmationStatus) {
+            delete state.confirmationStatus.lightDetails;
+            delete state.confirmationStatus.lightFixtures;
         }
     }
 
@@ -1688,6 +1759,11 @@ function cleanDependentFields(state) {
             delete state.deferredFields.ledDetails;
             delete state.deferredFields.ledContent;
             delete state.deferredFields.ledSuspension;
+        }
+        if (state.confirmationStatus) {
+            delete state.confirmationStatus.ledDetails;
+            delete state.confirmationStatus.ledContent;
+            delete state.confirmationStatus.ledSuspension;
         }
     }
 
@@ -1761,13 +1837,18 @@ function preserveUnparsedAnswer(state, field, rawAnswer) {
     // нормализованный результат исходной фразой клиента.
     if (state.project && state.project[field] !== null &&
         state.project[field] !== undefined && state.project[field] !== '') {
-        return false;
+        // Не затираем прежнее значение непонятным ответом, но и не теряем
+        // сам факт уточнения: менеджер увидит, что клиент поправлял это поле.
+        deferField(state, field, `Клиент уточнил: ${answer}. Нужно проверить и при необходимости обновить значение.`);
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus[field] = 'tentative';
+        return true;
     }
 
     const deferredFields = new Set([
         'eventType', 'equipment', 'eventLevel', 'guestCount',
         'personnel', 'place', 'floor', 'lift',
-        'dateStart', 'dateEnd', 'readyDate'
+        'dateStart', 'dateEnd', 'readyDate', 'dateConflict'
     ]);
     const rawTextFields = new Set([
         'location', 'liftDimensions', 'personnelDetails',
@@ -1790,6 +1871,8 @@ function preserveUnparsedAnswer(state, field, rawAnswer) {
 
     if (rawTextFields.has(field)) {
         state.project[field] = answer;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus[field] = 'tentative';
         if (state.deferredFields) delete state.deferredFields[field];
         console.log(`[SALES] Raw answer saved to ${field}`);
         return true;
@@ -1807,6 +1890,8 @@ const DEFERRED_FIELD_LABELS = {
     dateStart: 'Дата и время начала',
     dateEnd: 'Дата и время окончания',
     readyDate: 'Время готовности оборудования',
+    dateConflict: 'Проверка последовательности дат начала и окончания',
+    ledDetails: 'Тип, расположение и размеры LED-экранов',
     place: 'Место проведения: улица или помещение',
     floor: 'Этаж площадки',
     lift: 'Тип лифта / способ подъёма',
@@ -1956,38 +2041,30 @@ if (
 
 
     // --------------------------------------------------------
-    // 5. DATES + TIME
+    // 5. DATES + TIME — one combined question for all missing pieces
     // --------------------------------------------------------
 
-    if (!hasDateOrDateTime(p.dateStart) && !isDeferred(state, 'dateStart')) {
+    const missingDateParts = [];
+    if (!isDeferred(state, 'dateStart') && !hasDateAndTime(p.dateStart)) {
+        missingDateParts.push({ field: 'dateStart', label: 'начало мероприятия/репетиции', value: p.dateStart });
+    }
+    if (!isDeferred(state, 'dateEnd') && !hasDateAndTime(p.dateEnd)) {
+        missingDateParts.push({ field: 'dateEnd', label: 'окончание мероприятия', value: p.dateEnd });
+    }
+    if (!isDeferred(state, 'readyDate') && !hasDateAndTime(p.readyDate)) {
+        missingDateParts.push({ field: 'readyDate', label: 'готовность оборудования', value: p.readyDate });
+    }
 
-        missing.push({
-            field: 'dateStart',
-            action: 'ask_date_start'
-        });
-
+    if (missingDateParts.length) {
+        missing.push({ field: 'dateTimes', action: 'ask_date_times', items: missingDateParts });
         return missing;
     }
 
-
-    if (!hasDateOrDateTime(p.dateEnd) && !isDeferred(state, 'dateEnd')) {
-
-        missing.push({
-            field: 'dateEnd',
-            action: 'ask_date_end'
-        });
-
-        return missing;
-    }
-
-
-    if (!hasDateAndTime(p.readyDate) && !isDeferred(state, 'readyDate')) {
-
-        missing.push({
-            field: 'readyDate',
-            action: 'ask_ready_date'
-        });
-
+    // Не подтверждаем заявку, если окончание стоит раньше начала.
+    const startDate = parseIsoDateTime(p.dateStart);
+    const endDate = parseIsoDateTime(p.dateEnd);
+    if (startDate && endDate && endDate < startDate && !isDeferred(state, 'dateConflict')) {
+        missing.push({ field: 'dateConflict', action: 'ask_date_conflict' });
         return missing;
     }
 
@@ -2049,8 +2126,7 @@ if (
 
     if (
         p.place === 'indoor' &&
-        typeof p.floor === 'number' &&
-        p.floor >= 2 &&
+        Number(p.floor) > 1 &&
         !p.lift &&
         !isDeferred(state, 'lift')
     ) {
@@ -2067,18 +2143,17 @@ if (
     // --------------------------------------------------------
     // 10. LIFT DIMENSIONS
     // --------------------------------------------------------
-    // Только:
-    // 2+ этаж
-    // + грузовой лифт
-    // + сценические конструкции
+    // Размеры уточняем только если площадка выше первого этажа,
+    // есть грузовой лифт и в заявке присутствуют сценические конструкции.
+    // При неизвестном этаже сначала уточняем этаж; на первом этаже
+    // вопросы о лифте и его размерах не задаём.
     // --------------------------------------------------------
 
     if (
         p.place === 'indoor' &&
-        typeof p.floor === 'number' &&
-        p.floor >= 2 &&
+        Number(p.floor) > 1 &&
         p.lift === 'has_lift' &&
-        p.equipment.includes('stage') &&
+        Array.isArray(p.equipment) && p.equipment.includes('stage') &&
         !p.liftDimensions &&
         !isDeferred(state, 'liftDimensions')
     ) {
@@ -2215,7 +2290,7 @@ if (
     // или оставить на техническое решение специалистов MLK.
     if (
         p.equipment.includes('led') &&
-        !p.ledDetails &&
+        (!p.ledDetails || (!hasExplicitDimensions(p.ledDetails) && !explicitlyUnknownDimensions(p.ledDetails))) &&
         !isDeferred(state, 'ledDetails')
     ) {
 
@@ -2326,35 +2401,8 @@ if (
     }
 
 
-    // --------------------------------------------------------
-    // 16. ADDITIONAL SERVICES
-    // --------------------------------------------------------
-
-    if (!p.additionalServices && !isDeferred(state, 'additionalServices')) {
-
-        missing.push({
-            field: 'additionalServices',
-            action: 'text_question'
-        });
-
-        return missing;
-    }
-
-
-    // --------------------------------------------------------
-    // 17. SPECIAL CONDITIONS
-    // --------------------------------------------------------
-
-    if (!p.specialConditions && !isDeferred(state, 'specialConditions')) {
-
-        missing.push({
-            field: 'specialConditions',
-            action: 'text_question'
-        });
-
-        return missing;
-    }
-
+    // Дополнительные услуги и особые условия фиксируем, если клиент упоминает их сам.
+    // Отдельные финальные вопросы по этим темам намеренно не задаём.
 
     return missing;
 }
@@ -2681,6 +2729,7 @@ async function callDeepSeek(
 
     const content =
         data?.choices?.[0]?.message?.content;
+    const finishReason = data?.choices?.[0]?.finish_reason || null;
 
 
     if (!content) {
@@ -2691,7 +2740,8 @@ async function callDeepSeek(
     }
 
 
-    return String(content).trim();
+    const cleanContent = String(content).trim();
+    return options.returnMeta ? { content: cleanContent, finishReason } : cleanContent;
 }
 
 
@@ -3269,6 +3319,18 @@ function buildControlledQuestion(
         case 'personnelDetails':
             return 'Уточните, пожалуйста, какой именно персонал вам требуется.';
 
+        case 'dateTimes': {
+            const items = first.items || [];
+            const lines = items.map(item => {
+                const hasDate = hasDateOrDateTime(item.value);
+                return `• ${item.label}: ${hasDate ? 'укажите время' : 'укажите дату и время'}`;
+            });
+            return `Чтобы корректно спланировать работы, уточните, пожалуйста, недостающие даты и время:\n${lines.join('\n')}\n\nМожно ответить одним сообщением, например: «начало — 5 декабря в 10:00, окончание — 8 декабря в 18:00, оборудование готово — 4 декабря в 17:00».`;
+        }
+
+        case 'dateConflict':
+            return 'Похоже, дата окончания указана раньше даты начала. Проверьте, пожалуйста, даты начала и окончания и напишите корректный вариант.';
+
         case 'dateStart':
             return 'Дата и время начала мероприятия/репетиции?';
 
@@ -3489,6 +3551,8 @@ JS Sales Engine.
 10. Общайся естественно, коротко и по делу.
 11. Не начинай каждый ответ словом «Принял». Чередуй естественные подтверждения: «Хорошо», «Отлично», «Записал», «Понял вас», «Зафиксировал». Не добавляй подтверждение, если оно не нужно.
 12. Если клиент после подведения итога задаёт вопрос, ответь на него по существу и не отправляй итог повторно, если клиент сам не попросил повторить его.
+13. На вопросы о компании и опыте MLK опирайся только на реальные сведения из переданного портфолио. Если клиент повторяет вопрос, не повторяй дословно предыдущий ответ: коротко уточни, какую именно информацию он хочет узнать, либо предложи передать вопрос менеджеру. Не выдумывай проекты, артистов, площадки и результаты.
+14. Формулируй законченные сообщения. Не обрывай фразу на вводных конструкциях вроде «как только», «тогда», «поэтому», «если хотите»; если не хватает данных для содержательного ответа, используй короткую законченную формулировку.
 
 11. КРИТИЧЕСКИ ВАЖНО: ты не имеешь права создавать
 описания, значения, характеристики или классификации,
@@ -3620,13 +3684,23 @@ ${PORTFOLIO_TEXT}
 
     try {
 
-        return await callDeepSeek(
+        const response = await callDeepSeek(
             messages,
             {
                 temperature: 0.4,
-                max_tokens: 700
+                max_tokens: 700,
+                returnMeta: true
             }
         );
+
+        const content = String(response?.content || '').trim();
+        const danglingEnding = /(?:как только|тогда|поэтому|если хотите|поскольку|так как|для того чтобы|в случае если|и если|что касается|а также|например)\s*[,—–-]?$/i.test(content);
+        if (response?.finishReason === 'length' || danglingEnding) {
+            console.warn('[SALES] DeepSeek response looks truncated; replacing with a complete short acknowledgement.');
+            return 'Спасибо, я зафиксировал информацию.';
+        }
+
+        return content;
 
     } catch (error) {
 
@@ -3664,6 +3738,35 @@ function buildManagerSummary(
             ? 'ЗАЯВКА MLK — ЕСТЬ ПУНКТЫ ДЛЯ УТОЧНЕНИЯ'
             : 'ЗАЯВКА MLK — ГОТОВА К ПОДГОТОВКЕ КП'
     );
+    lines.push(`Номер заявки: ${state.applicationCode || 'не присвоен'}`);
+    lines.push(`Внутренний ID: ${state.applicationId || 'не присвоен'}`);
+
+    const statusLabels = {
+        eventType: 'Формат', eventLevel: 'Уровень требований', guestCount: 'Количество гостей',
+        dateStart: 'Дата начала', dateEnd: 'Дата окончания', readyDate: 'Готовность оборудования',
+        location: 'Адрес площадки', place: 'Тип площадки', floor: 'Этаж', lift: 'Лифт',
+        liftDimensions: 'Размеры лифта', equipment: 'Оборудование', personnel: 'Персонал',
+        stageDetails: 'Сценические конструкции', soundDetails: 'Звуковая программа',
+        lightDetails: 'Задачи по свету', ledDetails: 'LED-экраны', mount: 'Монтаж', demount: 'Демонтаж'
+    };
+    const statusDisplayValue = field => {
+        const value = state.project[field];
+        if (field === 'eventType') return getEventLabel(value);
+        if (field === 'eventLevel') return getLevelLabel(value);
+        if (field === 'personnel') return getPersonnelLabel(value);
+        if (field === 'place') return getPlaceLabel(value);
+        if (field === 'equipment') return getEquipmentLabels(value).join(', ') || 'уточнить';
+        return displayProjectValue(value) || 'уточнить';
+    };
+    const tentativeStatuses = Object.entries(state.confirmationStatus || {}).filter(([, status]) => status === 'tentative');
+    const unknownStatuses = Object.entries(state.confirmationStatus || {}).filter(([, status]) => status === 'unknown');
+    const notRequiredStatuses = Object.entries(state.confirmationStatus || {}).filter(([, status]) => status === 'not_required');
+    if (tentativeStatuses.length || unknownStatuses.length || notRequiredStatuses.length) {
+        lines.push('СТАТУСЫ ПОДТВЕРЖДЕНИЯ:');
+        for (const [field] of tentativeStatuses) lines.push(`• Предварительно: ${statusLabels[field] || field} — ${statusDisplayValue(field)}`);
+        for (const [field] of unknownStatuses) lines.push(`• Неизвестно / уточнить: ${statusLabels[field] || field}`);
+        for (const [field] of notRequiredStatuses) lines.push(`• Не требуется: ${statusLabels[field] || field}`);
+    }
 
     lines.push('');
 
@@ -4184,7 +4287,7 @@ function buildClientSummary(
 
 
     lines.push(
-        `${name}давайте подведём итог по вашей заявке:`
+        `${name}давайте подведём итог по вашей заявке № ${state.applicationCode || 'MLK — номер уточняется'}:`
     );
 
 
@@ -4236,22 +4339,22 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Дата начала: ${p.dateStart}`
+        `• Дата начала: ${p.dateStart || 'уточним с вами'}`
     );
 
 
     lines.push(
-        `• Дата окончания: ${p.dateEnd}`
+        `• Дата окончания: ${p.dateEnd || 'уточним с вами'}`
     );
 
 
     lines.push(
-        `• Готовность оборудования: ${p.readyDate}`
+        `• Готовность оборудования: ${p.readyDate || 'уточним с вами'}`
     );
 
 
     lines.push(
-        `• Адрес: ${p.location}`
+        `• Адрес: ${p.location || 'уточним с вами'}`
     );
 
 
@@ -4265,7 +4368,7 @@ function buildClientSummary(
     ) {
 
         lines.push(
-            `• Этаж: ${p.floor}`
+            `• Этаж: ${p.floor === 'unknown' ? 'нужно уточнить' : p.floor}`
         );
     }
 
@@ -4281,8 +4384,10 @@ function buildClientSummary(
                     : p.lift === 'passenger_lift'
                         ? 'Есть только пассажирский лифт'
                         : p.lift === 'stairs'
-                            ? 'Носить по лестнице'
-                            : p.lift
+                            ? 'Оборудование будут поднимать по лестнице'
+                            : p.lift === 'unknown'
+                                ? 'Нужно уточнить'
+                                : p.lift
             }`
         );
     }
@@ -4495,7 +4600,8 @@ function buildClientSummary(
     lines.push(
         `• Монтаж: ${
             MOUNT[p.mount]?.label ||
-            p.mount
+            displayProjectValue(p.mount) ||
+            'уточним с вами'
         }`
     );
 
@@ -4513,7 +4619,8 @@ function buildClientSummary(
     lines.push(
         `• Демонтаж: ${
             DEMOUNT[p.demount]?.label ||
-            p.demount
+            displayProjectValue(p.demount) ||
+            'уточним с вами'
         }`
     );
 
@@ -4531,8 +4638,8 @@ function buildClientSummary(
     lines.push('');
 
 
-    if (Object.keys(state.deferredFields || {}).length) {
-        lines.push('Некоторые детали отмечены для уточнения с командой MLK.');
+    if (Object.keys(state.deferredFields || {}).length || Object.values(state.confirmationStatus || {}).includes('tentative')) {
+        lines.push('Некоторые детали пока предварительные или требуют уточнения с командой MLK.');
     } else {
         lines.push('Все основные данные зафиксированы.');
     }
@@ -5020,6 +5127,8 @@ function applyAction(
 
         state.project.eventType =
             value;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.eventType = 'confirmed';
 
         return actionToText(
             message
@@ -5035,6 +5144,8 @@ function applyAction(
 
         state.project.eventLevel =
             value;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.eventLevel = 'confirmed';
 
         return actionToText(
             message
@@ -5050,6 +5161,8 @@ function applyAction(
 
         state.project.personnel =
             value;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.personnel = 'confirmed';
 
         return actionToText(
             message
@@ -5065,6 +5178,8 @@ function applyAction(
 
         state.project.place =
             value;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.place = 'confirmed';
 
         return actionToText(
             message
@@ -5086,6 +5201,8 @@ function applyAction(
 
             state.project.lift =
                 value;
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.lift = value === 'unknown' ? 'unknown' : 'confirmed';
 
             return actionToText(
                 message
@@ -5113,6 +5230,8 @@ function applyAction(
 
                 state.project.equipment =
                     equipment;
+                state.confirmationStatus = state.confirmationStatus || {};
+                state.confirmationStatus.equipment = 'confirmed';
 
                 return actionToText(
                     message
@@ -5128,6 +5247,8 @@ function applyAction(
 
             state.project.equipment =
                 [value];
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.equipment = 'confirmed';
 
             return actionToText(
                 message
@@ -5154,6 +5275,8 @@ function applyAction(
 
             state.project.soundRider =
                 'not_required';
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.soundRider = 'not_required';
 
             state.lastAction =
                 'ask_sound_rider_no';
@@ -5181,6 +5304,8 @@ function applyAction(
 
             state.project.lightFixtures =
                 'not_required';
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.lightFixtures = 'not_required';
 
             state.lastAction =
                 'ask_light_fixtures_no';
@@ -5198,6 +5323,8 @@ function applyAction(
 
         state.project.mount =
             value;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.mount = 'confirmed';
 
         return actionToText(
             message
@@ -5213,6 +5340,8 @@ function applyAction(
 
         state.project.demount =
             value;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.demount = 'confirmed';
 
         return actionToText(
             message
@@ -5228,6 +5357,8 @@ function applyAction(
 
             state.project.dateStart =
                 String(value);
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.dateStart = 'confirmed';
 
             return `Дата начала: ${value}`;
         }
@@ -5242,6 +5373,8 @@ function applyAction(
 
             state.project.dateEnd =
                 String(value);
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.dateEnd = 'confirmed';
 
             return `Дата окончания: ${value}`;
         }
@@ -5256,6 +5389,8 @@ function applyAction(
 
             state.project.readyDate =
                 String(value);
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.readyDate = 'confirmed';
 
             return `Дата готовности оборудования: ${value}`;
         }
@@ -5306,7 +5441,8 @@ async function processFileMessage(
 
         mergeProjectData(
             state,
-            extracted
+            extracted,
+            message.fileText
         );
 
         cleanDependentFields(
@@ -5329,13 +5465,19 @@ async function processFileMessage(
 
 function varyAcknowledgement(text, state) {
     const source = String(text || '');
-    const match = source.match(/^\s*Принял([,!:—–-]?)\s*/i);
+    const match = source.match(/^\s*(Принял|Хорошо|Отлично|Записал|Понял вас|Понял|Зафиксировал)([,!:—–-]?)\s*/i);
     if (!match) return source;
 
     const variants = ['Хорошо', 'Отлично', 'Записал', 'Понял вас', 'Зафиксировал'];
-    const index = Math.max(0, Number(state?.history?.length || 0)) % variants.length;
-    const punctuation = match[1] || ',';
-    return variants[index] + punctuation + source.slice(match[0].length);
+    const recent = (state?.history || []).slice(-8).filter(item => item.role === 'assistant').map(item => {
+        const found = String(item.content || item.text || '').match(/^\s*(Хорошо|Отлично|Записал|Понял вас|Зафиксировал|Принял)(?=[,!:—–-]|\s|$)/i);
+        return found ? found[1].toLowerCase() : '';
+    }).filter(Boolean);
+    const available = variants.filter(value => !recent.includes(value.toLowerCase()));
+    const choices = available.length ? available : variants;
+    const index = Math.max(0, Number(state?.history?.length || 0)) % choices.length;
+    const punctuation = match[2] || ',';
+    return choices[index] + punctuation + source.slice(match[0].length);
 }
 
 
@@ -5432,6 +5574,30 @@ function prepareResult(
                 )
                 : null
     };
+}
+
+
+// ============================================================
+// INFER FIELD FOR LATE CORRECTIONS
+// ============================================================
+
+function inferCorrectionField(state, text) {
+    const value = String(text || '').trim().toLowerCase().replace(/ё/g, 'е');
+    if (!value) return null;
+    if (/(?:размер\w*.{0,20}лифт|лифт.{0,35}\d+\s*(?:м|метр)?\s*(?:×|х|x|на)\s*\d+)/i.test(value)) return 'liftDimensions';
+    if (/\bлифт\b|грузов\s+лифт|пассажирск\s+лифт|по лестниц/i.test(value)) return 'lift';
+    if (/демонтаж|демонтир|сняти\w*/i.test(value)) return 'demount';
+    if (/монтаж|монтир|установк\w*/i.test(value)) return 'mount';
+    if (/led|светодиодн\w* экран|\bэкран\b|пиксел/i.test(value)) return 'ledDetails';
+    if (/\b(?:гост\w*|человек\w*|участник\w*)\b/i.test(value)) return 'guestCount';
+    if (/окончан\w* мероприяти|дата окончания|заканчива\w*|закончится|по \d{1,2}\s+(?:январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр)/i.test(value)) return 'dateEnd';
+    if (/начал\w* мероприяти|дата начала|старт\w* мероприяти|репетиц/i.test(value)) return 'dateStart';
+    if (/готовност\w* оборудован|оборудован\w* готов\w*/i.test(value)) return 'readyDate';
+    if (/адрес|место проведения|площадк\w* находится/i.test(value)) return 'location';
+    if (/этаж/i.test(value)) return 'floor';
+    if (/сцен\w* конструкц|ферм\w*|подиум|крыша сцены/i.test(value)) return 'stageDetails';
+    if (/персонал|техник\w*|монтажник\w*/i.test(value)) return 'personnel';
+    return null;
 }
 
 
@@ -5626,6 +5792,8 @@ addHistory(
         }
 
 
+        const applicationBeforeMessage = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus });
+
         // --------------------------------------------------------
         // OTHER ACTIONS
         // --------------------------------------------------------
@@ -5743,7 +5911,7 @@ addHistory(
                 // Сначала определяем, какой вопрос сейчас ожидает
                 // Sales Engine. Это нужно ДО extraction.
                 expectedField =
-                    calculateMissing(state)[0]?.field || null;
+                    calculateMissing(state)[0]?.field || inferCorrectionField(state, userText);
 
 
                 const extracted =
@@ -5858,8 +6026,13 @@ addHistory(
 
                 mergeProjectData(
                     state,
-                    extracted
+                    extracted,
+                    userText
                 );
+
+                if (expectedField === 'ledDetails' && explicitlyUnknownDimensions(userText)) {
+                    deferField(state, 'ledDetails', `Размеры LED-экрана пока неизвестны; ответ клиента: ${userText}`);
+                }
 
                 // Извлекаем даты, условия монтажа/демонтажа и поздние уточнения лифта
                 // непосредственно из формулировки клиента, не полагаясь только на JSON DeepSeek.
@@ -5927,9 +6100,19 @@ addHistory(
                     if (state.deferredFields) delete state.deferredFields.ledSuspension;
                 }
 
-                // Если extraction не закрыл ожидаемое поле, сохраняем исходный ответ
-                // или отмечаем его для уточнения. Один и тот же вопрос не повторяем.
-                if (!suppressControlledQuestion) {
+                // Если клиент ответил на общий вопрос о датах, не задаём тот же вопрос
+                // повторно: нераспознанные части помечаем как требующие ручного уточнения.
+                if (expectedField === 'dateTimes') {
+                    for (const field of ['dateStart', 'dateEnd', 'readyDate']) {
+                        if (!hasDateAndTime(state.project[field]) && !isDeferred(state, field)) {
+                            deferField(state, field, `Требуется уточнить дату/время; ответ клиента: ${userText}`);
+                        }
+                    }
+                } else if (expectedField === 'dateConflict') {
+                    const startDate = parseIsoDateTime(state.project.dateStart);
+                    const endDate = parseIsoDateTime(state.project.dateEnd);
+                    if (startDate && endDate && endDate < startDate) deferField(state, 'dateConflict', userText);
+                } else if (!suppressControlledQuestion) {
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
 
@@ -6078,14 +6261,19 @@ addHistory(
 
         let assistantText = '';
 
+        const normalizedUserQuestion = String(userText || '').trim().toLowerCase().replace(/[?!.,]+$/g, '');
+        const repeatedPortfolioQuestion = intent === 'portfolio_question' && (state.history || []).slice(0, -1).some(item =>
+            item.role === 'user' &&
+            String(item.content || item.text || '').trim().toLowerCase().replace(/[?!.,]+$/g, '') === normalizedUserQuestion &&
+            normalizedUserQuestion.length > 8
+        );
 
         try {
-
-            assistantText =
-                await generateAssistantText(
-                    state,
-                    userText
-                );
+            if (repeatedPortfolioQuestion) {
+                assistantText = 'Я уже отвечал на этот вопрос и не хочу повторяться или додумывать детали. Если нужны конкретные примеры проектов, площадок или мероприятий, могу передать этот вопрос менеджеру MLK.';
+            } else {
+                assistantText = await generateAssistantText(state, userText);
+            }
 
         } catch (error) {
 
@@ -6121,6 +6309,13 @@ addHistory(
         );
 
         const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
+        const applicationChanged = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus }) !== applicationBeforeMessage;
+
+        // Если заявка уже собрана и клиент уточнил/исправил данные, повторяем полный итог.
+        // Вопросы о компании/портфолио без изменения заявки под это правило не попадают.
+        if (!calculateMissing(state).length && applicationChanged && !['manager_request', 'out_of_scope'].includes(intent)) {
+            finalAssistantText = buildClientSummary(state);
+        }
 
         // Если Sales Engine всё ещё требует ответ, удаляем заявления модели
         // о завершении заявки/передаче на КП. Это предотвращает противоречие
@@ -6135,7 +6330,7 @@ addHistory(
                 .trim();
         }
 
-        if (questionToAppend) {
+        if (questionToAppend && !(applicationChanged && !calculateMissing(state).length)) {
             finalAssistantText = [
                 finalAssistantText,
                 questionToAppend
