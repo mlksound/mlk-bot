@@ -587,6 +587,93 @@ function hasDateAndTime(value) {
     );
 }
 
+// Для даты начала/окончания достаточно известной календарной даты.
+// Не придумываем время, если клиент сообщил только диапазон дат.
+function hasDateOrDateTime(value) {
+    if (!value) return false;
+    return /^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?$/.test(String(value).trim());
+}
+
+function parseRussianDateRange(text) {
+    const value = String(text || '').toLowerCase().replace(/ё/g, 'е');
+    const months = {
+        января: 1, январь: 1, январе: 1,
+        февраля: 2, февраль: 2, феврале: 2,
+        марта: 3, март: 3, марте: 3,
+        апреля: 4, апрель: 4, апреле: 4,
+        мая: 5, май: 5, мае: 5,
+        июня: 6, июнь: 6, июне: 6,
+        июля: 7, июль: 7, июле: 7,
+        августа: 8, август: 8, августе: 8,
+        сентября: 9, сентябрь: 9, сентябре: 9,
+        октября: 10, октябрь: 10, октябре: 10,
+        ноября: 11, ноябрь: 11, ноябре: 11,
+        декабря: 12, декабрь: 12, декабре: 12
+    };
+    const monthPattern = Object.keys(months).join('|');
+    const re = new RegExp('(?:с|с\\s*)\\s*(\\d{1,2})\\s+(' + monthPattern + ')(?:\\s+(\\d{4}))?\\s+(?:по|до|—|-)\\s*(\\d{1,2})(?:\\s+(' + monthPattern + '))?(?:\\s+(\\d{4}))?', 'i');
+    const m = value.match(re);
+    if (!m) return null;
+    const startDay = Number(m[1]);
+    const startMonth = months[m[2]];
+    const endDay = Number(m[4]);
+    const endMonth = m[5] ? months[m[5]] : startMonth;
+    const now = new Date();
+    let startYear = Number(m[3] || m[6] || now.getFullYear());
+    let endYear = Number(m[6] || m[3] || startYear);
+    if (!m[3] && !m[6]) {
+        const startCandidate = new Date(startYear, startMonth - 1, startDay);
+        if (startCandidate < new Date(now.getFullYear(), now.getMonth(), now.getDate())) startYear += 1;
+        endYear = startYear;
+        if (endMonth < startMonth) endYear += 1;
+    } else if (!m[6] && endMonth < startMonth) {
+        endYear = startYear + 1;
+    }
+    const iso = (y, mo, d) => `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    return { start: iso(startYear, startMonth, startDay), end: iso(endYear, endMonth, endDay) };
+}
+
+function applyDirectContextualAnswers(state, text) {
+    const value = String(text || '').trim();
+    const lower = value.toLowerCase().replace(/ё/g, 'е');
+    if (!value) return;
+
+    // Диапазон дат из первого описания проекта: «с 5 декабря по 12».
+    const range = parseRussianDateRange(value);
+    if (range) {
+        if (!hasDateOrDateTime(state.project.dateStart)) state.project.dateStart = range.start;
+        if (!hasDateOrDateTime(state.project.dateEnd)) state.project.dateEnd = range.end;
+        if (state.deferredFields) {
+            delete state.deferredFields.dateStart;
+            delete state.deferredFields.dateEnd;
+        }
+    }
+
+    // Сохраняем монтаж за день до события и демонтаж после окончания,
+    // даже если клиент сообщил это в первом длинном сообщении.
+    if (/(?:монтаж|монтир\w*|установк\w*).{0,100}за день(?:\s+до)?/i.test(lower)) {
+        state.project.mount = state.project.mount || 'any';
+        state.project.mountTime = state.project.mountTime || 'За день до начала мероприятия';
+        if (state.deferredFields) { delete state.deferredFields.mount; delete state.deferredFields.mountTime; }
+    }
+    if (/(?:демонтаж|демонтир\w*|сняти\w*).{0,120}(?:сразу после|после окончания|после конца|около\s*\d{1,2}(?::\d{2})?)/i.test(lower)) {
+        state.project.demount = state.project.demount || 'deadline';
+        const timeMatch = lower.match(/(?:около|примерно|предварительно около)\s*(\d{1,2}(?::\d{2})?)/i);
+        state.project.demountTime = state.project.demountTime || (timeMatch ? `Сразу после окончания мероприятия, ориентировочно ${timeMatch[1]}` : 'Сразу после окончания мероприятия');
+        if (state.deferredFields) { delete state.deferredFields.demount; delete state.deferredFields.demountTime; }
+    }
+
+    // Позднее уточнение лифта: «он есть 3 на 2 метра» должно обновлять
+    // и тип лифта, и размеры, даже если воронка уже дошла до итогов.
+    const historyText = (state.history || []).slice(-10).map(x => `${x.role || ''} ${x.text || x.content || ''}`).join(' ');
+    const dims = value.match(/(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?/i);
+    if (dims && /(?:лифт|грузов|подъем|подъем|размеры лифта)/i.test(historyText) && /(?:есть|имеется|он есть|грузовой)/i.test(lower)) {
+        state.project.lift = 'has_lift';
+        state.project.liftDimensions = `${dims[1].replace(',', '.')}×${dims[2].replace(',', '.')} м`;
+        if (state.deferredFields) { delete state.deferredFields.lift; delete state.deferredFields.liftDimensions; }
+    }
+}
+
 
 function hasExplicitTimeInText(text) {
 
@@ -892,7 +979,7 @@ function normalizeExtractedData(
 
     if (
         p.dateStart !== undefined &&
-        sourceHasExplicitTime
+        (sourceHasExplicitTime || /^\\d{4}-\\d{2}-\\d{2}$/.test(cleanString(p.dateStart) || ''))
     ) {
 
         const value =
@@ -909,7 +996,7 @@ function normalizeExtractedData(
 
     if (
         p.dateEnd !== undefined &&
-        sourceHasExplicitTime
+        (sourceHasExplicitTime || /^\\d{4}-\\d{2}-\\d{2}$/.test(cleanString(p.dateEnd) || ''))
     ) {
 
         const value =
@@ -1872,7 +1959,7 @@ if (
     // 5. DATES + TIME
     // --------------------------------------------------------
 
-    if (!hasDateAndTime(p.dateStart) && !isDeferred(state, 'dateStart')) {
+    if (!hasDateOrDateTime(p.dateStart) && !isDeferred(state, 'dateStart')) {
 
         missing.push({
             field: 'dateStart',
@@ -1883,7 +1970,7 @@ if (
     }
 
 
-    if (!hasDateAndTime(p.dateEnd) && !isDeferred(state, 'dateEnd')) {
+    if (!hasDateOrDateTime(p.dateEnd) && !isDeferred(state, 'dateEnd')) {
 
         missing.push({
             field: 'dateEnd',
@@ -3260,10 +3347,10 @@ function buildControlledQuestion(
             return 'До какого времени необходимо завершить демонтаж?';
 
         case 'additionalServices':
-            return 'Есть ли дополнительные услуги, требования или пожелания, которые необходимо учесть? Например: спецэффекты, видеотрансляции, выполнение райдера и т. д. Если ничего не требуется — так и напишите.';
+            return 'Есть ли дополнительные услуги или пожелания, которые стоит учесть? Например, спецэффекты, видеотрансляция или работа по райдеру.';
 
         case 'specialConditions':
-            return 'Есть ли особые условия, которые необходимо учесть: ограничения по въезду, пропуска и допуски, условия оплаты, требования к документам и т. д.? Если особых условий нет — так и напишите.';
+            return 'Есть ли особые условия по доступу на площадку, пропускам, оплате или документам?';
 
         default:
             return 'Подскажите, пожалуйста, дополнительную информацию по проекту.';
@@ -5773,6 +5860,10 @@ addHistory(
                     state,
                     extracted
                 );
+
+                // Извлекаем даты, условия монтажа/демонтажа и поздние уточнения лифта
+                // непосредственно из формулировки клиента, не полагаясь только на JSON DeepSeek.
+                applyDirectContextualAnswers(state, userText);
 
                 // Любое содержательное уточнение по LED дополняет исходное описание,
                 // а не стирает его. Размеры полезны, но не обязательны, если
