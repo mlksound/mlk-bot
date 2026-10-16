@@ -755,8 +755,55 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
     const lower = value.toLowerCase().replace(/ё/g, 'е');
     if (!value) return;
 
-    // Распознаём даты непосредственно из текста, даже если AI extraction не сработал.
+    const hasReadyContext = /(?:оборудован\w*|все\s+должно\s+стоять|всё\s+должно\s+стоять|конструкц\w*).{0,100}(?:готов\w*|стоя\w*|установлен\w*|к\s*\d{1,2})/i.test(lower) ||
+        /(?:должно\s+быть\s+готово|должны\s+быть\s+готовы|всё\s+должно\s+стоять|все\s+должно\s+стоять)/i.test(lower);
+
+    // «В этот же день» означает дату текущего мероприятия, а не новую дату.
+    if (/(?:в\s+этот\s+же\s+день|того\s+же\s+дня|в\s+тот\s+же\s+день)/i.test(lower) &&
+        (expectedField === 'dateEnd' || /окончан|заканч|заверш/i.test(lower)) &&
+        hasDateOrDateTime(state.project.dateStart)) {
+        const currentEnd = String(state.project.dateEnd || '');
+        const currentEndTime = (!hasReadyContext || /(?:окончан|закончится|заверш|до\s+\d{1,2}[:.]\d{2})/i.test(lower)) ? (currentEnd.match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '') : '';
+        state.project.dateEnd = `${String(state.project.dateStart).slice(0, 10)}${currentEndTime ? ` ${currentEndTime}` : ''}`;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.dateEnd = 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.dateEnd;
+    }
+
+    // Время готовности оборудования нельзя принимать за время окончания мероприятия.
+    // Если дата готовности не названа, но клиент говорит «в этот же день», используем дату события.
     const mentions = parseRussianDateMentions(value);
+    if (hasReadyContext && /\b\d{1,2}(?::[0-5]\d|\s*(?:утра|дня|вечера|ночи))\b/i.test(lower)) {
+        let readyDate = mentions.length ? mentions[mentions.length - 1].date.slice(0, 10) : '';
+        if (!readyDate && /(?:в\s+этот\s+же\s+день|того\s+же\s+дня|в\s+тот\s+же\s+день)/i.test(lower)) {
+            readyDate = String(state.project.dateStart || state.project.dateEnd || '').slice(0, 10);
+        }
+        if (!readyDate && hasDateOrDateTime(state.project.readyDate)) {
+            readyDate = String(state.project.readyDate).slice(0, 10);
+        }
+        const time = parseTimeAnswer(value);
+        if (readyDate && time) {
+            state.project.readyDate = `${readyDate} ${time}`;
+            state.project.readyDateApproximate = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(value);
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.readyDate = state.project.readyDateApproximate ? 'tentative' : 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.readyDate;
+        }
+    }
+
+    // В первом описании проекта дата готовности часто указывается отдельной фразой:
+    // «С 5 по 8 декабря, всё должно стоять 4 декабря».
+    if (hasReadyContext && mentions.length) {
+        const readinessMention = mentions[mentions.length - 1];
+        const readyDateOnly = readinessMention.date.slice(0, 10);
+        if (!state.project.readyDate || !hasDateOrDateTime(state.project.readyDate) ||
+            !String(state.project.readyDate).startsWith(readyDateOnly)) {
+            state.project.readyDate = readyDateOnly;
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus.readyDate = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.readyDate;
+        }
+    }
     const assignDateIfUseful = (field, candidate) => {
         if (!candidate) return;
         if (!state.project[field] || !hasDateOrDateTime(state.project[field]) || (!hasDateAndTime(state.project[field]) && hasDateAndTime(candidate))) {
@@ -766,14 +813,16 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
             if (state.deferredFields) delete state.deferredFields[field];
         }
     };
-    if (mentions.length >= 2) {
-        assignDateIfUseful('dateStart', mentions[0].date);
-        assignDateIfUseful('dateEnd', mentions[1].date);
-    } else if (mentions.length === 1) {
-        const candidate = mentions[0].date;
+    // Если в одном сообщении есть дата готовности, не принимаем её за дату окончания.
+    const eventMentions = hasReadyContext && mentions.length >= 2 ? mentions.slice(0, -1) : mentions;
+    if (eventMentions.length >= 2) {
+        assignDateIfUseful('dateStart', eventMentions[0].date);
+        assignDateIfUseful('dateEnd', eventMentions[1].date);
+    } else if (eventMentions.length === 1) {
+        const candidate = eventMentions[0].date;
         if (expectedField === 'dateEnd' || /(?:окончан|закончится|заверш|до какого времени)/i.test(lower)) assignDateIfUseful('dateEnd', candidate);
         else if (expectedField === 'readyDate' || /(?:готовност|оборудован.{0,20}готово)/i.test(lower)) assignDateIfUseful('readyDate', candidate);
-        else if (expectedField === 'dateStart' || /(?:начало|начнется|начнётся|старт|репетиц)/i.test(lower)) assignDateIfUseful('dateStart', candidate);
+        else if (expectedField === 'dateStart' || /(?:начало|начнется|начнётся|старт|репетиц|^с\s+\d{1,2}\s+(?:январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр))/i.test(lower)) assignDateIfUseful('dateStart', candidate);
     }
 
     // Диапазон дат из первого описания проекта: «с 5 декабря по 12».
@@ -3515,7 +3564,7 @@ function stripQualificationQuestions(text) {
     const source = String(text || '').trim();
     if (!source) return '';
 
-    const questionStart = /(?:^|\s)(?:подскажите(?:,\s*пожалуйста)?|укажите(?:,\s*пожалуйста)?|уточните(?:,\s*пожалуйста)?|какой у вас формат|какой уровень(?: технических требований)?|какое оборудование|какой персонал|какие группы|какие задачи|какие требования|какой именно персонал|дата и время|на каком этаже|есть ли на площадке|есть ли звуковой райдер|есть ли требования|мероприятие будет проходить|где будет проходить|что планируется транслировать|что именно нужно по светодиодным экранам|нужно ли оборудование|нужно ли оборудование для бэклайна|когда возможен монтаж|когда возможен демонтаж|до какого времени необходимо завершить|сколько гостей ожидается|сколько гостей|ориентировочное количество гостей|выберите наиболее подходящий вариант|выберите подходящий вариант|какие дополнительные услуги|есть ли дополнительные услуги|есть ли особые условия|нужен ли подвес|будет ли подвес|какова возможность подвеса|есть ли на площадке возможность подвеса|что планируется|что именно|какие именно|какой тип|какие типы|какие размеры|какое количество|какой адрес|где будет|к какому времени|во сколько можно|до какого времени)/i;
+    const questionStart = /(?:^|\s)(?:подскажите(?:,\s*пожалуйста)?|укажите(?:,\s*пожалуйста)?|уточните(?:,\s*пожалуйста)?|какой у вас формат|какой уровень(?: технических требований)?|какое оборудование|какой персонал|какие группы|какие задачи|какие требования|какой именно персонал|дата и время|на каком этаже|есть ли на площадке|есть ли звуковой райдер|есть ли требования|мероприятие будет проходить|где будет проходить|что планируется транслировать|что именно нужно по светодиодным экранам|нужно ли оборудование|нужно ли оборудование для бэклайна|когда возможен монтаж|когда возможен демонтаж|до какого времени необходимо завершить|сколько светодиодных экранов|сколько экранов потребуется|сколько экранов|сколько гостей ожидается|сколько гостей|ориентировочное количество гостей|выберите наиболее подходящий вариант|выберите подходящий вариант|какие дополнительные услуги|есть ли дополнительные услуги|есть ли особые условия|нужен ли подвес|будет ли подвес|какова возможность подвеса|есть ли на площадке возможность подвеса|что планируется|что именно|какие именно|какой тип|какие типы|какие размеры|какое количество|какой адрес|где будет|к какому времени|во сколько можно|до какого времени)/i;
 
     const duplicateDescriptionLine = /^\s*(?:•|[-*])\s*(?:концерты и фестивали|конференции, презентации и tv-проекты|корпоративы и торжества|выставки|спортивные мероприятия|стандартный\s*[—–-]|высокие требования\s*[—–-]|высший уровень\s*[—–-]|полное управление оборудованием|дежурный техник|только монтаж и демонтаж|другое\s*[—–-])/i;
     const selectionInstruction = /^\s*(?:выберите наиболее подходящий вариант|выберите подходящий вариант|выберите наиболее подходящий вариант или опишите мероприятие своими словами|выберите подходящий вариант или опишите своими словами)\.?\s*$/i;
@@ -3837,7 +3886,8 @@ function buildManagerSummary(
     };
     const statusDisplayValue = field => {
         const value = state.project[field];
-        if (field === 'eventType') return `${getEventLabel(value)}${state.project.eventTypeOriginal ? ` (ответ клиента: ${state.project.eventTypeOriginal})` : ''}`;
+        if (field === 'eventType') return state.project.eventTypeOriginal || getEventLabel(value);
+        if (['dateStart', 'dateEnd', 'readyDate'].includes(field) && state.project[`${field}Approximate`]) return `ориентировочно ${displayProjectValue(value)}`;
         if (field === 'eventLevel') return getLevelLabel(value);
         if (field === 'personnel') return getPersonnelLabel(value);
         if (field === 'place') return getPlaceLabel(value);
@@ -3880,7 +3930,7 @@ function buildManagerSummary(
     );
 
     lines.push(
-        `Формат: ${getEventLabel(p.eventType)}${p.eventTypeOriginal ? ` (ответ клиента: ${p.eventTypeOriginal})` : ''}`
+        `Формат: ${p.eventTypeOriginal || getEventLabel(p.eventType)}`
     );
 
 
@@ -4378,7 +4428,7 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Формат: ${getEventLabel(p.eventType)}${p.eventTypeOriginal ? ` (ответ клиента: ${p.eventTypeOriginal})` : ''}`
+        `• Формат: ${p.eventTypeOriginal || getEventLabel(p.eventType)}`
     );
 
 
@@ -4422,17 +4472,17 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Дата начала: ${p.dateStart || 'уточним с вами'}`
+        `• Дата начала: ${p.dateStart || 'уточним с вами'}${p.dateStartApproximate ? ' (ориентировочно)' : ''}`
     );
 
 
     lines.push(
-        `• Дата окончания: ${p.dateEnd || 'уточним с вами'}`
+        `• Дата окончания: ${p.dateEnd || 'уточним с вами'}${p.dateEndApproximate ? ' (ориентировочно)' : ''}`
     );
 
 
     lines.push(
-        `• Готовность оборудования: ${p.readyDate || 'уточним с вами'}`
+        `• Готовность оборудования: ${p.readyDate || 'уточним с вами'}${p.readyDateApproximate ? ' (ориентировочно)' : ''}`
     );
 
 
@@ -5564,6 +5614,31 @@ function varyAcknowledgement(text, state) {
 }
 
 
+function cleanAcknowledgementText(text) {
+    let value = String(text || '').trim();
+    if (!value) return '';
+
+    // Добавляем пробел после пунктуации, но не разрываем время 19:00.
+    value = value
+        .replace(/([,;!?])(?=\S)/g, '$1 ')
+        .replace(/:(?=\S)(?!\d)/g, ': ')
+        .replace(/^(\s*(?:Хорошо|Отлично)),\s*[—–-]\s*/i, '$1, ')
+        .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s*[—–-]\s*/i, '$1: ')
+        .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s+(?=[а-яё])/i, '$1: ');
+
+    const ack = '(?:хорошо|отлично|записал(?:а)?|понял(?:а)?(?: вас)?|зафиксировал(?:а)?|принял(?:а)?)';
+    // «... — зафиксировал» и «... . Зафиксировал» не должны дублировать подтверждение.
+    value = value.replace(new RegExp('\\s*[—–-]\\s*' + ack + '[.!?]*\\s*$', 'i'), '.');
+    value = value.replace(new RegExp('([.!?])\\s*' + ack + '[.!?]*\\s*$', 'i'), '$1');
+
+    // «Зафиксировал: спектакль. Записал.» -> одно подтверждение.
+    const duplicate = value.match(new RegExp('^\\s*(' + ack + ')\\s*[:,!]\\s*(.+?)\\.\\s*' + ack + '[.!?]*\\s*$', 'i'));
+    if (duplicate) value = `${duplicate[1][0].toUpperCase()}${duplicate[1].slice(1)}: ${duplicate[2].trim()}.`;
+
+    value = value.replace(/\s+([,.!?;:])/g, '$1').replace(/([,;:])\s{2,}/g, '$1 ');
+    return value.trim();
+}
+
 // ============================================================
 // PREPARE RESULT
 // ============================================================
@@ -5685,21 +5760,57 @@ function inferCorrectionField(state, text) {
 }
 
 
+function normalizeKeyboardLayoutToRussian(value) {
+    const en = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+    const ru = "йцукенгшщзхъфывапролджэячсмитьбюё";
+    const map = new Map([...en].map((char, index) => [char, [...ru][index]]));
+    return [...String(value || '').toLowerCase()].map(char => map.get(char) || char).join('');
+}
+
+function parseTimeAnswer(text) {
+    const source = String(text || '').trim().toLowerCase().replace(/ё/g, 'е');
+    const candidates = [source, normalizeKeyboardLayoutToRussian(source)];
+    for (const candidate of candidates) {
+        let match = candidate.match(/(?:^|\b)(\d{1,2})[:.]([0-5]\d)(?:\b|$)/);
+        let hour;
+        let minute;
+        let period = '';
+        if (match) {
+            hour = Number(match[1]);
+            minute = Number(match[2]);
+        } else {
+            match = candidate.match(/(?:^|\s)(?:(?:в|к|до|около|примерно)\s*)?(\d{1,2})(?:\s*(?:час(?:а|ов)?|ч))?\s*(утра|дня|вечера|ночи)?(?:\s*[.!?,]*)$/i);
+            if (!match) continue;
+            hour = Number(match[1]);
+            minute = 0;
+            period = String(match[2] || '').toLowerCase();
+        }
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59) continue;
+        if (period === 'утра' && hour === 12) hour = 0;
+        else if (period === 'дня' && hour < 12) hour += 12;
+        else if (period === 'вечера' && hour < 12) hour += 12;
+        else if (period === 'ночи' && hour === 12) hour = 0;
+        return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    }
+    return null;
+}
+
 function applyDirectTimeAnswer(state, expectedField, text) {
     const fieldMap = { dateStartTime: 'dateStart', dateEndTime: 'dateEnd', readyDateTime: 'readyDate' };
     const target = fieldMap[expectedField];
     if (!target) return false;
-    const source = String(text || '').trim();
-    const match = source.match(/(?:^|\b)(\d{1,2})[:.]([0-5]\d)(?:\b|$)/) || source.match(/(?:^|\s)(?:в|к|до)\s*(\d{1,2})(?:\s*(?:час(?:а|ов)?|ч))?\s*$/i);
-    if (!match) return false;
-    const hour = Number(match[1]);
-    const minute = match[2] === undefined ? 0 : Number(match[2]);
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
-    const dateOnly = String(state.project[target] || '').slice(0, 10);
+    const time = parseTimeAnswer(text);
+    if (!time) return false;
+    let dateOnly = String(state.project[target] || '').slice(0, 10);
+    // Готовность часто привязана к дате начала мероприятия («в этот же день»).
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) && target === 'readyDate') {
+        dateOnly = String(state.project.dateStart || state.project.dateEnd || '').slice(0, 10);
+    }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) || !parseIsoDateTime(dateOnly)) return false;
-    state.project[target] = `${dateOnly} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    state.project[target] = `${dateOnly} ${time}`;
+    state.project[`${target}Approximate`] = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(source);
     state.confirmationStatus = state.confirmationStatus || {};
-    state.confirmationStatus[target] = 'confirmed';
+    state.confirmationStatus[target] = state.project[`${target}Approximate`] ? 'tentative' : 'confirmed';
     if (state.deferredFields) delete state.deferredFields[target];
     return true;
 }
@@ -6127,7 +6238,22 @@ addHistory(
 
                 const previousLedDetails = state.project.ledDetails;
 
+                // «Контент, причём ваш» в диалоге с Дмитрием означает контент со стороны MLK,
+                // а не контент клиента. Не оставляем неоднозначное местоимение в заявке.
+                if (expectedField === 'ledContent' && /контент|материал|ролик|видео/i.test(userText) &&
+                    /(?:ваш|ваша|ваше|ваши|с\s+вашей\s+стороны|а\s+не\s+наш|не\s+наш)/i.test(userText)) {
+                    extracted.ledContent = 'Контент предоставляет команда MLK';
+                }
+
                 if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+                    extracted.dateStart = undefined;
+                    extracted.dateEnd = undefined;
+                    extracted.readyDate = undefined;
+                }
+
+                const explicitReadyTime = /(?:оборудован\w*|все\s+должно\s+стоять|всё\s+должно\s+стоять|конструкц\w*).{0,100}(?:готов\w*|стоять|установлен\w*|к\s*\d{1,2})/i.test(userText) &&
+                    Boolean(parseTimeAnswer(userText));
+                if (explicitReadyTime) {
                     extracted.dateStart = undefined;
                     extracted.dateEnd = undefined;
                     extracted.readyDate = undefined;
@@ -6174,6 +6300,13 @@ addHistory(
                 // Если сейчас ожидался этаж, короткий ответ «3» или «3-й этаж»
                 // фиксируем напрямую. Это поле нельзя оставлять на усмотрение LLM.
                 if (expectedField === 'floor') {
+                    // Не сводим «3 или 4, точно не помню» к одному числу.
+                    const floorRange = userText.trim().match(/(?:этаж\s*)?(\d{1,2})\s*(?:или|[-–])\s*(\d{1,2})(?:\s*этаж)?/i);
+                    if (floorRange && /не\s*(?:помню|знаю|уверен)|точно\s+не|примерно|возможно/i.test(userText)) {
+                        state.project.floor = `${floorRange[1]}–${floorRange[2]} (предварительно, уточнить)`;
+                        extracted.floor = undefined;
+                        if (state.deferredFields) delete state.deferredFields.floor;
+                    }
                     // Принимаем короткие варианты: «7», «7-й», «7-й этаж», «этаж 7».
                     const floorMatch = userText.trim().match(/^(?:этаж\s*)?(\d{1,2})(?:\s*[-–]?\s*(?:й|ый|ой)?(?:\s*этаж)?)?[.!]?$/i);
                     const wordFloors = {
@@ -6190,7 +6323,9 @@ addHistory(
                         'десятый': 10, 'десятый этаж': 10
                     };
                     const normalizedFloorText = userText.trim().toLowerCase().replace(/ё/g, 'е');
-                    if (floorMatch) {
+                    if (floorRange && /не\s*(?:помню|знаю|уверен)|точно\s+не|примерно|возможно/i.test(userText)) {
+                        // Диапазон уже сохранён выше.
+                    } else if (floorMatch) {
                         state.project.floor = Number(floorMatch[1]);
                         if (state.deferredFields) delete state.deferredFields.floor;
                     } else if (wordFloors[normalizedFloorText] !== undefined) {
@@ -6436,10 +6571,10 @@ addHistory(
         // Убираем вопросы, которые DeepSeek мог скопировать из старой
         // истории диалога. Следующий вопрос выбирается только по текущему
         // структурированному состоянию Sales Engine.
-        let finalAssistantText = varyAcknowledgement(
+        let finalAssistantText = cleanAcknowledgementText(varyAcknowledgement(
             stripQualificationQuestions(String(assistantText || '').trim()),
             state
-        );
+        ));
 
         const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
         const applicationChanged = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus }) !== applicationBeforeMessage;
@@ -6471,6 +6606,10 @@ addHistory(
                 .filter(Boolean)
                 .join('\n\n');
         }
+
+        // Удаляем повторяющиеся строки, если AI уже выдал тот же контролируемый вопрос.
+        finalAssistantText = cleanAcknowledgementText(finalAssistantText);
+        finalAssistantText = [...new Set(finalAssistantText.split('\n').map(line => line.trim()).filter(Boolean))].join('\n');
 
         if (!finalAssistantText) {
             finalAssistantText = questionToAppend || 'Спасибо. Информация зафиксирована.';
