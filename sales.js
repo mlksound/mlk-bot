@@ -729,7 +729,7 @@ function parseRussianDateMentions(text) {
         ноября: 11, ноябрь: 11, ноябре: 11, декабря: 12, декабрь: 12, декабре: 12
     };
     const monthPattern = Object.keys(months).join('|');
-    const regex = new RegExp('\\b(\\d{1,2})\\s+(' + monthPattern + ')(?:\\s+(\\d{4}))?', 'gi');
+    const regex = new RegExp('\\b(\\d{1,2})\\s*(' + monthPattern + ')(?:\\s+(\\d{4}))?', 'gi');
     const matches = [...value.matchAll(regex)];
     const today = new Date();
     return matches.map((match, index) => {
@@ -5808,7 +5808,7 @@ function applyDirectTimeAnswer(state, expectedField, text) {
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) || !parseIsoDateTime(dateOnly)) return false;
     state.project[target] = `${dateOnly} ${time}`;
-    state.project[`${target}Approximate`] = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(source);
+    state.project[`${target}Approximate`] = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(String(text || ''));
     state.confirmationStatus = state.confirmationStatus || {};
     state.confirmationStatus[target] = state.project[`${target}Approximate`] ? 'tentative' : 'confirmed';
     if (state.deferredFields) delete state.deferredFields[target];
