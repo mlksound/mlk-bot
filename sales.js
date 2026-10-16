@@ -1992,6 +1992,16 @@ function isDeferred(state, field) {
     return Boolean(state && state.deferredFields && state.deferredFields[field]);
 }
 
+// Распознаёт как конкретный этаж (3), так и диапазон (2–3).
+// Если хотя бы один возможный этаж выше первого, нужно уточнить способ подъёма.
+function isAboveFirstFloor(value) {
+    if (typeof value === 'number') return value > 1;
+    const text = String(value || '').trim();
+    if (!text) return false;
+    const numbers = text.match(/\d+/g);
+    return Boolean(numbers && numbers.some(number => Number(number) > 1));
+}
+
 function deferField(state, field, rawAnswer) {
     if (!state.deferredFields) state.deferredFields = {};
     state.deferredFields[field] = String(rawAnswer || '').trim() || 'Ответ требует уточнения';
@@ -2011,8 +2021,18 @@ function preserveUnparsedAnswer(state, field, rawAnswer) {
     // сохранить ответ на текущий вопрос.
     if (!field || !answer) return false;
 
+    // Если этаж уже сохранён как диапазон (например, «2–3»), не переносим
+    // его обратно в deferredFields: значение пригодно для следующего шага —
+    // уточнения лифта — хотя точный этаж пока предварительный.
+    if (field === 'floor' && /\d+\s*[–-]\s*\d+/.test(String(state.project?.floor || ''))) {
+        if (state.deferredFields) delete state.deferredFields.floor;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.floor = 'tentative';
+        return true;
+    }
+
     // Если extraction уже записал значение текущего поля, не перезаписываем
-    // нормализованный результат исходной фразой клиента.
+    // нормализованный результат исходной фразы клиента.
     if (state.project && state.project[field] !== null &&
         state.project[field] !== undefined && state.project[field] !== '') {
         // Не затираем прежнее значение непонятным ответом, но и не теряем
@@ -2241,6 +2261,24 @@ if (
         return missing;
     }
 
+    // Оборудование должно быть готово к началу мероприятия, а не после него.
+    // Сохраняем ошибочное значение в deferredFields для менеджера, но убираем
+    // его из подтверждённых данных и просим клиента указать корректную готовность.
+    const readyDate = parseIsoDateTime(p.readyDate);
+    if (startDate && readyDate && readyDate > startDate) {
+        const rejectedReadyDate = String(p.readyDate);
+        deferField(
+            state,
+            'readyDate',
+            `Указана готовность ${rejectedReadyDate}, но мероприятие начинается ${p.dateStart}. Нужно уточнить дату и время готовности оборудования.`
+        );
+        p.readyDate = null;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.readyDate = 'tentative';
+        missing.push({ field: 'readyDate', action: 'ask_ready_date' });
+        return missing;
+    }
+
 
     // --------------------------------------------------------
     // 6. LOCATION
@@ -2299,7 +2337,7 @@ if (
 
     if (
         p.place === 'indoor' &&
-        Number(p.floor) > 1 &&
+        isAboveFirstFloor(p.floor) &&
         !p.lift &&
         !isDeferred(state, 'lift')
     ) {
@@ -2324,7 +2362,7 @@ if (
 
     if (
         p.place === 'indoor' &&
-        Number(p.floor) > 1 &&
+        isAboveFirstFloor(p.floor) &&
         p.lift === 'has_lift' &&
         Array.isArray(p.equipment) && p.equipment.includes('stage') &&
         !p.liftDimensions &&
@@ -3521,6 +3559,9 @@ function buildControlledQuestion(
             return 'Выберите дату окончания мероприятия.';
 
         case 'readyDate':
+            if (isDeferred(state, 'readyDate') && /позже начала мероприятия|начинается .*нужно уточнить дату и время готовности/i.test(String(state.deferredFields.readyDate || ''))) {
+                return `Дата готовности оборудования (${String(state.deferredFields.readyDate).match(/Указана готовность ([^,]+)/i)?.[1] || 'указанная ранее'}) позже начала мероприятия (${formatDateForQuestion(state.project.dateStart) || state.project.dateStart}). Оборудование должно быть готово до начала. Уточните, пожалуйста, правильную дату и время готовности.`;
+            }
             return 'Выберите дату готовности оборудования.';
 
         case 'location':
@@ -6415,8 +6456,13 @@ addHistory(
                 if (expectedField === 'floor') {
                     // Не сводим «3 или 4, точно не помню» к одному числу.
                     const floorRange = userText.trim().match(/(?:этаж\s*)?(\d{1,2})\s*(?:или|[-–])\s*(\d{1,2})(?:\s*этаж)?/i);
-                    if (floorRange && /не\s*(?:помню|знаю|уверен)|точно\s+не|примерно|возможно/i.test(userText)) {
-                        state.project.floor = `${floorRange[1]}–${floorRange[2]} (предварительно, уточнить)`;
+                    if (floorRange) {
+                        // «2 или 3» — это ответ про этаж, а не размер экрана.
+                        // Сохраняем оба варианта и продолжаем квалификацию: для любого
+                        // этажа выше первого нужно выяснить, есть ли грузовой лифт.
+                        state.project.floor = `${floorRange[1]}–${floorRange[2]} (предварительно)`;
+                        state.confirmationStatus = state.confirmationStatus || {};
+                        state.confirmationStatus.floor = 'tentative';
                         extracted.floor = undefined;
                         if (state.deferredFields) delete state.deferredFields.floor;
                     }
