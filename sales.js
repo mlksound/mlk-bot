@@ -311,7 +311,8 @@ async function hydrateSalesState(
         if (!state.deferredFields) state.deferredFields = {};
         if (!state.confirmationStatus) state.confirmationStatus = {};
         if (!state.applicationId) state.applicationId = crypto.randomUUID();
-        if (!state.applicationCode) state.applicationCode = `MLK-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+        if (!state.applicationCreatedAt) state.applicationCreatedAt = state.updatedAt || new Date().toISOString();
+        if (!state.applicationCode) state.applicationCode = buildApplicationCode(state);
 
         if (
             clientName &&
@@ -352,6 +353,7 @@ async function persistSalesState(
 
     try {
 
+        refreshApplicationCode(state);
         await saveSalesState(
             state
         );
@@ -373,11 +375,12 @@ async function persistSalesState(
 function createSalesState(clientId, clientName = '') {
 
     const applicationId = crypto.randomUUID();
-    const applicationCode = `MLK-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+    const applicationCreatedAt = new Date().toISOString();
 
-    return {
+    const state = {
         applicationId,
-        applicationCode,
+        applicationCreatedAt,
+        applicationCode: '',
 
         client: {
             id: String(clientId || ''),
@@ -386,6 +389,7 @@ function createSalesState(clientId, clientName = '') {
 
         project: {
             eventType: null,
+            eventTypeOriginal: null,
             eventLevel: null,
 
             guestCount: null,
@@ -457,6 +461,9 @@ function createSalesState(clientId, clientName = '') {
 
         updatedAt: null
     };
+
+    state.applicationCode = buildApplicationCode(state);
+    return state;
 }
 
 
@@ -589,26 +596,87 @@ function cleanString(value) {
 }
 
 
-function hasDateAndTime(value) {
-    if (!value) return false;
-    const normalized = String(value).trim();
-    return /^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}$/.test(normalized);
-}
-
 function parseIsoDateTime(value) {
     const normalized = String(value || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?$/.test(normalized)) return null;
-    const date = normalized.slice(0, 10);
-    const time = normalized.match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '00:00';
-    const parsed = new Date(`${date}T${time.length === 4 ? '0' + time : time}:00`);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
+    const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{1,2}):(\d{2}))?$/);
+    if (!match) return null;
+    const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+    const hour = match[4] === undefined ? 0 : Number(match[4]);
+    const minute = match[5] === undefined ? 0 : Number(match[5]);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return null;
+    const parsed = new Date(year, month - 1, day, hour, minute, 0, 0);
+    if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
+    return parsed;
 }
 
-// Для даты начала/окончания достаточно известной календарной даты.
-// Не придумываем время, если клиент сообщил только диапазон дат.
+function hasDateAndTime(value) {
+    const normalized = String(value || '').trim();
+    return /^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}$/.test(normalized) && Boolean(parseIsoDateTime(normalized));
+}
+
+// Дата может быть сохранена отдельно от времени. Это не означает,
+// что этап даты/времени уже завершён.
 function hasDateOrDateTime(value) {
-    if (!value) return false;
-    return /^\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?$/.test(String(value).trim());
+    return Boolean(parseIsoDateTime(value));
+}
+
+function normalizeExtractedDate(value, sourceText = '') {
+    const normalized = String(value || '').trim();
+    const match = normalized.match(/^(\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}:\d{2}))?$/);
+    if (!match || !parseIsoDateTime(normalized)) return null;
+    let datePart = match[1];
+    const explicitYear = /\b(?:19|20)\d{2}\b/.test(String(sourceText || ''));
+    if (!explicitYear) {
+        const today = new Date();
+        const candidate = parseIsoDateTime(datePart);
+        const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        if (candidate && candidate < todayStart) {
+            const [year, month, day] = datePart.split('-').map(Number);
+            let nextYear = year;
+            do { nextYear += 1; } while (!parseIsoDateTime(`${nextYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`) || parseIsoDateTime(`${nextYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`) < todayStart);
+            datePart = `${nextYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        }
+    }
+    return `${datePart}${match[2] ? ` ${match[2].padStart(5, '0')}` : ''}`;
+}
+
+function formatDateForQuestion(value) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!match) return '';
+    const months = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+    return `${Number(match[3])} ${months[Number(match[2]) - 1]}`;
+}
+
+function buildApplicationCode(state) {
+    const createdValue = state?.applicationCreatedAt || state?.updatedAt || new Date().toISOString();
+    const createdDate = new Date(createdValue);
+    const safeCreated = Number.isNaN(createdDate.getTime()) ? new Date() : createdDate;
+    const dateCode = d => {
+        const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Minsk', day: '2-digit', month: '2-digit', year: '2-digit' }).formatToParts(d);
+        const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+        return `${values.day}${values.month}${values.year}`;
+    };
+    const equipment = Array.isArray(state?.project?.equipment) ? state.project.equipment : [];
+    let equipmentCode = 'X';
+    if (equipment.includes('all') || ['sound', 'led', 'light', 'stage'].every(item => equipment.includes(item))) equipmentCode = 'F';
+    else {
+        const letters = [];
+        if (equipment.includes('led')) letters.push('V');
+        if (equipment.includes('sound')) letters.push('A');
+        if (equipment.includes('light')) letters.push('L');
+        if (equipment.includes('stage')) letters.push('S');
+        if (letters.length) equipmentCode = letters.join('');
+    }
+    const startValue = String(state?.project?.dateStart || '').trim();
+    const startMatch = startValue.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const startCode = startMatch ? `${startMatch[3]}${startMatch[2]}${startMatch[1].slice(-2)}` : '000000';
+    return `MLK-${dateCode(safeCreated)}-${equipmentCode}/${startCode}`;
+}
+
+function refreshApplicationCode(state) {
+    if (!state) return;
+    if (!state.applicationCreatedAt) state.applicationCreatedAt = state.updatedAt || new Date().toISOString();
+    state.applicationCode = buildApplicationCode(state);
 }
 
 function parseRussianDateRange(text) {
@@ -650,10 +718,63 @@ function parseRussianDateRange(text) {
     return { start: iso(startYear, startMonth, startDay), end: iso(endYear, endMonth, endDay) };
 }
 
-function applyDirectContextualAnswers(state, text) {
+function parseRussianDateMentions(text) {
+    const value = String(text || '').toLowerCase().replace(/ё/g, 'е');
+    const months = {
+        января: 1, январь: 1, январе: 1, февраля: 2, февраль: 2, феврале: 2,
+        марта: 3, март: 3, марте: 3, апреля: 4, апрель: 4, апреле: 4,
+        мая: 5, май: 5, мае: 5, июня: 6, июнь: 6, июне: 6,
+        июля: 7, июль: 7, июле: 7, августа: 8, август: 8, августе: 8,
+        сентября: 9, сентябрь: 9, сентябре: 9, октября: 10, октябрь: 10, октябре: 10,
+        ноября: 11, ноябрь: 11, ноябре: 11, декабря: 12, декабрь: 12, декабре: 12
+    };
+    const monthPattern = Object.keys(months).join('|');
+    const regex = new RegExp('\\b(\\d{1,2})\\s+(' + monthPattern + ')(?:\\s+(\\d{4}))?', 'gi');
+    const matches = [...value.matchAll(regex)];
+    const today = new Date();
+    return matches.map((match, index) => {
+        const day = Number(match[1]);
+        const month = months[match[2]];
+        let year = Number(match[3] || today.getFullYear());
+        const dateCandidate = y => new Date(y, month - 1, day);
+        if (!match[3] && dateCandidate(year) < new Date(today.getFullYear(), today.getMonth(), today.getDate())) {
+            do { year += 1; } while (dateCandidate(year) < new Date(today.getFullYear(), today.getMonth(), today.getDate()));
+        }
+        const nextStart = matches[index + 1]?.index ?? value.length;
+        const tail = value.slice(match.index + match[0].length, nextStart);
+        const time = tail.match(/(?:\b(?:в|к|до)\s*)?(\d{1,2})[:.]([0-5]\d)\b/);
+        const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const iso = dateCandidate(year);
+        if (iso.getFullYear() !== year || iso.getMonth() !== month - 1 || iso.getDate() !== day) return null;
+        return { date: `${isoDate}${time ? ` ${String(Number(time[1])).padStart(2, '0')}:${time[2]}` : ''}`, index: match.index };
+    }).filter(Boolean);
+}
+
+function applyDirectContextualAnswers(state, text, expectedField = null) {
     const value = String(text || '').trim();
     const lower = value.toLowerCase().replace(/ё/g, 'е');
     if (!value) return;
+
+    // Распознаём даты непосредственно из текста, даже если AI extraction не сработал.
+    const mentions = parseRussianDateMentions(value);
+    const assignDateIfUseful = (field, candidate) => {
+        if (!candidate) return;
+        if (!state.project[field] || !hasDateOrDateTime(state.project[field]) || (!hasDateAndTime(state.project[field]) && hasDateAndTime(candidate))) {
+            state.project[field] = candidate;
+            state.confirmationStatus = state.confirmationStatus || {};
+            state.confirmationStatus[field] = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields[field];
+        }
+    };
+    if (mentions.length >= 2) {
+        assignDateIfUseful('dateStart', mentions[0].date);
+        assignDateIfUseful('dateEnd', mentions[1].date);
+    } else if (mentions.length === 1) {
+        const candidate = mentions[0].date;
+        if (expectedField === 'dateEnd' || /(?:окончан|закончится|заверш|до какого времени)/i.test(lower)) assignDateIfUseful('dateEnd', candidate);
+        else if (expectedField === 'readyDate' || /(?:готовност|оборудован.{0,20}готово)/i.test(lower)) assignDateIfUseful('readyDate', candidate);
+        else if (expectedField === 'dateStart' || /(?:начало|начнется|начнётся|старт|репетиц)/i.test(lower)) assignDateIfUseful('dateStart', candidate);
+    }
 
     // Диапазон дат из первого описания проекта: «с 5 декабря по 12».
     const range = parseRussianDateRange(value);
@@ -717,22 +838,15 @@ function isNotAnAddress(value) {
             .replace(/[.!?]+$/g, '');
 
     const invalidValues = [
-        'улица',
-        'на улице',
-        'помещение',
-        'в помещении',
-        'под навесом',
-        'навес',
-        'газон',
-        'трава',
-        'грунт',
-        'асфальт',
-        'плитка'
+        'улица', 'на улице', 'помещение', 'в помещении', 'под навесом',
+        'навес', 'газон', 'трава', 'грунт', 'асфальт', 'плитка'
     ];
+    if (invalidValues.includes(normalized)) return true;
 
-    return invalidValues.includes(
-        normalized
-    );
+    // Не позволяем случайно сохранить фразу с датами/временем как адрес.
+    if (/\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b/i.test(normalized)) return true;
+    if (/(?:начало|окончание|закончится|готовность оборудования|дата мероприятия|даты мероприятия)/i.test(normalized) && !/(?:ул\.?|улиц|проспект|пр-т|переулок|проезд|площадь|шоссе|город|г\.)/i.test(normalized)) return true;
+    return false;
 }
 
 
@@ -884,6 +998,29 @@ function getEquipmentLabels(items) {
 }
 
 
+function inferEventTypeFromText(text) {
+    const raw = String(text || '').trim().replace(/[.!?]+$/g, '');
+    const value = raw.toLowerCase().replace(/ё/g, 'е');
+    if (!value) return null;
+    const rules = [
+        { category: 'exhibitions', re: /(?:выставк|стенд(?:а|е|ы|ов)?(?:\s+(?:компан|фирм|бренд))?|экспозици|промо[- ]?зон|выставочн)/i },
+        { category: 'sports', re: /(?:спортивн|матч|турнир|спартакиад|марафон)/i },
+        { category: 'corporate', re: /(?:корпоратив|юбиле|свадьб|тимбилдинг|награждени|открыти\s+(?:магазин|заведени))/i },
+        { category: 'conferences', re: /(?:конференц|презентац|форум|саммит|конгресс|семинар|телевизионн|tv[- ]?проект|пресс[- ]конференц)/i },
+        { category: 'concerts', re: /(?:спектакл|театр|опера|балет|концерт|фестивал|шоу[- ]?программ|выступлени|open\s*air)/i }
+    ];
+    const found = rules.find(rule => rule.re.test(value));
+    if (!found) return null;
+    // Короткий ответ сохраняем дословно (например, «Стенд фирмы Комунарка»).
+    // В длинном сообщении сохраняем только распознанное название формата.
+    let original = raw;
+    if (raw.length > 70 || /\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b/i.test(raw)) {
+        const matchedTerm = raw.match(found.re);
+        original = matchedTerm ? matchedTerm[0] : raw.slice(0, 70);
+    }
+    return { category: found.category, original: original.slice(0, 120) };
+}
+
 // ============================================================
 // NORMALIZE AI DATA
 // ============================================================
@@ -925,17 +1062,12 @@ function normalizeExtractedData(
     const p = raw.project || raw;
 
     if (p.eventType !== undefined) {
+        const value = cleanString(p.eventType);
+        if (value && Object.keys(EVENT_TYPES).includes(value)) data.eventType = value;
+    }
 
-        const value =
-            cleanString(p.eventType);
-
-        if (
-            value &&
-            Object.keys(EVENT_TYPES)
-                .includes(value)
-        ) {
-            data.eventType = value;
-        }
+    if (p.eventTypeOriginal !== undefined) {
+        data.eventTypeOriginal = cleanString(p.eventTypeOriginal);
     }
 
 
@@ -975,60 +1107,10 @@ function normalizeExtractedData(
     // DATES
     // --------------------------------------------------------
 
-    const sourceHasExplicitTime =
-        hasExplicitTimeInText(
-            sourceText
-        );
-
-
-    if (
-        p.dateStart !== undefined &&
-        (sourceHasExplicitTime || /^\\d{4}-\\d{2}-\\d{2}$/.test(cleanString(p.dateStart) || ''))
-    ) {
-
-        const value =
-            cleanString(p.dateStart);
-
-        if (
-            value &&
-            hasDateAndTime(value)
-        ) {
-            data.dateStart = value;
-        }
-    }
-
-
-    if (
-        p.dateEnd !== undefined &&
-        (sourceHasExplicitTime || /^\\d{4}-\\d{2}-\\d{2}$/.test(cleanString(p.dateEnd) || ''))
-    ) {
-
-        const value =
-            cleanString(p.dateEnd);
-
-        if (
-            value &&
-            hasDateAndTime(value)
-        ) {
-            data.dateEnd = value;
-        }
-    }
-
-
-    if (
-        p.readyDate !== undefined &&
-        sourceHasExplicitTime
-    ) {
-
-        const value =
-            cleanString(p.readyDate);
-
-        if (
-            value &&
-            hasDateAndTime(value)
-        ) {
-            data.readyDate = value;
-        }
+    for (const field of ['dateStart', 'dateEnd', 'readyDate']) {
+        if (p[field] === undefined || p[field] === null || p[field] === '') continue;
+        const normalizedDate = normalizeExtractedDate(p[field], sourceText);
+        if (normalizedDate) data[field] = normalizedDate;
     }
 
 
@@ -1455,6 +1537,7 @@ function mergeProjectData(
 
     const p = state.project;
 
+    if (extracted.eventTypeOriginal) p.eventTypeOriginal = extracted.eventTypeOriginal;
 
     const fields = [
         'eventType',
@@ -1799,6 +1882,11 @@ function hasExplicitDimensions(value) {
     return /\d+\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*\d+/i.test(String(value || ''));
 }
 
+function hasLedQuantity(value) {
+    const text = String(value || '').toLowerCase();
+    return /\b\d+\s*(?:led[- ]?)?экран\w*|\b(?:один|одна|одно|два|две|три|четыре|пять|несколько|пара)\s+(?:led[- ]?)?экран\w*|центральн\w* экран|боков\w* экран\w*|экраны по обеим сторонам/i.test(text);
+}
+
 function explicitlyUnknownDimensions(value) {
     return /(?:размер\w*.{0,25}(?:неизвест|не знаю|не определ)|(?:не знаю|пока неизвестно|пока не определено|уточним позже|определим позже|на ваше усмотрение|вы сами решите|решите сами))/i.test(String(value || ''));
 }
@@ -1846,9 +1934,8 @@ function preserveUnparsedAnswer(state, field, rawAnswer) {
     }
 
     const deferredFields = new Set([
-        'eventType', 'equipment', 'eventLevel', 'guestCount',
-        'personnel', 'place', 'floor', 'lift',
-        'dateStart', 'dateEnd', 'readyDate', 'dateConflict'
+        'guestCount', 'personnel', 'place', 'floor', 'lift',
+        'dateConflict'
     ]);
     const rawTextFields = new Set([
         'location', 'liftDimensions', 'personnelDetails',
@@ -1935,7 +2022,7 @@ function calculateMissing(state) {
     // 1. EVENT TYPE
     // --------------------------------------------------------
 
-    if (!p.eventType && !isDeferred(state, 'eventType')) {
+    if (!p.eventType) {
 
         missing.push({
             field: 'eventType',
@@ -1951,10 +2038,8 @@ function calculateMissing(state) {
 // --------------------------------------------------------
 
 if (
-    !isDeferred(state, 'equipment') && (
-        !Array.isArray(p.equipment) ||
-        p.equipment.length === 0
-    )
+    !Array.isArray(p.equipment) ||
+    p.equipment.length === 0
 ) {
 
     missing.push({
@@ -1975,7 +2060,7 @@ if (
     p.eventType === 'sports'
 ) {
 
-    if (!p.eventLevel && !isDeferred(state, 'eventLevel')) {
+    if (!p.eventLevel) {
 
         missing.push({
             field: 'eventLevel',
@@ -1990,10 +2075,7 @@ if (
 ) {
 
     if (
-        !isDeferred(state, 'guestCount') && (
-            p.guestCount === null ||
-            p.guestCount === undefined
-        )
+        (p.guestCount === null || p.guestCount === undefined)
     ) {
 
         missing.push({
@@ -2010,7 +2092,7 @@ if (
     // 4. PERSONNEL
     // --------------------------------------------------------
 
-    if (!p.personnel && !isDeferred(state, 'personnel')) {
+    if (!p.personnel) {
 
         missing.push({
             field: 'personnel',
@@ -2041,29 +2123,30 @@ if (
 
 
     // --------------------------------------------------------
-    // 5. DATES + TIME — one combined question for all missing pieces
+    // 5. DATES + TIME — one concrete missing value at a time
     // --------------------------------------------------------
-
-    const missingDateParts = [];
-    if (!isDeferred(state, 'dateStart') && !hasDateAndTime(p.dateStart)) {
-        missingDateParts.push({ field: 'dateStart', label: 'начало мероприятия/репетиции', value: p.dateStart });
-    }
-    if (!isDeferred(state, 'dateEnd') && !hasDateAndTime(p.dateEnd)) {
-        missingDateParts.push({ field: 'dateEnd', label: 'окончание мероприятия', value: p.dateEnd });
-    }
-    if (!isDeferred(state, 'readyDate') && !hasDateAndTime(p.readyDate)) {
-        missingDateParts.push({ field: 'readyDate', label: 'готовность оборудования', value: p.readyDate });
-    }
-
-    if (missingDateParts.length) {
-        missing.push({ field: 'dateTimes', action: 'ask_date_times', items: missingDateParts });
+    // Если даты нет — показываем существующий календарь.
+    // Если дата уже известна, но нет времени, спрашиваем только время.
+    const dateFields = [
+        { field: 'dateStart', dateAction: 'ask_date_start', timeField: 'dateStartTime', label: 'начала мероприятия/репетиции' },
+        { field: 'dateEnd', dateAction: 'ask_date_end', timeField: 'dateEndTime', label: 'окончания мероприятия' },
+        { field: 'readyDate', dateAction: 'ask_ready_date', timeField: 'readyDateTime', label: 'готовности оборудования' }
+    ];
+    for (const item of dateFields) {
+        const value = p[item.field];
+        if (hasDateAndTime(value)) continue;
+        if (!hasDateOrDateTime(value)) {
+            missing.push({ field: item.field, action: item.dateAction });
+        } else {
+            missing.push({ field: item.timeField, action: 'text_question', dateField: item.field, label: item.label, value });
+        }
         return missing;
     }
 
     // Не подтверждаем заявку, если окончание стоит раньше начала.
     const startDate = parseIsoDateTime(p.dateStart);
     const endDate = parseIsoDateTime(p.dateEnd);
-    if (startDate && endDate && endDate < startDate && !isDeferred(state, 'dateConflict')) {
+    if (startDate && endDate && endDate < startDate) {
         missing.push({ field: 'dateConflict', action: 'ask_date_conflict' });
         return missing;
     }
@@ -2290,7 +2373,7 @@ if (
     // или оставить на техническое решение специалистов MLK.
     if (
         p.equipment.includes('led') &&
-        (!p.ledDetails || (!hasExplicitDimensions(p.ledDetails) && !explicitlyUnknownDimensions(p.ledDetails))) &&
+        (!p.ledDetails || ((!hasExplicitDimensions(p.ledDetails) || !hasLedQuantity(p.ledDetails)) && !explicitlyUnknownDimensions(p.ledDetails))) &&
         !isDeferred(state, 'ledDetails')
     ) {
 
@@ -3319,26 +3402,26 @@ function buildControlledQuestion(
         case 'personnelDetails':
             return 'Уточните, пожалуйста, какой именно персонал вам требуется.';
 
-        case 'dateTimes': {
-            const items = first.items || [];
-            const lines = items.map(item => {
-                const hasDate = hasDateOrDateTime(item.value);
-                return `• ${item.label}: ${hasDate ? 'укажите время' : 'укажите дату и время'}`;
-            });
-            return `Чтобы корректно спланировать работы, уточните, пожалуйста, недостающие даты и время:\n${lines.join('\n')}\n\nМожно ответить одним сообщением, например: «начало — 5 декабря в 10:00, окончание — 8 декабря в 18:00, оборудование готово — 4 декабря в 17:00».`;
-        }
+        case 'dateStartTime':
+            return `Во сколько начнётся мероприятие${formatDateForQuestion(state.project.dateStart) ? ` ${formatDateForQuestion(state.project.dateStart)}` : ''}?`;
+
+        case 'dateEndTime':
+            return `Во сколько закончится мероприятие${formatDateForQuestion(state.project.dateEnd) ? ` ${formatDateForQuestion(state.project.dateEnd)}` : ''}?`;
+
+        case 'readyDateTime':
+            return `К какому времени оборудование должно быть готово${formatDateForQuestion(state.project.readyDate) ? ` (${formatDateForQuestion(state.project.readyDate)})` : ''}?`;
 
         case 'dateConflict':
             return 'Похоже, дата окончания указана раньше даты начала. Проверьте, пожалуйста, даты начала и окончания и напишите корректный вариант.';
 
         case 'dateStart':
-            return 'Дата и время начала мероприятия/репетиции?';
+            return 'Выберите дату начала мероприятия/репетиции.';
 
         case 'dateEnd':
-            return 'Дата и время окончания мероприятия?';
+            return 'Выберите дату окончания мероприятия.';
 
         case 'readyDate':
-            return 'Дата и время готовности оборудования?';
+            return 'Выберите дату готовности оборудования.';
 
         case 'location':
             return 'Подскажите, пожалуйста, адрес площадки и город.';
@@ -3388,7 +3471,9 @@ function buildControlledQuestion(
             return 'Есть ли требования к типу и количеству световых приборов?';
 
         case 'ledDetails':
-            return 'Укажите, пожалуйста, тип и расположение светодиодных экранов: например, центральный на весь задник сцены, боковые экраны, кулисы или юбки сцены.';
+            return state.project.ledDetails
+                ? `Уточните, пожалуйста, количество экранов и размеры каждого. Расположение уже зафиксировал: ${state.project.ledDetails}. Если размеры пока неизвестны, так и напишите.`
+                : 'Сколько светодиодных экранов потребуется, каких они размеров и где будут расположены: центральный экран, боковые экраны, кулисы или юбки сцены? Если размеры пока неизвестны, так и напишите.';
 
         case 'ledContent':
             return 'Что планируется транслировать на светодиодные экраны?';
@@ -3727,6 +3812,7 @@ function buildManagerSummary(
     state
 ) {
 
+    refreshApplicationCode(state);
     const p =
         state.project;
 
@@ -3751,7 +3837,7 @@ function buildManagerSummary(
     };
     const statusDisplayValue = field => {
         const value = state.project[field];
-        if (field === 'eventType') return getEventLabel(value);
+        if (field === 'eventType') return `${getEventLabel(value)}${state.project.eventTypeOriginal ? ` (ответ клиента: ${state.project.eventTypeOriginal})` : ''}`;
         if (field === 'eventLevel') return getLevelLabel(value);
         if (field === 'personnel') return getPersonnelLabel(value);
         if (field === 'place') return getPlaceLabel(value);
@@ -3794,11 +3880,7 @@ function buildManagerSummary(
     );
 
     lines.push(
-        `Формат: ${
-            getEventLabel(
-                p.eventType
-            )
-        }`
+        `Формат: ${getEventLabel(p.eventType)}${p.eventTypeOriginal ? ` (ответ клиента: ${p.eventTypeOriginal})` : ''}`
     );
 
 
@@ -4273,6 +4355,7 @@ function buildClientSummary(
     state
 ) {
 
+    refreshApplicationCode(state);
     const p =
         state.project;
 
@@ -4295,7 +4378,7 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Формат: ${getEventLabel(p.eventType)}`
+        `• Формат: ${getEventLabel(p.eventType)}${p.eventTypeOriginal ? ` (ответ клиента: ${p.eventTypeOriginal})` : ''}`
     );
 
 
@@ -4729,7 +4812,7 @@ function normalizeMessage(message) {
 
         return {
             type: 'text',
-            text: message.trim()
+            text: message.trim().replace(/,\s*/g, ', ').replace(/;\s*/g, '; ').replace(/\s+([,;.!?])/g, '$1')
         };
     }
 
@@ -4752,8 +4835,7 @@ function normalizeMessage(message) {
             'text',
 
         text:
-            message.text ||
-            '',
+            String(message.text || '').trim().replace(/,\s*/g, ', ').replace(/;\s*/g, '; ').replace(/\s+([,;.!?])/g, '$1'),
 
         tag:
             message.tag ||
@@ -5125,10 +5207,11 @@ function applyAction(
         EVENT_TYPES[value]
     ) {
 
-        state.project.eventType =
-            value;
+        state.project.eventType = value;
+        state.project.eventTypeOriginal = null;
         state.confirmationStatus = state.confirmationStatus || {};
         state.confirmationStatus.eventType = 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.eventType;
 
         return actionToText(
             message
@@ -5142,10 +5225,10 @@ function applyAction(
         LEVELS[value]
     ) {
 
-        state.project.eventLevel =
-            value;
+        state.project.eventLevel = value;
         state.confirmationStatus = state.confirmationStatus || {};
         state.confirmationStatus.eventLevel = 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.eventLevel;
 
         return actionToText(
             message
@@ -5159,10 +5242,10 @@ function applyAction(
         PERSONNEL[value]
     ) {
 
-        state.project.personnel =
-            value;
+        state.project.personnel = value;
         state.confirmationStatus = state.confirmationStatus || {};
         state.confirmationStatus.personnel = 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.personnel;
 
         return actionToText(
             message
@@ -5176,10 +5259,10 @@ function applyAction(
         PLACES[value]
     ) {
 
-        state.project.place =
-            value;
+        state.project.place = value;
         state.confirmationStatus = state.confirmationStatus || {};
         state.confirmationStatus.place = 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.place;
 
         return actionToText(
             message
@@ -5199,10 +5282,10 @@ function applyAction(
             value === 'unknown'
         ) {
 
-            state.project.lift =
-                value;
+            state.project.lift = value;
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.lift = value === 'unknown' ? 'unknown' : 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.lift;
 
             return actionToText(
                 message
@@ -5228,10 +5311,10 @@ function applyAction(
                 equipment.length
             ) {
 
-                state.project.equipment =
-                    equipment;
+                state.project.equipment = equipment;
                 state.confirmationStatus = state.confirmationStatus || {};
                 state.confirmationStatus.equipment = 'confirmed';
+                if (state.deferredFields) delete state.deferredFields.equipment;
 
                 return actionToText(
                     message
@@ -5245,10 +5328,10 @@ function applyAction(
             EQUIPMENT[value]
         ) {
 
-            state.project.equipment =
-                [value];
+            state.project.equipment = [value];
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.equipment = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.equipment;
 
             return actionToText(
                 message
@@ -5355,10 +5438,10 @@ function applyAction(
 
         if (value) {
 
-            state.project.dateStart =
-                String(value);
+            state.project.dateStart = String(value);
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.dateStart = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.dateStart;
 
             return `Дата начала: ${value}`;
         }
@@ -5371,10 +5454,10 @@ function applyAction(
 
         if (value) {
 
-            state.project.dateEnd =
-                String(value);
+            state.project.dateEnd = String(value);
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.dateEnd = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.dateEnd;
 
             return `Дата окончания: ${value}`;
         }
@@ -5387,10 +5470,10 @@ function applyAction(
 
         if (value) {
 
-            state.project.readyDate =
-                String(value);
+            state.project.readyDate = String(value);
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.readyDate = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.readyDate;
 
             return `Дата готовности оборудования: ${value}`;
         }
@@ -5491,6 +5574,7 @@ function prepareResult(
     intent
 ) {
 
+    refreshApplicationCode(state);
     const missing =
         calculateMissing(
             state
@@ -5600,6 +5684,25 @@ function inferCorrectionField(state, text) {
     return null;
 }
 
+
+function applyDirectTimeAnswer(state, expectedField, text) {
+    const fieldMap = { dateStartTime: 'dateStart', dateEndTime: 'dateEnd', readyDateTime: 'readyDate' };
+    const target = fieldMap[expectedField];
+    if (!target) return false;
+    const source = String(text || '').trim();
+    const match = source.match(/(?:^|\b)(\d{1,2})[:.]([0-5]\d)(?:\b|$)/) || source.match(/(?:^|\s)(?:в|к|до)\s*(\d{1,2})(?:\s*(?:час(?:а|ов)?|ч))?\s*$/i);
+    if (!match) return false;
+    const hour = Number(match[1]);
+    const minute = match[2] === undefined ? 0 : Number(match[2]);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+    const dateOnly = String(state.project[target] || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) || !parseIsoDateTime(dateOnly)) return false;
+    state.project[target] = `${dateOnly} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    state.confirmationStatus = state.confirmationStatus || {};
+    state.confirmationStatus[target] = 'confirmed';
+    if (state.deferredFields) delete state.deferredFields[target];
+    return true;
+}
 
 // ============================================================
 // PROCESS SALES MESSAGE
@@ -6024,11 +6127,28 @@ addHistory(
 
                 const previousLedDetails = state.project.ledDetails;
 
+                if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+                    extracted.dateStart = undefined;
+                    extracted.dateEnd = undefined;
+                    extracted.readyDate = undefined;
+                }
+
                 mergeProjectData(
                     state,
                     extracted,
                     userText
                 );
+
+                if (expectedField === 'eventType') {
+                    const directEventType = inferEventTypeFromText(userText);
+                    if (directEventType) {
+                        state.project.eventType = directEventType.category;
+                        state.project.eventTypeOriginal = directEventType.original;
+                        state.confirmationStatus = state.confirmationStatus || {};
+                        state.confirmationStatus.eventType = 'confirmed';
+                        if (state.deferredFields) delete state.deferredFields.eventType;
+                    }
+                }
 
                 if (expectedField === 'ledDetails' && explicitlyUnknownDimensions(userText)) {
                     deferField(state, 'ledDetails', `Размеры LED-экрана пока неизвестны; ответ клиента: ${userText}`);
@@ -6036,7 +6156,6 @@ addHistory(
 
                 // Извлекаем даты, условия монтажа/демонтажа и поздние уточнения лифта
                 // непосредственно из формулировки клиента, не полагаясь только на JSON DeepSeek.
-                applyDirectContextualAnswers(state, userText);
 
                 // Любое содержательное уточнение по LED дополняет исходное описание,
                 // а не стирает его. Размеры полезны, но не обязательны, если
@@ -6102,13 +6221,13 @@ addHistory(
 
                 // Если клиент ответил на общий вопрос о датах, не задаём тот же вопрос
                 // повторно: нераспознанные части помечаем как требующие ручного уточнения.
-                if (expectedField === 'dateTimes') {
-                    for (const field of ['dateStart', 'dateEnd', 'readyDate']) {
-                        if (!hasDateAndTime(state.project[field]) && !isDeferred(state, field)) {
-                            deferField(state, field, `Требуется уточнить дату/время; ответ клиента: ${userText}`);
-                        }
-                    }
-                } else if (expectedField === 'dateConflict') {
+                if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+                    // Вопрос касается только времени: не позволяем модели перезаписать другие даты.
+                    extracted.dateStart = undefined;
+                    extracted.dateEnd = undefined;
+                    extracted.readyDate = undefined;
+                }
+                if (expectedField === 'dateConflict') {
                     const startDate = parseIsoDateTime(state.project.dateStart);
                     const endDate = parseIsoDateTime(state.project.dateEnd);
                     if (startDate && endDate && endDate < startDate) deferField(state, 'dateConflict', userText);
@@ -6128,6 +6247,19 @@ addHistory(
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
             }
+
+            // Прямой разбор дат запускаем независимо от успеха DeepSeek extraction.
+            // Это сохраняет даты из текста даже при временной ошибке AI.
+            applyDirectContextualAnswers(state, userText, expectedField);
+
+            if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+                const appliedTime = applyDirectTimeAnswer(state, expectedField, userText);
+                if (!appliedTime && !suppressControlledQuestion) {
+                    // Не откладываем дату целиком: просим только корректное время повторно.
+                    state.confirmationStatus = state.confirmationStatus || {};
+                    state.confirmationStatus[expectedField] = 'unknown';
+                }
+            }
         }
 
 
@@ -6136,6 +6268,7 @@ addHistory(
         cleanDependentFields(
             state
         );
+        refreshApplicationCode(state);
 
 
         // --------------------------------------------------------
