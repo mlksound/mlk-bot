@@ -246,6 +246,11 @@ const DEMOUNT = {
     deadline: {
         value: 'deadline',
         label: 'До определённого времени'
+    },
+
+    after_event: {
+        value: 'after_event',
+        label: 'Сразу после мероприятия'
     }
 };
 
@@ -773,6 +778,15 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
     // Время готовности оборудования нельзя принимать за время окончания мероприятия.
     // Если дата готовности не названа, но клиент говорит «в этот же день», используем дату события.
     const mentions = parseRussianDateMentions(value);
+    const ambiguousEndDate = expectedField === 'dateEnd' && mentions.length >= 2 && /\b(?:или|либо)\b/i.test(lower);
+    if (ambiguousEndDate) {
+        // Не выбираем один из нескольких предложенных дней автоматически.
+        state.project.dateEnd = null;
+        deferField(state, 'dateEnd', `Клиент назвал несколько вариантов даты окончания: ${value}`);
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.dateEnd = 'tentative';
+        return;
+    }
     if (hasReadyContext && /\b\d{1,2}(?::[0-5]\d|\s*(?:утра|дня|вечера|ночи))\b/i.test(lower)) {
         let readyDate = mentions.length ? mentions[mentions.length - 1].date.slice(0, 10) : '';
         if (!readyDate && /(?:в\s+этот\s+же\s+день|того\s+же\s+дня|в\s+тот\s+же\s+день)/i.test(lower)) {
@@ -843,10 +857,19 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
         state.project.mountTime = state.project.mountTime || 'За день до начала мероприятия';
         if (state.deferredFields) { delete state.deferredFields.mount; delete state.deferredFields.mountTime; }
     }
-    if (/(?:демонтаж|демонтир\w*|сняти\w*).{0,120}(?:сразу после|после окончания|после конца|около\s*\d{1,2}(?::\d{2})?)/i.test(lower)) {
-        state.project.demount = state.project.demount || 'deadline';
+    const meansAfterEvent = /(?:сразу|немедленно|сразу же)\s+после\s+(?:окончания\s+)?(?:мероприятия|события)|после\s+окончания\s+мероприятия/i.test(lower);
+    const explicitDemountAfterEvent = meansAfterEvent && (expectedField === 'demount' || /демонтаж|демонтир\w*|сняти\w*/i.test(lower));
+    if (explicitDemountAfterEvent || /(?:демонтаж|демонтир\w*|сняти\w*).{0,120}(?:сразу после|после окончания|после конца|около\s*\d{1,2}(?::\d{2})?)/i.test(lower)) {
         const timeMatch = lower.match(/(?:около|примерно|предварительно около)\s*(\d{1,2}(?::\d{2})?)/i);
-        state.project.demountTime = state.project.demountTime || (timeMatch ? `Сразу после окончания мероприятия, ориентировочно ${timeMatch[1]}` : 'Сразу после окончания мероприятия');
+        if (explicitDemountAfterEvent) {
+            state.project.demount = 'after_event';
+            state.project.demountTime = null;
+        } else {
+            state.project.demount = state.project.demount || 'deadline';
+            state.project.demountTime = state.project.demountTime || (timeMatch ? `Сразу после окончания мероприятия, ориентировочно ${timeMatch[1]}` : 'Сразу после окончания мероприятия');
+        }
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.demount = 'confirmed';
         if (state.deferredFields) { delete state.deferredFields.demount; delete state.deferredFields.demountTime; }
     }
 
@@ -2993,6 +3016,7 @@ mount:
 demount:
 - any
 - deadline
+- after_event
 
 ВАЖНО ПО МОНТАЖУ И ДЕМОНТАЖУ:
 
@@ -3467,6 +3491,9 @@ function buildControlledQuestion(
             return 'Выберите дату начала мероприятия/репетиции.';
 
         case 'dateEnd':
+            if (isDeferred(state, 'dateEnd') && /(?:несколько вариантов|назвал несколько вариантов|либо|\bили\b)/i.test(String(state.deferredFields.dateEnd || ''))) {
+                return 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Напишите, пожалуйста, один точный день.';
+            }
             return 'Выберите дату окончания мероприятия.';
 
         case 'readyDate':
@@ -5749,7 +5776,7 @@ function inferCorrectionField(state, text) {
     if (/монтаж|монтир|установк\w*/i.test(value)) return 'mount';
     if (/led|светодиодн\w* экран|\bэкран\b|пиксел/i.test(value)) return 'ledDetails';
     if (/\b(?:гост\w*|человек\w*|участник\w*)\b/i.test(value)) return 'guestCount';
-    if (/окончан\w* мероприяти|дата окончания|заканчива\w*|закончится|по \d{1,2}\s+(?:январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр)/i.test(value)) return 'dateEnd';
+    if (/(?:дата\s+и\s+время\s+)?окончан\w*.{0,35}(?:поменял\w*|изменил\w*|перенес\w*)|(?:поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*|врем\w*).{0,25}окончан\w*|дата окончания|заканчива\w*|закончится|по \d{1,2}\s+(?:январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр)/i.test(value)) return 'dateEnd';
     if (/начал\w* мероприяти|дата начала|старт\w* мероприяти|репетиц/i.test(value)) return 'dateStart';
     if (/готовност\w* оборудован|оборудован\w* готов\w*/i.test(value)) return 'readyDate';
     if (/адрес|место проведения|площадк\w* находится/i.test(value)) return 'location';
@@ -5808,7 +5835,7 @@ function applyDirectTimeAnswer(state, expectedField, text) {
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) || !parseIsoDateTime(dateOnly)) return false;
     state.project[target] = `${dateOnly} ${time}`;
-    state.project[`${target}Approximate`] = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(String(text || ''));
+    state.project[`${target}Approximate`] = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то|наверное|вероятно|скорее всего|возможно|не уверен(?:а)?)/i.test(String(text || ''));
     state.confirmationStatus = state.confirmationStatus || {};
     state.confirmationStatus[target] = state.project[`${target}Approximate`] ? 'tentative' : 'confirmed';
     if (state.deferredFields) delete state.deferredFields[target];
@@ -6114,6 +6141,8 @@ addHistory(
 
 
         let suppressControlledQuestion = false;
+        let endDateCorrectionRequest = false;
+        let ambiguousEndDateRequest = false;
 
         if (!isAction) {
 
@@ -6126,7 +6155,9 @@ addHistory(
                 // Sales Engine. Это нужно ДО extraction.
                 expectedField =
                     calculateMissing(state)[0]?.field || inferCorrectionField(state, userText);
-
+                endDateCorrectionRequest = expectedField === 'dateEnd' && /(?:дата\s+и\s+время\s+)?окончан\w*.{0,35}(?:поменял\w*|изменил\w*|перенес\w*)|(?:поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*|врем\w*).{0,25}окончан\w*/i.test(userText);
+                ambiguousEndDateRequest = expectedField === 'dateEnd' && parseRussianDateMentions(userText).length >= 2 && /\b(?:или|либо)\b/i.test(userText);
+                if (endDateCorrectionRequest || ambiguousEndDateRequest) suppressControlledQuestion = true;
 
                 const extracted =
                     await extractClientData(
@@ -6236,6 +6267,12 @@ addHistory(
                     extracted.backline = 'not_required';
                 }
 
+                if (endDateCorrectionRequest) {
+                    extracted.dateStart = undefined;
+                    extracted.dateEnd = undefined;
+                    extracted.readyDate = undefined;
+                }
+
                 const previousLedDetails = state.project.ledDetails;
 
                 // «Контент, причём ваш» в диалоге с Дмитрием означает контент со стороны MLK,
@@ -6257,6 +6294,17 @@ addHistory(
                     extracted.dateStart = undefined;
                     extracted.dateEnd = undefined;
                     extracted.readyDate = undefined;
+                }
+
+                const dateMentionsForAmbiguity = parseRussianDateMentions(userText);
+                ambiguousEndDateRequest = expectedField === 'dateEnd' && dateMentionsForAmbiguity.length >= 2 && /\b(?:или|либо)\b/i.test(userText);
+                if (ambiguousEndDateRequest) {
+                    extracted.dateEnd = undefined;
+                    extracted.dateStart = undefined;
+                    state.project.dateEnd = null;
+                    deferField(state, 'dateEnd', `Клиент назвал несколько вариантов даты окончания: ${userText}`);
+                    state.confirmationStatus = state.confirmationStatus || {};
+                    state.confirmationStatus.dateEnd = 'tentative';
                 }
 
                 mergeProjectData(
@@ -6288,7 +6336,16 @@ addHistory(
                 // экран описан через сцену/расположение или решение оставлено MLK.
                 if (expectedField === 'ledDetails' && previousLedDetails) {
                     const ledReply = userText.trim();
-                    if (
+                    const ledDimensions = ledReply.match(/(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?/i);
+                    const isLedCorrection = /не\s+(?:его\s+)?располож\w*.{0,30}(?:а|,)?\s*(?:именно\s*)?(?:его\s*)?размер\w*|не\s+располож\w*.{0,30}размер\w*|нужен\s+один\s+такого\s+размер/i.test(ledReply);
+                    if (isLedCorrection && ledDimensions) {
+                        const width = ledDimensions[1].replace(',', '.');
+                        const height = ledDimensions[2].replace(',', '.');
+                        state.project.ledDetails = `1 LED-экран размером ${width}×${height} м`;
+                        state.confirmationStatus = state.confirmationStatus || {};
+                        state.confirmationStatus.ledDetails = 'confirmed';
+                        if (state.deferredFields) delete state.deferredFields.ledDetails;
+                    } else if (
                         ledReply &&
                         ledReply.toLowerCase() !== String(previousLedDetails).trim().toLowerCase() &&
                         !String(previousLedDetails).toLowerCase().includes(ledReply.toLowerCase())
@@ -6366,7 +6423,7 @@ addHistory(
                     const startDate = parseIsoDateTime(state.project.dateStart);
                     const endDate = parseIsoDateTime(state.project.dateEnd);
                     if (startDate && endDate && endDate < startDate) deferField(state, 'dateConflict', userText);
-                } else if (!suppressControlledQuestion) {
+                } else if (!suppressControlledQuestion && !endDateCorrectionRequest) {
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
 
@@ -6529,6 +6586,12 @@ addHistory(
 
         let assistantText = '';
 
+        if (endDateCorrectionRequest) {
+            assistantText = 'Конечно. На какую дату и время теперь нужно перенести окончание мероприятия? Напишите новую дату и время, пожалуйста.';
+        } else if (ambiguousEndDateRequest) {
+            assistantText = 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.';
+        }
+
         const normalizedUserQuestion = String(userText || '').trim().toLowerCase().replace(/[?!.,]+$/g, '');
         const repeatedPortfolioQuestion = intent === 'portfolio_question' && (state.history || []).slice(0, -1).some(item =>
             item.role === 'user' &&
@@ -6537,7 +6600,9 @@ addHistory(
         );
 
         try {
-            if (repeatedPortfolioQuestion) {
+            if (endDateCorrectionRequest || ambiguousEndDateRequest) {
+                // Ответ задан детерминированно: нужно уточнение, а не догадка модели.
+            } else if (repeatedPortfolioQuestion) {
                 assistantText = 'Я уже отвечал на этот вопрос и не хочу повторяться или додумывать детали. Если нужны конкретные примеры проектов, площадок или мероприятий, могу передать этот вопрос менеджеру MLK.';
             } else {
                 assistantText = await generateAssistantText(state, userText);
@@ -6571,10 +6636,14 @@ addHistory(
         // Убираем вопросы, которые DeepSeek мог скопировать из старой
         // истории диалога. Следующий вопрос выбирается только по текущему
         // структурированному состоянию Sales Engine.
-        let finalAssistantText = cleanAcknowledgementText(varyAcknowledgement(
-            stripQualificationQuestions(String(assistantText || '').trim()),
-            state
-        ));
+        let finalAssistantText = endDateCorrectionRequest
+            ? 'Конечно. На какую дату и время теперь нужно перенести окончание мероприятия? Напишите новую дату и время, пожалуйста.'
+            : ambiguousEndDateRequest
+                ? 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.'
+                : cleanAcknowledgementText(varyAcknowledgement(
+                    stripQualificationQuestions(String(assistantText || '').trim()),
+                    state
+                ));
 
         const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
         const applicationChanged = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus }) !== applicationBeforeMessage;
