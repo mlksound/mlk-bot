@@ -5727,6 +5727,15 @@ function cleanAcknowledgementText(text) {
         .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s+(?=[а-яё])/i, '$1: ');
 
     const ack = '(?:хорошо|отлично|записал(?:а)?|понял(?:а)?(?: вас)?|зафиксировал(?:а)?|принял(?:а)?)';
+
+    // Убираем повтор подтверждения сразу после двоеточия:
+    // «Зафиксировал: зафиксировал — персонал...» -> «Зафиксировал: персонал...».
+    // DeepSeek иногда возвращает подтверждение и в начале, и внутри сформированной фразы.
+    value = value.replace(
+        new RegExp('^(\\s*' + ack + ')\\s*[:,]\\s*' + ack + '\\s*[:;,—–-]\\s*', 'i'),
+        '$1: '
+    );
+
     // «... — зафиксировал» и «... . Зафиксировал» не должны дублировать подтверждение.
     value = value.replace(new RegExp('\\s*[—–-]\\s*' + ack + '[.!?]*\\s*$', 'i'), '.');
     value = value.replace(new RegExp('([.!?])\\s*' + ack + '[.!?]*\\s*$', 'i'), '$1');
@@ -6222,7 +6231,9 @@ addHistory(
 
         let suppressControlledQuestion = false;
         let endDateCorrectionRequest = false;
+        let dateStartCorrectionRequest = false;
         let ambiguousEndDateRequest = false;
+        let liftDimensionsLaterRequest = false;
 
         if (!isAction) {
 
@@ -6236,8 +6247,14 @@ addHistory(
                 expectedField =
                     calculateMissing(state)[0]?.field || inferCorrectionField(state, userText);
                 endDateCorrectionRequest = expectedField === 'dateEnd' && /(?:дата\s+и\s+время\s+)?окончан\w*.{0,35}(?:поменял\w*|изменил\w*|перенес\w*)|(?:поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*|врем\w*).{0,25}окончан\w*/i.test(userText);
+                const hasExplicitDateInCorrection = parseRussianDateMentions(userText).length > 0 || /\b(?:19|20)\d{2}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[./]\d{1,2}(?:[./](?:\d{2}|\d{4}))?\b/i.test(userText);
+                dateStartCorrectionRequest = expectedField === 'dateStart' && !hasExplicitDateInCorrection && /(?:дата\s+начала|начало\s+мероприятия|дата\s+старта).{0,35}(?:друг\w*|поменял\w*|изменил\w*|перенес\w*)|(?:друг\w*|поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*\s+начала|начал\w*\s+мероприятия)/i.test(userText);
                 ambiguousEndDateRequest = expectedField === 'dateEnd' && parseRussianDateMentions(userText).length >= 2 && /\b(?:или|либо)\b/i.test(userText);
-                if (endDateCorrectionRequest || ambiguousEndDateRequest) suppressControlledQuestion = true;
+                liftDimensionsLaterRequest = expectedField === 'liftDimensions' && /(?:узнаю|уточню|потом\s+(?:напишу|сообщу)|позже\s+(?:напишу|сообщу)|пока\s+не\s+знаю)/i.test(userText);
+                if (dateStartCorrectionRequest && !state.dateStartCorrectionOriginal && hasDateAndTime(state.project.dateStart)) {
+                    state.dateStartCorrectionOriginal = String(state.project.dateStart);
+                }
+                if (endDateCorrectionRequest || dateStartCorrectionRequest || ambiguousEndDateRequest) suppressControlledQuestion = true;
 
                 const extracted =
                     await extractClientData(
@@ -6347,7 +6364,7 @@ addHistory(
                     extracted.backline = 'not_required';
                 }
 
-                if (endDateCorrectionRequest) {
+                if (endDateCorrectionRequest || dateStartCorrectionRequest) {
                     extracted.dateStart = undefined;
                     extracted.dateEnd = undefined;
                     extracted.readyDate = undefined;
@@ -6546,6 +6563,24 @@ addHistory(
             // Это сохраняет даты из текста даже при временной ошибке AI.
             applyDirectContextualAnswers(state, userText, expectedField);
 
+            // При исправлении даты начала без нового времени сохраняем время,
+            // которое было подтверждено до временного/ошибочного исправления.
+            // Например: было 5 декабря 11:00, клиент временно назвал 10 декабря,
+            // затем поправил только дату на 5 декабря — возвращаем 11:00, а не 10:00.
+            if (state.dateStartCorrectionOriginal && expectedField === 'dateStart') {
+                const correctionDateMentions = parseRussianDateMentions(userText);
+                const explicitCorrectionDate = correctionDateMentions[0]?.date?.slice(0, 10);
+                const explicitCorrectionTime = /(?:\b(?:в|к|около|примерно)\s*\d{1,2}(?::[0-5]\d|\s*(?:утра|дня|вечера|ночи)?\b)|\b\d{1,2}:[0-5]\d\b)/i.test(userText);
+                if (explicitCorrectionDate && !explicitCorrectionTime) {
+                    const originalTime = String(state.dateStartCorrectionOriginal).match(/^\d{4}-\d{2}-\d{2}\s+(\d{1,2}:\d{2})$/)?.[1];
+                    state.project.dateStart = `${explicitCorrectionDate}${originalTime ? ` ${originalTime}` : ''}`;
+                    state.confirmationStatus = state.confirmationStatus || {};
+                    state.confirmationStatus.dateStart = originalTime ? 'confirmed' : 'tentative';
+                    if (state.deferredFields) delete state.deferredFields.dateStart;
+                    delete state.dateStartCorrectionOriginal;
+                }
+            }
+
             if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
                 const appliedTime = applyDirectTimeAnswer(state, expectedField, userText);
                 if (!appliedTime && !suppressControlledQuestion) {
@@ -6690,6 +6725,10 @@ addHistory(
 
         if (endDateCorrectionRequest) {
             assistantText = 'Конечно. На какую дату и время теперь нужно перенести окончание мероприятия? Напишите новую дату и время, пожалуйста.';
+        } else if (dateStartCorrectionRequest) {
+            assistantText = 'Конечно. На какую дату нужно перенести начало мероприятия? Напишите новую дату и время, пожалуйста.';
+        } else if (liftDimensionsLaterRequest) {
+            assistantText = 'Хорошо, размеры грузового лифта уточним позже.';
         } else if (ambiguousEndDateRequest) {
             assistantText = 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.';
         }
@@ -6702,8 +6741,8 @@ addHistory(
         );
 
         try {
-            if (endDateCorrectionRequest || ambiguousEndDateRequest) {
-                // Ответ задан детерминированно: нужно уточнение, а не догадка модели.
+            if (endDateCorrectionRequest || dateStartCorrectionRequest || liftDimensionsLaterRequest || ambiguousEndDateRequest) {
+                // Ответ задан детерминированно: нужно уточнение/подтверждение, а не догадка модели.
             } else if (repeatedPortfolioQuestion) {
                 assistantText = 'Я уже отвечал на этот вопрос и не хочу повторяться или додумывать детали. Если нужны конкретные примеры проектов, площадок или мероприятий, могу передать этот вопрос менеджеру MLK.';
             } else {
@@ -6740,19 +6779,23 @@ addHistory(
         // структурированному состоянию Sales Engine.
         let finalAssistantText = endDateCorrectionRequest
             ? 'Конечно. На какую дату и время теперь нужно перенести окончание мероприятия? Напишите новую дату и время, пожалуйста.'
-            : ambiguousEndDateRequest
-                ? 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.'
-                : cleanAcknowledgementText(varyAcknowledgement(
-                    stripQualificationQuestions(String(assistantText || '').trim()),
-                    state
-                ));
+            : dateStartCorrectionRequest
+                ? 'Конечно. На какую дату нужно перенести начало мероприятия? Напишите новую дату и время, пожалуйста.'
+                : liftDimensionsLaterRequest
+                    ? 'Хорошо, размеры грузового лифта уточним позже.'
+                    : ambiguousEndDateRequest
+                        ? 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.'
+                        : cleanAcknowledgementText(varyAcknowledgement(
+                            stripQualificationQuestions(String(assistantText || '').trim()),
+                            state
+                        ));
 
         const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
         const applicationChanged = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus }) !== applicationBeforeMessage;
 
         // Если заявка уже собрана и клиент уточнил/исправил данные, повторяем полный итог.
         // Вопросы о компании/портфолио без изменения заявки под это правило не попадают.
-        if (!calculateMissing(state).length && applicationChanged && !['manager_request', 'out_of_scope'].includes(intent)) {
+        if (!endDateCorrectionRequest && !dateStartCorrectionRequest && !ambiguousEndDateRequest && !liftDimensionsLaterRequest && !calculateMissing(state).length && applicationChanged && !['manager_request', 'out_of_scope'].includes(intent)) {
             finalAssistantText = buildClientSummary(state);
         }
 
