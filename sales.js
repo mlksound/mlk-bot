@@ -158,22 +158,26 @@ const LEVELS = {
 const PERSONNEL = {
     management: {
         value: 'management',
-        label: 'Полное управление оборудованием'
+        label: 'Полное управление оборудованием',
+        description: 'Полный цикл обслуживания: доставка, монтаж, настройка, работа технических специалистов на оборудовании во время мероприятия (например, управление с пульта), демонтаж и вывоз. На небольшом мероприятии это может быть один специалист; на сложном — звукорежиссёр, художник по свету, видеоинженер и другие техники. Итоговое количество специалистов определяет менеджер проекта.'
     },
 
     duty_technician: {
         value: 'duty_technician',
-        label: 'Дежурный техник'
+        label: 'Дежурный техник',
+        description: 'MLK доставляет, монтирует и настраивает оборудование. Во время мероприятия специалист остаётся на площадке, контролирует работу техники и оперативно устраняет неисправности, но не управляет оборудованием и не ведёт программу. Подходит, если постоянное управление не требуется или у заказчика есть свои специалисты для управления.'
     },
 
     installation_dismantling: {
         value: 'installation_dismantling',
-        label: 'Только монтаж-демонтаж'
+        label: 'Только монтаж-демонтаж',
+        description: 'MLK доставляет комплект, профессионально монтирует и настраивает оборудование, затем передаёт его заказчику по акту. Во время мероприятия заказчик самостоятельно управляет техникой. После завершения аренды MLK демонтирует и вывозит комплект.'
     },
 
     other: {
         value: 'other',
-        label: 'Другое'
+        label: 'Другое',
+        description: 'Нестандартный вариант обслуживания, который нужно уточнить с клиентом и передать менеджеру проекта.'
     }
 };
 
@@ -402,6 +406,7 @@ function createSalesState(clientId, clientName = '') {
             dateStart: null,
             dateEnd: null,
             readyDate: null,
+            readyDateTimeRange: null,
 
             location: null,
 
@@ -763,6 +768,16 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
     const hasReadyContext = /(?:оборудован\w*|все\s+должно\s+стоять|всё\s+должно\s+стоять|конструкц\w*).{0,100}(?:готов\w*|стоя\w*|установлен\w*|к\s*\d{1,2})/i.test(lower) ||
         /(?:должно\s+быть\s+готово|должны\s+быть\s+готовы|всё\s+должно\s+стоять|все\s+должно\s+стоять)/i.test(lower);
 
+    // «В один день» / «мероприятие один день» задаёт ту же дату окончания.
+    // Если время окончания неизвестно, calculateMissing спросит только время.
+    if (expectedField === 'dateEnd' && /(?:всё?\s+в\s+один\s+день|мероприятие\s+один\s+день|один\s+день\s+только|только\s+один\s+день)/i.test(lower) && hasDateOrDateTime(state.project.dateStart)) {
+        const currentEndTime = String(state.project.dateEnd || '').match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '';
+        state.project.dateEnd = `${String(state.project.dateStart).slice(0, 10)}${currentEndTime ? ` ${currentEndTime}` : ''}`;
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.dateEnd = currentEndTime ? 'confirmed' : 'tentative';
+        if (state.deferredFields) delete state.deferredFields.dateEnd;
+    }
+
     // «В этот же день» означает дату текущего мероприятия, а не новую дату.
     if (/(?:в\s+этот\s+же\s+день|того\s+же\s+дня|в\s+тот\s+же\s+день)/i.test(lower) &&
         (expectedField === 'dateEnd' || /окончан|заканч|заверш/i.test(lower)) &&
@@ -787,6 +802,25 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
         state.confirmationStatus.dateEnd = 'tentative';
         return;
     }
+    if (expectedField === 'readyDate' || expectedField === 'readyDateTime' || hasReadyContext) {
+        const firstRangeTime = lower.match(/(?:примерно\s+|около\s+|к\s*|в\s*)+(\d{1,2})(?::([0-5]\d))?/i);
+        const secondRangeTime = lower.match(/(?:или|[-–])\s*(?:к|в)?\s*(\d{1,2})(?::([0-5]\d))?/i);
+        if (firstRangeTime && secondRangeTime && /\bили\b|[-–]/.test(lower)) {
+            const fmt = (m) => `${String(Number(m[1])).padStart(2, '0')}:${String(m[2] || '00').padStart(2, '0')}`;
+            let from = fmt(firstRangeTime), to = fmt(secondRangeTime);
+            if (to < from) [from, to] = [to, from];
+            state.project.readyDateTimeRange = `${from}–${to}`;
+            const readyDate = String(state.project.readyDate || '').slice(0, 10) || (mentions.length ? mentions[mentions.length - 1].date.slice(0, 10) : '');
+            if (readyDate && /^\d{4}-\d{2}-\d{2}$/.test(readyDate)) {
+                state.project.readyDate = `${readyDate} ${from}`;
+                state.project.readyDateApproximate = true;
+                state.confirmationStatus = state.confirmationStatus || {};
+                state.confirmationStatus.readyDate = 'tentative';
+                if (state.deferredFields) delete state.deferredFields.readyDate;
+            }
+        }
+    }
+
     if (hasReadyContext && /\b\d{1,2}(?::[0-5]\d|\s*(?:утра|дня|вечера|ночи))\b/i.test(lower)) {
         let readyDate = mentions.length ? mentions[mentions.length - 1].date.slice(0, 10) : '';
         if (!readyDate && /(?:в\s+этот\s+же\s+день|того\s+же\s+дня|в\s+тот\s+же\s+день)/i.test(lower)) {
@@ -797,8 +831,8 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
         }
         const time = parseTimeAnswer(value);
         if (readyDate && time) {
-            state.project.readyDate = `${readyDate} ${time}`;
-            state.project.readyDateApproximate = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(value);
+            if (!state.project.readyDateTimeRange) state.project.readyDate = `${readyDate} ${time}`;
+            state.project.readyDateApproximate = Boolean(state.project.readyDateTimeRange) || /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(value);
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.readyDate = state.project.readyDateApproximate ? 'tentative' : 'confirmed';
             if (state.deferredFields) delete state.deferredFields.readyDate;
@@ -1171,6 +1205,9 @@ function normalizeExtractedData(
 
         if (isUnknown(p.guestCount)) {
             data.guestCount = 'unknown';
+        } else if (typeof p.guestCount === 'string' && /\d+\s*[–—-]\s*\d+/.test(p.guestCount)) {
+            // Диапазон гостей нельзя сводить к одному числу при сохранении состояния.
+            data.guestCount = p.guestCount;
         } else {
             const number =
                 normalizeNumber(
@@ -1684,6 +1721,7 @@ function mergeProjectData(
 
             p[field] =
                 extracted[field];
+            if (field === 'readyDate') p.readyDateTimeRange = null;
             assignStatus(field, extracted[field]);
 
             if (state.deferredFields) {
@@ -3110,6 +3148,9 @@ equipment:
 "не нужен", "не нужна", "не нужны", "не надо" или смысловой
 эквивалент для текстового поля, сохрани это как значение
 "not_required". Не оставляй такие ответы пустыми.
+ВАЖНОЕ ИСКЛЮЧЕНИЕ: ответ «отдельных требований к световым приборам нет»
+означает отсутствие специальных требований к типу/количеству, а НЕ то,
+что световые приборы не нужны. Сохраняй смысл именно так.
 
 Если клиент исправляет ранее сказанное значение —
 верни новое значение.
@@ -3532,7 +3573,15 @@ function buildControlledQuestion(
             return 'Подскажите, пожалуйста, ориентировочное количество гостей.';
 
         case 'personnel':
-            return 'Какой персонал вам нужен на мероприятии?';
+            return [
+                'Какой формат обслуживания оборудования вам нужен?',
+                '',
+                `• ${PERSONNEL.management.label} — ${PERSONNEL.management.description}`,
+                `• ${PERSONNEL.duty_technician.label} — ${PERSONNEL.duty_technician.description}`,
+                `• ${PERSONNEL.installation_dismantling.label} — ${PERSONNEL.installation_dismantling.description}`,
+                '',
+                'Выберите подходящий вариант или опишите, как вы планируете использовать оборудование.'
+            ].join('\n');
 
         case 'personnelDetails':
             return 'Уточните, пожалуйста, какой именно персонал вам требуется.';
@@ -3739,6 +3788,15 @@ ${JSON.stringify(
 ------------------------------------------------------------
 ВАЖНЫЕ ПРАВИЛА
 ------------------------------------------------------------
+
+ПРАВИЛА ОБСЛУЖИВАНИЯ ОБОРУДОВАНИЯ MLK
+
+Используй следующие определения, когда клиент спрашивает о вариантах персонала или обслуживания:
+- Полное управление оборудованием: MLK доставляет, монтирует и настраивает оборудование; технические специалисты управляют им во время мероприятия; после мероприятия выполняются демонтаж и вывоз. На небольшом мероприятии может работать один специалист, на сложном состав команды больше. Окончательное количество персонала определяет менеджер проекта.
+- Дежурный техник: MLK доставляет, монтирует и настраивает оборудование; специалист остаётся на площадке, следит за исправностью и устраняет неисправности, но НЕ управляет оборудованием во время мероприятия. Подходит, если постоянное управление не требуется или у клиента есть свои операторы.
+- Только монтаж/демонтаж: MLK доставляет, монтирует и настраивает оборудование, передаёт его клиенту по акту; во время мероприятия клиент управляет им самостоятельно; после аренды MLK демонтирует и вывозит комплект.
+
+Не смешивай эти варианты и не обещай конкретное количество специалистов: оно определяется менеджером проекта. Если клиент выбирает дежурного техника, не говори, что техник будет запускать контент, управлять светом, звуком или экраном. Если такая задача нужна, уточни её и объясни, что для управления требуется соответствующий формат обслуживания.
 
 1. JS Sales Engine является источником истины
    по состоянию проекта и порядку квалификации.
@@ -4113,8 +4171,7 @@ function buildManagerSummary(
 
     lines.push(
         `Готовность: ${
-            p.readyDate ||
-            'Не указано'
+            p.readyDateTimeRange && p.readyDate ? `${String(p.readyDate).slice(0, 10)} ${p.readyDateTimeRange}` : (p.readyDate || 'Не указано')
         }`
     );
 
@@ -4582,7 +4639,7 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Готовность оборудования: ${p.readyDate || 'уточним с вами'}${p.readyDateApproximate ? ' (ориентировочно)' : ''}`
+        `• Готовность оборудования: ${p.readyDateTimeRange && p.readyDate ? `${String(p.readyDate).slice(0, 10)} ${p.readyDateTimeRange}` : (p.readyDate || 'уточним с вами')}${p.readyDateApproximate ? ' (ориентировочно)' : ''}`
     );
 
 
@@ -5535,15 +5592,18 @@ function applyAction(
 
         if (value === 'no') {
 
+            // «Нет отдельных требований» не означает, что световые приборы
+            // не нужны: сохраняем отсутствие особых требований, а не отказ.
             state.project.lightFixtures =
-                'not_required';
+                'Отдельных требований к типу и количеству световых приборов нет';
             state.confirmationStatus = state.confirmationStatus || {};
-            state.confirmationStatus.lightFixtures = 'not_required';
+            state.confirmationStatus.lightFixtures = 'confirmed';
+            if (state.deferredFields) delete state.deferredFields.lightFixtures;
 
             state.lastAction =
                 'ask_light_fixtures_no';
 
-            return 'Отдельных требований к световым приборам нет.';
+            return 'Понял вас: отдельных требований к типу и количеству световых приборов нет.';
         }
     }
 
@@ -5621,6 +5681,7 @@ function applyAction(
         if (value) {
 
             state.project.readyDate = String(value);
+            state.project.readyDateTimeRange = null;
             state.confirmationStatus = state.confirmationStatus || {};
             state.confirmationStatus.readyDate = 'confirmed';
             if (state.deferredFields) delete state.deferredFields.readyDate;
@@ -6303,6 +6364,13 @@ addHistory(
                     }
                 }
 
+                // Не позволяем модели заполнять тип лифта по ответу на другой вопрос
+                // (например, «5 или 6» на вопрос об этаже). Нужен ответ о лифте
+                // либо явное упоминание лифта в сообщении клиента.
+                if (expectedField !== 'lift' && !/лифт/i.test(userText)) {
+                    extracted.lift = undefined;
+                }
+
                 // Уточняем ответ про лифт по прямому смыслу сообщения.
                 // Пассажирский лифт не приравниваем к грузовому.
                 if (expectedField === 'lift') {
@@ -6355,6 +6423,13 @@ addHistory(
                         : 'Используются фонограммы';
                 }
 
+                // Для световых приборов «нет отдельных требований» не означает
+                // «свет не нужен». Не допускаем семантического превращения в not_required.
+                if (expectedField === 'lightFixtures' &&
+                    /(?:отдельн\w*|особ\w*|конкретн\w*).{0,45}(?:требован\w*|указан\w*).{0,35}(?:нет|не\s+нужн\w*)|(?:нет|не\s+нужн\w*).{0,45}(?:отдельн\w*|особ\w*|конкретн\w*).{0,35}(?:требован\w*|указан\w*)/i.test(userText)) {
+                    extracted.lightFixtures = 'Отдельных требований к типу и количеству световых приборов нет';
+                }
+
                 // Короткие и разговорные отрицательные ответы на вопрос о бэклайне
                 // — полноценный ответ. Принимаем также частые опечатки.
                 if (
@@ -6362,6 +6437,13 @@ addHistory(
                     /^\s*(?:нет|не\s+(?:надо|нужн\w*|треб\w*|труб\w*|понадоб\w*)|не\s+треб\w*)\s*[.!?]*\s*$/i.test(userText)
                 ) {
                     extracted.backline = 'not_required';
+                }
+
+                // Вопрос о конкретной гарнитуре относится к звуковой программе,
+                // а не к бэклайну. Не закрываем им вопрос о мониторах/инструментах.
+                if (expectedField === 'backline' && /(?:гарнитур|микрофон|mu\s*[- ]?\s*\d|mipro|радиосистем|ведущ\w*).{0,80}(?:подойд|нужн|можно|будет|телесн\w*|бежев\w*)|(?:подойд|нужн|можно|будет).{0,80}(?:гарнитур|микрофон|mu\s*[- ]?\s*\d|mipro)/i.test(userText)) {
+                    extracted.backline = undefined;
+                    extracted.soundDetails = undefined;
                 }
 
                 if (endDateCorrectionRequest || dateStartCorrectionRequest) {
@@ -6410,6 +6492,15 @@ addHistory(
                     userText
                 );
 
+                if (expectedField === 'guestCount') {
+                    const guestRange = userText.match(/(?:около\s*)?(\d{1,5})\s*(?:-|–|—|до|по|или)\s*(\d{1,5})\s*(?:человек\w*|гост\w*|участник\w*)?/i);
+                    if (guestRange) {
+                        state.project.guestCount = `${guestRange[1]}–${guestRange[2]}`;
+                        state.confirmationStatus = state.confirmationStatus || {};
+                        state.confirmationStatus.guestCount = /или/i.test(userText) ? 'tentative' : 'confirmed';
+                    }
+                }
+
                 if (expectedField === 'eventType') {
                     const directEventType = inferEventTypeFromText(userText);
                     if (directEventType) {
@@ -6433,12 +6524,15 @@ addHistory(
                 // экран описан через сцену/расположение или решение оставлено MLK.
                 if (expectedField === 'ledDetails' && previousLedDetails) {
                     const ledReply = userText.trim();
+                    const acknowledgementOnly = /^(?:супер|отлично|хорошо|ок|окей|понятно|спасибо|да|ага|класс|замечательно)[.!\s🙏👍🙂😊]*$/i.test(ledReply);
                     const ledDimensions = ledReply.match(/(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?/i);
                     const isLedCorrection = /не\s+(?:его\s+)?располож\w*.{0,30}(?:а|,)?\s*(?:именно\s*)?(?:его\s*)?размер\w*|не\s+располож\w*.{0,30}размер\w*|нужен\s+один\s+такого\s+размер/i.test(ledReply);
                     // Короткий ответ только с новыми габаритами (например, «3 на 3»)
                     // является исправлением размера, а не дополнительным экраном/расположением.
                     const dimensionsOnlyReply = Boolean(ledDimensions) && /^(?:экран\s*)?\d+(?:[,.]\d+)?\s*(?:м\s*)?(?:×|х|x|на)\s*\d+(?:[,.]\d+)?\s*(?:м)?[.!]?$/i.test(ledReply);
-                    if ((isLedCorrection || dimensionsOnlyReply) && ledDimensions) {
+                    if (acknowledgementOnly) {
+                        // Реакция на предыдущий ответ не является техническим уточнением.
+                    } else if ((isLedCorrection || dimensionsOnlyReply) && ledDimensions) {
                         const width = ledDimensions[1].replace(',', '.');
                         const height = ledDimensions[2].replace(',', '.');
                         state.project.ledDetails = `1 LED-экран размером ${width}×${height} м`;
