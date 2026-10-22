@@ -273,6 +273,32 @@ const salesStates = new Map();
 
 
 // ============================================================
+// STATE MIGRATION
+// ============================================================
+// Старые сохранённые состояния не содержат новых полей.
+
+function ensureStateExtras(state) {
+    if (!state) return state;
+    if (!state.project) state.project = {};
+    const p = state.project;
+    if (p.multiDay === undefined) p.multiDay = null;
+    if (p.readyChoice === undefined) p.readyChoice = null;
+    if (p.budget === undefined) p.budget = null;
+    if (!state.client) state.client = { id: '', name: '', contacts: '' };
+    if (state.client.contacts === undefined) state.client.contacts = '';
+    if (!state.optional || typeof state.optional !== 'object') {
+        state.optional = { asked: null, budget: null, extra: null, contacts: null };
+    }
+    if (!state.confirmation || typeof state.confirmation !== 'object') {
+        state.confirmation = { status: 'none', editBlock: null };
+    }
+    if (!state.deferredFields) state.deferredFields = {};
+    if (!state.confirmationStatus) state.confirmationStatus = {};
+    return state;
+}
+
+
+// ============================================================
 // LOAD STATE FROM TURSO
 // ============================================================
 
@@ -317,8 +343,7 @@ async function hydrateSalesState(
         const state =
             salesStates.get(key);
 
-        if (!state.deferredFields) state.deferredFields = {};
-        if (!state.confirmationStatus) state.confirmationStatus = {};
+        ensureStateExtras(state);
         if (!state.applicationId) state.applicationId = crypto.randomUUID();
         if (!state.applicationCreatedAt) state.applicationCreatedAt = state.updatedAt || new Date().toISOString();
         if (!state.applicationCode) state.applicationCode = buildApplicationCode(state);
@@ -393,7 +418,8 @@ function createSalesState(clientId, clientName = '') {
 
         client: {
             id: String(clientId || ''),
-            name: clientName || ''
+            name: clientName || '',
+            contacts: ''
         },
 
         project: {
@@ -437,6 +463,11 @@ function createSalesState(clientId, clientName = '') {
             additionalServices: null,
             specialConditions: null,
 
+            budget: null,
+
+            multiDay: null,
+            readyChoice: null,
+
             personnel: null,
             personnelDetails: null,
 
@@ -460,6 +491,20 @@ function createSalesState(clientId, clientName = '') {
 
         // Подтверждённость значений: confirmed / tentative / unknown / not_required.
         confirmationStatus: {},
+
+        // Необязательные вопросы после обязательной квалификации.
+        optional: {
+            asked: null,
+            budget: null,
+            extra: null,
+            contacts: null
+        },
+
+        // Подтверждение заявки клиентом: none / awaiting / editing / confirmed.
+        confirmation: {
+            status: 'none',
+            editBlock: null
+        },
 
         stage: 'greeting',
 
@@ -764,6 +809,15 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
     const value = String(text || '').trim();
     const lower = value.toLowerCase().replace(/ё/g, 'е');
     if (!value) return;
+
+    // Количество дней, названное клиентом в свободной форме.
+    if (state.project.multiDay === null || state.project.multiDay === undefined) {
+        if (/(?:в\s+один\s+день|один\s+день|однодневн\w*|только\s+один\s+день)/i.test(lower)) {
+            state.project.multiDay = false;
+        } else if (/(?:несколько\s+дней|многодневн\w*|\b(?:2|3|4|5|6|7|два|три|четыре|пять)\s+дн(?:я|ей)\b|\bдвух\s+дн|\bтр[её]х\s+дн)/i.test(lower)) {
+            state.project.multiDay = true;
+        }
+    }
 
     const readinessExpected = expectedField === 'readyDate' || expectedField === 'readyDateTime';
     const hasReadyContext = readinessExpected ||
@@ -1453,6 +1507,11 @@ function normalizeExtractedData(
             );
     }
 
+    if (p.budget !== undefined) {
+        const budget = cleanString(p.budget);
+        if (budget) data.budget = budget;
+    }
+
     if (p.additionalServices !== undefined) {
         data.additionalServices =
             normalizeNotRequired(
@@ -1698,6 +1757,7 @@ function mergeProjectData(
 
         'additionalServices',
         'specialConditions',
+        'budget',
 
         'clientRequest',
         'additionalInfo'
@@ -1721,9 +1781,19 @@ function mergeProjectData(
             extracted[field] !== ''
         ) {
 
-            p[field] =
-                extracted[field];
-            if (field === 'readyDate') p.readyDateTimeRange = null;
+            let incomingValue = extracted[field];
+
+            // Клиент перенёс только дату: сохраняем ранее названное время.
+            if (['dateStart', 'dateEnd', 'readyDate'].includes(field) && /^\d{4}-\d{2}-\d{2}$/.test(String(incomingValue))) {
+                const previousTime = String(p[field] || '').match(/\s+(\d{1,2}:\d{2})$/)?.[1];
+                if (previousTime) incomingValue = `${incomingValue} ${previousTime}`;
+            }
+
+            p[field] = incomingValue;
+            if (field === 'readyDate') {
+                p.readyDateTimeRange = null;
+                if (p.readyChoice !== 'earlier') p.readyChoice = 'custom';
+            }
             assignStatus(field, extracted[field]);
 
             if (state.deferredFields) {
@@ -2049,8 +2119,7 @@ function deferField(state, field, rawAnswer) {
 
 function isConversationalMetaMessage(text) {
     const value = String(text || '').trim();
-    return /[?？]\s*$/.test(value) ||
-        /^(?:ты на связи|вы на связи|точно всё спросил|точно все спросил|а такие мероприятия вы уже работали|позови менеджера|соедини с менеджером|хочу поговорить с менеджером|кто ты|что ты умеешь)(?=$|[\s!?.,])/i.test(value);
+    return /^(?:ты на связи|вы на связи|точно всё спросил|точно все спросил|а такие мероприятия вы уже работали|позови менеджера|соедини с менеджером|хочу поговорить с менеджером|кто ты|что ты умеешь)(?=$|[\s!?.,])/i.test(value);
 }
 
 function preserveUnparsedAnswer(state, field, rawAnswer) {
@@ -2060,6 +2129,20 @@ function preserveUnparsedAnswer(state, field, rawAnswer) {
     // extraction модель могла изменить другие поля, и такая проверка мешала
     // сохранить ответ на текущий вопрос.
     if (!field || !answer) return false;
+
+    // Поля, на которые клиент отвечает кнопками: первый непонятный текстовый ответ
+    // не пропускает вопрос (его просто задают снова с кнопками). Пропускаем
+    // поле только после второго непонятного ответа, чтобы не зациклиться.
+    const BUTTON_FIELDS = ['eventType', 'equipment', 'eventLevel', 'personnel'];
+    if (BUTTON_FIELDS.includes(field)) {
+        const current = state.project ? state.project[field] : null;
+        const hasValue = Array.isArray(current) ? current.length > 0 : (current !== null && current !== undefined && current !== '');
+        if (!hasValue) {
+            state.unparsedAttempts = state.unparsedAttempts || {};
+            state.unparsedAttempts[field] = (state.unparsedAttempts[field] || 0) + 1;
+            if (state.unparsedAttempts[field] < 2) return false;
+        }
+    }
 
     // Если этаж уже сохранён как диапазон (например, «2–3»), не переносим
     // его обратно в deferredFields: значение пригодно для следующего шага —
@@ -2085,7 +2168,7 @@ function preserveUnparsedAnswer(state, field, rawAnswer) {
 
     const deferredFields = new Set([
         'guestCount', 'personnel', 'place', 'floor', 'lift',
-        'dateConflict'
+        'dateConflict', 'eventType', 'eventLevel', 'equipment'
     ]);
     const rawTextFields = new Set([
         'location', 'liftDimensions', 'personnelDetails',
@@ -2130,12 +2213,61 @@ const DEFERRED_FIELD_LABELS = {
     dateConflict: 'Проверка последовательности дат начала и окончания',
     ledDetails: 'Тип, расположение и размеры LED-экранов',
     place: 'Место проведения: улица или помещение',
+    eventDays: 'Сколько дней идёт мероприятие',
     floor: 'Этаж площадки',
     lift: 'Тип лифта / способ подъёма',
     liftDimensions: 'Размеры лифта',
     soundRider: 'Звуковой райдер',
     lightFixtures: 'Требования к световым приборам'
 };
+
+// ============================================================
+// EVENT DAYS HELPERS
+// ============================================================
+
+function addDaysToIsoDate(dateOnly, days) {
+    const parsed = parseIsoDateTime(String(dateOnly || '').slice(0, 10));
+    if (!parsed) return null;
+    parsed.setDate(parsed.getDate() + days);
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+}
+
+// Если готовность выбрана кнопкой («в день мероприятия» / «за день до») и
+// клиент перенёс дату начала, переносим и готовность. Дату, которую клиент
+// назвал сам, не трогаем.
+function syncReadyDate(state) {
+    const p = state.project;
+    if (!['event_day', 'day_before'].includes(p.readyChoice) || !p.readyDerivedFrom) return;
+    if (!hasDateOrDateTime(p.dateStart) || !hasDateOrDateTime(p.readyDate)) return;
+
+    const startDate = String(p.dateStart).slice(0, 10);
+    if (startDate === p.readyDerivedFrom) return;
+
+    const derive = d => (p.readyChoice === 'day_before' ? addDaysToIsoDate(d, -1) : d);
+    const readyDate = String(p.readyDate).slice(0, 10);
+
+    if (readyDate === derive(p.readyDerivedFrom)) {
+        const time = String(p.readyDate).match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '';
+        p.readyDate = `${derive(startDate)}${time ? ` ${time}` : ''}`;
+    }
+    p.readyDerivedFrom = startDate;
+}
+
+// Для мероприятия в один день дата окончания равна дате начала
+// (или следующему дню, если мероприятие идёт после полуночи).
+// Клиент выбирает только время.
+function syncEventDays(state) {
+    const p = state.project;
+    if (p.multiDay !== false || !hasDateOrDateTime(p.dateStart)) return;
+
+    const startDate = String(p.dateStart).slice(0, 10);
+    const endDate = hasDateOrDateTime(p.dateEnd) ? String(p.dateEnd).slice(0, 10) : '';
+    const endTime = String(p.dateEnd || '').match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '';
+
+    if (!endDate || (endDate !== startDate && endDate !== addDaysToIsoDate(startDate, 1))) {
+        p.dateEnd = `${startDate}${endTime ? ` ${endTime}` : ''}`;
+    }
+}
 
 // ============================================================
 // CALCULATE MISSING
@@ -2165,6 +2297,7 @@ function calculateMissing(state) {
 
     const p = state.project;
     if (!state.deferredFields) state.deferredFields = {};
+    if (!Array.isArray(p.equipment)) p.equipment = [];
 
     const missing = [];
 
@@ -2172,7 +2305,7 @@ function calculateMissing(state) {
     // 1. EVENT TYPE
     // --------------------------------------------------------
 
-    if (!p.eventType) {
+    if (!p.eventType && !isDeferred(state, 'eventType')) {
 
         missing.push({
             field: 'eventType',
@@ -2188,8 +2321,9 @@ function calculateMissing(state) {
 // --------------------------------------------------------
 
 if (
-    !Array.isArray(p.equipment) ||
-    p.equipment.length === 0
+    (!Array.isArray(p.equipment) ||
+    p.equipment.length === 0) &&
+    !isDeferred(state, 'equipment')
 ) {
 
     missing.push({
@@ -2210,7 +2344,7 @@ if (
     p.eventType === 'sports'
 ) {
 
-    if (!p.eventLevel) {
+    if (!p.eventLevel && !isDeferred(state, 'eventLevel')) {
 
         missing.push({
             field: 'eventLevel',
@@ -2225,7 +2359,8 @@ if (
 ) {
 
     if (
-        (p.guestCount === null || p.guestCount === undefined)
+        (p.guestCount === null || p.guestCount === undefined) &&
+        !isDeferred(state, 'guestCount')
     ) {
 
         missing.push({
@@ -2242,7 +2377,7 @@ if (
     // 4. PERSONNEL
     // --------------------------------------------------------
 
-    if (!p.personnel) {
+    if (!p.personnel && !isDeferred(state, 'personnel')) {
 
         missing.push({
             field: 'personnel',
@@ -2273,23 +2408,61 @@ if (
 
 
     // --------------------------------------------------------
-    // 5. DATES + TIME — one concrete missing value at a time
+    // 5. DATES + TIME
     // --------------------------------------------------------
-    // Если даты нет — показываем существующий календарь.
-    // Если дата уже известна, но нет времени, спрашиваем только время.
-    const dateFields = [
-        { field: 'dateStart', dateAction: 'ask_date_start', timeField: 'dateStartTime', label: 'начала мероприятия/репетиции' },
-        { field: 'dateEnd', dateAction: 'ask_date_end', timeField: 'dateEndTime', label: 'окончания мероприятия' },
-        { field: 'readyDate', dateAction: 'ask_ready_date', timeField: 'readyDateTime', label: 'готовности оборудования' }
-    ];
-    for (const item of dateFields) {
-        const value = p[item.field];
-        if (hasDateAndTime(value)) continue;
-        if (!hasDateOrDateTime(value)) {
-            missing.push({ field: item.field, action: item.dateAction });
+    // Порядок: один день / несколько -> дата начала -> дата окончания
+    // (только для нескольких дней) -> время начала и окончания одним вопросом
+    // -> готовность оборудования (дата + время, это влияет на стоимость).
+    syncEventDays(state);
+    syncReadyDate(state);
+
+    const hasStartDate = hasDateOrDateTime(p.dateStart);
+    const hasEndDate = hasDateOrDateTime(p.dateEnd);
+
+    if (p.multiDay !== true && p.multiDay !== false) {
+        if (hasStartDate && hasEndDate) {
+            p.multiDay = String(p.dateStart).slice(0, 10) !== String(p.dateEnd).slice(0, 10);
         } else {
-            missing.push({ field: item.timeField, action: 'text_question', dateField: item.field, label: item.label, value });
+            missing.push({ field: 'eventDays', action: 'ask_days' });
+            return missing;
         }
+    }
+
+    if (!hasStartDate) {
+        missing.push({ field: 'dateStart', action: 'ask_date_start' });
+        return missing;
+    }
+
+    if (p.multiDay && !hasEndDate) {
+        missing.push({ field: 'dateEnd', action: 'ask_date_end' });
+        return missing;
+    }
+
+    const startHasTime = hasDateAndTime(p.dateStart);
+    const endHasTime = hasDateAndTime(p.dateEnd);
+
+    if (!startHasTime && !endHasTime) {
+        missing.push({ field: 'eventTimes', action: 'text_question' });
+        return missing;
+    }
+    if (!startHasTime) {
+        missing.push({ field: 'dateStartTime', action: 'text_question', dateField: 'dateStart', label: 'начала мероприятия/репетиции', value: p.dateStart });
+        return missing;
+    }
+    if (!endHasTime) {
+        missing.push({ field: 'dateEndTime', action: 'text_question', dateField: 'dateEnd', label: 'окончания мероприятия', value: p.dateEnd });
+        return missing;
+    }
+
+    if (!hasDateOrDateTime(p.readyDate)) {
+        missing.push({
+            field: 'readyDate',
+            action: p.readyChoice === 'earlier' ? 'ask_ready_date' : 'ask_ready_choice'
+        });
+        return missing;
+    }
+    if (!hasDateAndTime(p.readyDate)) {
+        missing.push({ field: 'readyDateTime', action: 'text_question', dateField: 'readyDate', label: 'готовности оборудования', value: p.readyDate });
         return missing;
     }
 
@@ -2663,6 +2836,61 @@ if (
 
 
 // ============================================================
+// OPTIONAL STEPS (после обязательной квалификации)
+// ============================================================
+// Бюджет, «что-то добавить?» и контакты — необязательные вопросы.
+// Клиент всегда может их пропустить.
+
+const OPTIONAL_STEPS = ['budget', 'extra', 'contacts'];
+
+const OPTIONAL_QUESTIONS = {
+    budget: 'Если у вас есть ориентир по бюджету, напишите его. Это необязательно: можно написать «пропустить».',
+    extra: 'Хотите что-то добавить к заявке? Например, особые пожелания или важные детали. Если добавить нечего, напишите «нет».',
+    contacts: 'И последнее, тоже необязательно: оставьте телефон и название компании, если хотите, чтобы менеджер мог связаться с вами не только в Telegram. Можно написать «пропустить».'
+};
+
+function ensureOptional(state) {
+    ensureStateExtras(state);
+    return state.optional;
+}
+
+function getPendingOptionalStep(state) {
+    if (calculateMissing(state).length) return null;
+    const optional = ensureOptional(state);
+    return OPTIONAL_STEPS.find(step => optional[step] !== 'done' && optional[step] !== 'skipped') || null;
+}
+
+function isApplicationComplete(state) {
+    return calculateMissing(state).length === 0 && !getPendingOptionalStep(state);
+}
+
+function makeButtonsAction(tag, buttons) {
+    return { type: 'quick_reply', tag, buttons };
+}
+
+function getConfirmActions() {
+    return [
+        makeButtonsAction('confirm_application', [
+            { text: '✅ Подтвердить', value: 'yes' },
+            { text: '✏️ Исправить', value: 'edit' }
+        ])
+    ];
+}
+
+function getEditBlockActions() {
+    return [
+        makeButtonsAction('edit_block', [
+            ...Object.entries(EDIT_BLOCKS).map(([value, block]) => ({ text: block.label, value })),
+            { text: '← Назад', value: 'back' }
+        ])
+    ];
+}
+
+function getOptionalSkipActions(step) {
+    return [makeButtonsAction('optional_skip', [{ text: 'Пропустить', value: step }])];
+}
+
+// ============================================================
 // GET NEXT ACTION
 // ============================================================
 
@@ -2815,6 +3043,25 @@ function getNextAction(state) {
     }
 
 
+    if (first.action === 'ask_days') {
+
+        return makeButtonsAction('ask_days', [
+            { text: 'Один день', value: 'one_day' },
+            { text: 'Несколько дней', value: 'multi_day' }
+        ]);
+    }
+
+
+    if (first.action === 'ask_ready_choice') {
+
+        return makeButtonsAction('ask_ready_choice', [
+            { text: 'В день мероприятия', value: 'event_day' },
+            { text: 'За день до', value: 'day_before' },
+            { text: 'Раньше / другая дата', value: 'earlier' }
+        ]);
+    }
+
+
     // --------------------------------------------------------
     // CALENDAR
     // --------------------------------------------------------
@@ -2906,6 +3153,21 @@ function getActions(state) {
 // DEEPSEEK REQUEST
 // ============================================================
 
+const DEEPSEEK_TIMEOUT_MS = Number(process.env.DEEPSEEK_TIMEOUT_MS) || 30000;
+const DEEPSEEK_RETRIES = Number.isFinite(Number(process.env.DEEPSEEK_RETRIES))
+    ? Number(process.env.DEEPSEEK_RETRIES)
+    : 1;
+
+// Если DeepSeek только что не отвечал, следующие запросы этого же сообщения
+// не должны снова ждать полный таймаут с повторами.
+let deepseekLastFailureAt = 0;
+const DEEPSEEK_DEGRADED_WINDOW_MS = 30000;
+const DEEPSEEK_DEGRADED_TIMEOUT_MS = 8000;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function callDeepSeek(
     messages,
     options = {}
@@ -2918,84 +3180,106 @@ async function callDeepSeek(
         );
     }
 
+    const body = {
+        model: options.model || DEEPSEEK_MODEL,
+        messages,
+        stream: false,
+        temperature: options.temperature ?? 0.2,
+        max_tokens: options.max_tokens || 1200
+    };
 
-    const response =
-        await fetch(
-            DEEPSEEK_URL,
-            {
-                method: 'POST',
+    // Для служебных запросов (извлечение данных, intent) просим строго JSON.
+    if (options.json) {
+        body.response_format = { type: 'json_object' };
+    }
 
-                headers: {
-                    'Content-Type':
-                        'application/json',
+    const degraded = Date.now() - deepseekLastFailureAt < DEEPSEEK_DEGRADED_WINDOW_MS;
+    const maxAttempts = degraded ? 1 : 1 + Math.max(0, options.retries ?? DEEPSEEK_RETRIES);
+    const baseTimeout = options.timeoutMs || DEEPSEEK_TIMEOUT_MS;
+    const timeoutMs = degraded ? Math.min(baseTimeout, DEEPSEEK_DEGRADED_TIMEOUT_MS) : baseTimeout;
+    let lastError = null;
 
-                    'Authorization':
-                        `Bearer ${DEEPSEEK_API_KEY}`
-                },
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 
-                body: JSON.stringify({
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-                    model:
-                        options.model ||
-                        DEEPSEEK_MODEL,
+        try {
 
-                    messages,
+            const response = await fetch(
+                DEEPSEEK_URL,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+                    },
+                    body: JSON.stringify(body),
+                    signal: controller.signal
+                }
+            );
 
-                    stream: false,
+            if (!response.ok) {
 
-                    temperature:
-                        options.temperature ??
-                        0.2,
-
-                    max_tokens:
-                        options.max_tokens ||
-                        1200
-                })
+                const raw = await response.text();
+                const error = new Error(
+                    `DeepSeek HTTP ${response.status}: ${raw.slice(0, 1000)}`
+                );
+                // 429 и 5xx имеет смысл повторить, остальные ошибки — нет.
+                error.retryable = response.status === 429 || response.status >= 500;
+                throw error;
             }
-        );
 
+            const data = await response.json();
 
-    if (!response.ok) {
+            if (data.error) {
 
-        const raw =
-            await response.text();
+                const error = new Error(
+                    `DeepSeek API error: ${data.error.message || JSON.stringify(data.error)}`
+                );
+                error.retryable = false;
+                throw error;
+            }
 
-        throw new Error(
-            `DeepSeek HTTP ${response.status}: ${raw.slice(0, 1000)}`
-        );
+            const content = data?.choices?.[0]?.message?.content;
+            const finishReason = data?.choices?.[0]?.finish_reason || null;
+
+            if (!content) {
+
+                const error = new Error('DeepSeek вернул пустой ответ.');
+                error.retryable = true;
+                throw error;
+            }
+
+            const cleanContent = String(content).trim();
+            deepseekLastFailureAt = 0;
+            return options.returnMeta ? { content: cleanContent, finishReason } : cleanContent;
+
+        } catch (error) {
+
+            if (error && error.name === 'AbortError') {
+                error = new Error(`DeepSeek не ответил за ${Math.round(timeoutMs / 1000)} с.`);
+                error.retryable = true;
+            }
+
+            const networkError = error && (error.name === 'TypeError' || error.name === 'SyntaxError');
+            lastError = error;
+
+            if (!(error.retryable || networkError) || attempt >= maxAttempts) {
+                if (error.retryable || networkError) deepseekLastFailureAt = Date.now();
+                throw error;
+            }
+
+            console.warn(`⚠️ DeepSeek: попытка ${attempt}/${maxAttempts} не удалась (${error.message}). Повтор.`);
+            await sleep(600 * attempt);
+
+        } finally {
+
+            clearTimeout(timer);
+        }
     }
 
-
-    const data =
-        await response.json();
-
-
-    if (data.error) {
-
-        throw new Error(
-            `DeepSeek API error: ${
-                data.error.message ||
-                JSON.stringify(data.error)
-            }`
-        );
-    }
-
-
-    const content =
-        data?.choices?.[0]?.message?.content;
-    const finishReason = data?.choices?.[0]?.finish_reason || null;
-
-
-    if (!content) {
-
-        throw new Error(
-            'DeepSeek вернул пустой ответ.'
-        );
-    }
-
-
-    const cleanContent = String(content).trim();
-    return options.returnMeta ? { content: cleanContent, finishReason } : cleanContent;
+    throw lastError || new Error('DeepSeek: неизвестная ошибка.');
 }
 
 
@@ -3062,9 +3346,54 @@ function extractJSON(text) {
 // DEEPSEEK EXTRACTION
 // ============================================================
 
+function getTodayInfo() {
+    const now = new Date();
+    const iso = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Minsk', year: 'numeric', month: 'numeric', day: 'numeric' }).format(now);
+    const weekday = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Minsk', weekday: 'long' }).format(now);
+    const [y, m, d] = iso.split('-');
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')} (${weekday})`;
+}
+
+function getLastAssistantMessage(state) {
+    const history = state.history || [];
+    for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].role === 'assistant') return String(history[i].content || '').slice(0, 600);
+    }
+    return '';
+}
+
+const EDIT_BLOCKS = {
+    dates: {
+        label: 'Даты и время',
+        fields: 'dateStart, dateEnd, readyDate',
+        prompt: 'Напишите, что нужно изменить в датах и времени: начало, окончание или готовность оборудования.'
+    },
+    venue: {
+        label: 'Площадка',
+        fields: 'location, place, floor, lift, liftDimensions',
+        prompt: 'Напишите, что нужно изменить по площадке: адрес, улица или помещение, этаж, лифт.'
+    },
+    equipment: {
+        label: 'Оборудование',
+        fields: 'equipment, stageDetails, stageSurface, soundDetails, soundRider, backline, lightDetails, lightFixtures, ledDetails, ledContent, ledSuspension',
+        prompt: 'Напишите, что нужно изменить по оборудованию: сцена, звук, свет, экраны.'
+    },
+    service: {
+        label: 'Персонал и монтаж',
+        fields: 'personnel, personnelDetails, mount, mountTime, demount, demountTime',
+        prompt: 'Напишите, что нужно изменить по персоналу, монтажу или демонтажу.'
+    },
+    other: {
+        label: 'Другое',
+        fields: 'eventType, eventLevel, guestCount, budget, additionalInfo, specialConditions',
+        prompt: 'Напишите, что нужно изменить: формат мероприятия, количество гостей, бюджет или другие детали.'
+    }
+};
+
 async function extractClientData(
     state,
-    userText
+    userText,
+    hint = {}
 ) {
 
     const system = `
@@ -3258,6 +3587,7 @@ specialConditions — особые условия:
 
     "additionalServices": "...",
     "specialConditions": "...",
+    "budget": "...",
 
     "clientRequest": "...",
     "additionalInfo": "..."
@@ -3274,6 +3604,24 @@ specialConditions — особые условия:
 - Не отбрасывай время.
 - Используй формат YYYY-MM-DD HH:mm, если дата и время однозначно понятны.
 - Если клиент сообщил только дату без времени, сохрани известную дату, но не придумывай время.
+
+КОНТЕКСТ ДИАЛОГА (приходит вместе с сообщением):
+
+- expectedField — поле, о котором бот только что спрашивал клиента.
+  Короткие ответы («да», «нет», «3 на 3», «ночью», «к 18», «в субботу»)
+  трактуй как ответ на этот вопрос и записывай в expectedField
+  (или в связанные с ним поля). Если expectedField равен null —
+  опирайся только на явно названные факты.
+- lastAssistantQuestion — последний вопрос или сообщение бота.
+- today — сегодняшняя дата. Относительные даты («завтра», «в субботу»,
+  «через две недели», «в следующую пятницу») вычисляй от today
+  и всегда возвращай полную дату YYYY-MM-DD.
+- editBlock — если задан, клиент исправляет данные из этого блока
+  (в editBlockFields перечислены его поля): записывай новые значения
+  именно в эти поля и не трогай остальные.
+- Если сообщение клиента — вопрос или просьба, а не сообщение
+  с данными о проекте, верни пустой project: {}.
+- Не записывай в поля текст вопроса клиента.
 `;
 
 
@@ -3283,6 +3631,23 @@ specialConditions — особые условия:
 
         currentClient:
             state.client,
+
+        expectedField:
+            hint.expectedField || null,
+
+        lastAssistantQuestion:
+            getLastAssistantMessage(state),
+
+        today:
+            getTodayInfo(),
+
+        editBlock:
+            hint.editBlock || null,
+
+        editBlockFields:
+            hint.editBlock && EDIT_BLOCKS[hint.editBlock]
+                ? EDIT_BLOCKS[hint.editBlock].fields
+                : null,
 
         userMessage:
             userText
@@ -3314,7 +3679,8 @@ specialConditions — особые условия:
             messages,
             {
                 temperature: 0,
-                max_tokens: 1000
+                max_tokens: 1000,
+                json: true
             }
         );
 
@@ -3463,7 +3829,8 @@ other —
                 messages,
                 {
                     temperature: 0,
-                    max_tokens: 100
+                    max_tokens: 100,
+                    json: true
                 }
             );
 
@@ -3540,7 +3907,8 @@ function buildControlledQuestion(
         calculateMissing(state);
 
     if (!missing.length) {
-        return null;
+        const optionalStep = getPendingOptionalStep(state);
+        return optionalStep ? OPTIONAL_QUESTIONS[optionalStep] : null;
     }
 
 
@@ -3549,6 +3917,22 @@ function buildControlledQuestion(
 
 
     switch (first.field) {
+
+        case 'eventDays':
+            return 'Мероприятие пройдёт в один день или продлится несколько дней?';
+
+        case 'eventTimes': {
+            const startLabel = formatDateForQuestion(state.project.dateStart);
+            const endLabel = formatDateForQuestion(state.project.dateEnd);
+            const sameDay = startLabel && startLabel === endLabel;
+            const when = sameDay
+                ? ` ${startLabel}`
+                : `${startLabel ? ` ${startLabel}` : ''}${endLabel ? ` и во сколько закончится ${endLabel}` : ''}`;
+            if (sameDay) {
+                return `Во сколько начнётся мероприятие${when} и во сколько закончится? Можно одним сообщением, например: «с 18:00 до 23:00».`;
+            }
+            return `Во сколько начнётся мероприятие${when}? Можно одним сообщением, например: «в первый день с 18:00, в последний до 23:00».`;
+        }
 
         case 'eventType':
             return [
@@ -3590,7 +3974,7 @@ function buildControlledQuestion(
             return `Во сколько закончится мероприятие${formatDateForQuestion(state.project.dateEnd) ? ` ${formatDateForQuestion(state.project.dateEnd)}` : ''}?`;
 
         case 'readyDateTime':
-            return `К какому времени оборудование должно быть готово${formatDateForQuestion(state.project.readyDate) ? ` (${formatDateForQuestion(state.project.readyDate)})` : ''}?`;
+            return `К какому времени оборудование должно быть полностью готово${formatDateForQuestion(state.project.readyDate) ? ` (${formatDateForQuestion(state.project.readyDate)})` : ''}? От этого зависит объём работ и стоимость, поэтому укажите, пожалуйста, точное время.`;
 
         case 'dateConflict':
             return 'Похоже, дата окончания указана раньше даты начала. Проверьте, пожалуйста, даты начала и окончания и напишите корректный вариант.';
@@ -3608,7 +3992,10 @@ function buildControlledQuestion(
             if (isDeferred(state, 'readyDate') && /позже начала мероприятия|начинается .*нужно уточнить дату и время готовности/i.test(String(state.deferredFields.readyDate || ''))) {
                 return `Дата готовности оборудования (${String(state.deferredFields.readyDate).match(/Указана готовность ([^,]+)/i)?.[1] || 'указанная ранее'}) позже начала мероприятия (${formatDateForQuestion(state.project.dateStart) || state.project.dateStart}). Оборудование должно быть готово до начала. Уточните, пожалуйста, правильную дату и время готовности.`;
             }
-            return 'Выберите дату готовности оборудования.';
+            if (first.action === 'ask_ready_choice') {
+                return 'Когда оборудование должно быть полностью готово? Это влияет на стоимость: монтаж накануне и в день мероприятия считаются по-разному. Выберите вариант или сразу напишите дату и время, например: «9 декабря к 18:00».';
+            }
+            return 'Выберите дату, к которой оборудование должно быть полностью готово.';
 
         case 'location':
             return 'Подскажите, пожалуйста, адрес площадки и город.';
@@ -3701,46 +4088,59 @@ function buildControlledQuestion(
 
 
 // ============================================================
-// REMOVE STALE QUALIFICATION QUESTIONS FROM AI TEXT
+// SAFETY: МОДЕЛЬ НЕ ДОЛЖНА ЗАДАВАТЬ СВОЙ ВОПРОС
 // ============================================================
-// DeepSeek иногда повторяет вопрос из старой истории, хотя Sales Engine
-// уже перешёл к следующему полю. Удаляем только вопросительную часть,
-// сохраняя предшествующее подтверждение или пояснение.
-function stripQualificationQuestions(text) {
+// Следующий вопрос задаёт Sales Engine. Промпт запрещает модели задавать
+// вопросы. Если она всё же закончила ответ вопросом, а наш вопрос будет
+// добавлен, убираем только последнее предложение-вопрос. Остальной текст
+// ответа не трогаем.
+
+function dropTrailingModelQuestion(text) {
     const source = String(text || '').trim();
     if (!source) return '';
 
-    const questionStart = /(?:^|\s)(?:подскажите(?:,\s*пожалуйста)?|укажите(?:,\s*пожалуйста)?|уточните(?:,\s*пожалуйста)?|какой у вас формат|какой уровень(?: технических требований)?|какое оборудование|какой персонал|какие группы|какие задачи|какие требования|какой именно персонал|дата и время|на каком этаже|есть ли на площадке|есть ли звуковой райдер|есть ли требования|мероприятие будет проходить|где будет проходить|что планируется транслировать|что именно нужно по светодиодным экранам|нужно ли оборудование|нужно ли оборудование для бэклайна|когда возможен монтаж|когда возможен демонтаж|до какого времени необходимо завершить|сколько светодиодных экранов|сколько экранов потребуется|сколько экранов|сколько гостей ожидается|сколько гостей|ориентировочное количество гостей|выберите дату начала|выберите дату окончания|выберите дату готовности|выберите дату|выберите наиболее подходящий вариант|выберите подходящий вариант|какие дополнительные услуги|есть ли дополнительные услуги|есть ли особые условия|нужен ли подвес|будет ли подвес|какова возможность подвеса|есть ли на площадке возможность подвеса|что планируется|что именно|какие именно|какой тип|какие типы|какие размеры|какое количество|какой адрес|где будет|к какому времени|во сколько(?:\s+(?:начн[её]тся|начинается|закончится|заканчивается|завершится|будет))?|до какого времени)/i;
+    const lines = source.split('\n');
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    if (!lines.length) return '';
 
-    const duplicateDescriptionLine = /^\s*(?:•|[-*])\s*(?:концерты и фестивали|конференции, презентации и tv-проекты|корпоративы и торжества|выставки|спортивные мероприятия|стандартный\s*[—–-]|высокие требования\s*[—–-]|высший уровень\s*[—–-]|полное управление оборудованием|дежурный техник|только монтаж и демонтаж|другое\s*[—–-])/i;
-    const selectionInstruction = /^\s*(?:выберите дату(?: начала мероприятия(?:\s*(?:или|\/)\s*репетиции)?| окончания мероприятия| готовности оборудования)?|выберите наиболее подходящий вариант|выберите подходящий вариант|выберите наиболее подходящий вариант или опишите мероприятие своими словами|выберите подходящий вариант или опишите своими словами)\.?\s*$/i;
+    const last = lines[lines.length - 1];
+    const sentences = last.split(/(?<=[.!?])\s+/);
+    const tail = sentences[sentences.length - 1];
 
-    return source
-        .split('\n')
-        .map(line => {
-            const trimmed = line.trim();
-            if (!trimmed) return '';
+    if (/\?\s*$/.test(tail)) {
+        sentences.pop();
+        const rest = sentences.join(' ').trim();
+        if (rest) lines[lines.length - 1] = rest;
+        else lines.pop();
+    }
 
-            // Убираем вопрос, даже если модель приклеила его к подтверждению.
-            const match = questionStart.exec(line);
-            if (match) {
-                const prefix = line.slice(0, match.index).trim();
-                return prefix.replace(/[\s—–,:;]+$/, '');
-            }
+    return lines.join('\n').trim();
+}
 
-            // Резервная защита: отдельная вопросительная строка не должна пройти дальше.
-            if (/\?\s*$/.test(trimmed)) return '';
+function dedupeLines(text) {
+    const seen = new Set();
+    const out = [];
 
-            if (duplicateDescriptionLine.test(line) || selectionInstruction.test(line)) {
-                return '';
-            }
+    for (const raw of String(text || '').split('\n')) {
+        const line = raw.replace(/\s+$/, '');
+        const key = line.trim();
 
-            return line;
-        })
-        .filter(line => line.trim())
-        .join('\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+        if (!key) {
+            if (out.length && out[out.length - 1] !== '') out.push('');
+            continue;
+        }
+
+        // Повторяем только длинные строки: короткие пункты списков не трогаем.
+        if (key.length > 20) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+
+        out.push(line);
+    }
+
+    while (out.length && out[out.length - 1] === '') out.pop();
+    return out.join('\n');
 }
 
 
@@ -3999,11 +4399,9 @@ ${PORTFOLIO_TEXT}
         );
 
 
-        // Даже если DeepSeek временно недоступен,
-        // Sales Engine продолжает управлять воронкой.
-
-        return controlledQuestion ||
-            'Подскажите, пожалуйста, дополнительную информацию по проекту.';
+        // Воронкой продолжает управлять Sales Engine: сбой обрабатывается
+        // выше (честный запасной ответ + следующий вопрос из состояния).
+        throw error;
     }
 }
 
@@ -4526,6 +4924,25 @@ function buildManagerSummary(
     }
 
 
+    if (p.budget) {
+        lines.push(`Ориентир по бюджету: ${displayProjectValue(p.budget)}`);
+    }
+
+    if (state.client && state.client.contacts) {
+        lines.push(`Контакты клиента: ${state.client.contacts}`);
+    }
+
+    if (p.budget || (state.client && state.client.contacts)) {
+        lines.push('');
+    }
+
+    lines.push(
+        state.confirmation && state.confirmation.status === 'confirmed'
+            ? 'Клиент подтвердил заявку: да'
+            : 'Клиент подтвердил заявку: ещё нет'
+    );
+    lines.push('');
+
     const deferredEntries = Object.entries(state.deferredFields || {});
     if (deferredEntries.length) {
         lines.push('ПУНКТЫ, КОТОРЫЕ НУЖНО УТОЧНИТЬ:');
@@ -4922,6 +5339,19 @@ function buildClientSummary(
     }
 
 
+    if (p.budget) {
+        lines.push(`• Ориентир по бюджету: ${displayProjectValue(p.budget)}`);
+    }
+
+    if (p.additionalInfo) {
+        lines.push(`• Дополнительно: ${displayProjectValue(p.additionalInfo)}`);
+    }
+
+    if (state.client && state.client.contacts) {
+        lines.push(`• Контакты: ${state.client.contacts}`);
+    }
+
+
     lines.push('');
 
 
@@ -4933,12 +5363,7 @@ function buildClientSummary(
 
 
     lines.push(
-        'Мы передадим информацию в отдел подготовки КП.'
-    );
-
-
-    lines.push(
-        'КП готовится в рабочие дни: Пн–Пт, 9:00–17:00.'
+        'Пожалуйста, проверьте заявку. Если всё верно, нажмите «Подтвердить». Если нужно что-то изменить, нажмите «Исправить» или просто напишите, что поправить.'
     );
 
 
@@ -4961,6 +5386,16 @@ function calculateStage(
     ) {
 
         return 'manager_handoff';
+    }
+
+
+    if (
+        state.confirmation &&
+        state.confirmation.status === 'confirmed' &&
+        !missing.length
+    ) {
+
+        return 'confirmed';
     }
 
 
@@ -5016,7 +5451,7 @@ function normalizeMessage(message) {
 
         return {
             type: 'text',
-            text: message.trim().replace(/,\s*/g, ', ').replace(/;\s*/g, '; ').replace(/\s+([,;.!?])/g, '$1')
+            text: message.trim().replace(/,\s+/g, ', ').replace(/,(?=[^\s\d,])/g, ', ').replace(/;\s*/g, '; ').replace(/\s+([,;.!?])/g, '$1')
         };
     }
 
@@ -5039,7 +5474,7 @@ function normalizeMessage(message) {
             'text',
 
         text:
-            String(message.text || '').trim().replace(/,\s*/g, ', ').replace(/;\s*/g, '; ').replace(/\s+([,;.!?])/g, '$1'),
+            String(message.text || '').trim().replace(/,\s+/g, ', ').replace(/,(?=[^\s\d,])/g, ', ').replace(/;\s*/g, '; ').replace(/\s+([,;.!?])/g, '$1'),
 
         tag:
             message.tag ||
@@ -5199,6 +5634,16 @@ function actionToText(
         },
 
 
+        ask_days: {
+
+            one_day:
+                'Мероприятие: один день',
+
+            multi_day:
+                'Мероприятие: несколько дней'
+        },
+
+
         ask_sound_rider: {
 
             yes:
@@ -5318,8 +5763,54 @@ function getStartActions() {
 
 async function processStart(
     clientId,
-    clientName = ''
+    clientName = '',
+    options = {}
 ) {
+
+    const existing =
+        await hydrateSalesState(
+            clientId,
+            clientName
+        );
+
+    ensureStateExtras(existing);
+
+    // Случайный /start не должен стирать собранную заявку.
+    if (
+        !options.force &&
+        hasApplicationProgress(existing)
+    ) {
+
+        const text =
+            'У вас уже есть начатая заявка. Продолжить с того же места или начать заново? Если начать заново, данные заявки будут сброшены.';
+
+        addHistory(
+            existing,
+            'assistant',
+            text
+        );
+
+        await persistSalesState(
+            existing
+        );
+
+        return {
+            text,
+            actions: [
+                makeButtonsAction('restart_confirm', [
+                    { text: 'Продолжить', value: 'continue' },
+                    { text: 'Начать заново', value: 'restart' }
+                ])
+            ],
+            project: existing.project,
+            missing: calculateMissing(existing),
+            stage: existing.stage,
+            intent: 'greeting',
+            readyForManager: false,
+            confirmationStatus: existing.confirmation.status,
+            managerSummary: null
+        };
+    }
 
     const state =
         resetSalesClient(
@@ -5639,6 +6130,52 @@ function applyAction(
     }
 
 
+    if (tag === 'ask_days' && (value === 'one_day' || value === 'multi_day')) {
+
+        state.project.multiDay = value === 'multi_day';
+        state.confirmationStatus = state.confirmationStatus || {};
+        state.confirmationStatus.eventDays = 'confirmed';
+
+        return value === 'multi_day'
+            ? 'Мероприятие продлится несколько дней.'
+            : 'Мероприятие пройдёт в один день.';
+    }
+
+
+    if (tag === 'ask_ready_choice' && value) {
+
+        const startDate = String(state.project.dateStart || '').slice(0, 10);
+
+        if (value === 'event_day' && startDate) {
+            state.project.readyDate = startDate;
+            state.project.readyDateTimeRange = null;
+            state.project.readyChoice = 'event_day';
+            state.project.readyDerivedFrom = startDate;
+            if (state.deferredFields) delete state.deferredFields.readyDate;
+            return 'Оборудование должно быть готово в день мероприятия.';
+        }
+
+        if (value === 'day_before' && startDate) {
+            state.project.readyDate = addDaysToIsoDate(startDate, -1);
+            state.project.readyDateTimeRange = null;
+            state.project.readyChoice = 'day_before';
+            state.project.readyDerivedFrom = startDate;
+            if (state.deferredFields) delete state.deferredFields.readyDate;
+            return 'Оборудование должно быть готово за день до мероприятия.';
+        }
+
+        state.project.readyChoice = 'earlier';
+        return 'Оборудование нужно подготовить раньше, чем за день до мероприятия.';
+    }
+
+
+    if (tag === 'optional_skip' && OPTIONAL_STEPS.includes(value)) {
+
+        ensureOptional(state)[value] = 'skipped';
+        return 'Пропустить.';
+    }
+
+
     if (
         tag === 'ask_date_start'
     ) {
@@ -5778,7 +6315,7 @@ function cleanAcknowledgementText(text) {
 
     // Добавляем пробел после пунктуации, но не разрываем время 19:00.
     value = value
-        .replace(/([,;!?])(?=\S)/g, '$1 ')
+        .replace(/([,;!?])(?=[^\s\d,;!?])/g, '$1 ')
         .replace(/:(?=\S)(?!\d)/g, ': ')
         .replace(/^(\s*(?:Хорошо|Отлично)),\s*[—–-]\s*/i, '$1, ')
         .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s*[—–-]\s*/i, '$1: ')
@@ -5816,11 +6353,21 @@ function prepareResult(
     intent
 ) {
 
+    ensureStateExtras(state);
     refreshApplicationCode(state);
+
     const missing =
         calculateMissing(
             state
         );
+
+    const optionalStep =
+        missing.length
+            ? null
+            : getPendingOptionalStep(state);
+
+    const complete =
+        !missing.length && !optionalStep;
 
 
     state.missing =
@@ -5835,7 +6382,7 @@ function prepareResult(
         calculateStage(
             state,
             intent,
-            missing
+            optionalStep ? [{ field: 'optional' }] : missing
         );
 
 
@@ -5843,8 +6390,14 @@ function prepareResult(
         new Date().toISOString();
 
 
-    const readyForManager =
-        missing.length === 0;
+    // Заявка собрана. Клиент должен её подтвердить или исправить.
+    if (
+        complete &&
+        state.confirmation.status !== 'confirmed' &&
+        state.confirmation.status !== 'editing'
+    ) {
+        state.confirmation.status = 'awaiting';
+    }
 
 
     let finalText =
@@ -5852,7 +6405,7 @@ function prepareResult(
 
 
     if (
-        readyForManager &&
+        complete &&
         intent === 'qualification' &&
         state.stage === 'summary'
     ) {
@@ -5864,22 +6417,25 @@ function prepareResult(
     }
 
 
+    let actions;
+
+    if (optionalStep) {
+        actions = getOptionalSkipActions(optionalStep);
+    } else if (complete) {
+        if (state.confirmation.status === 'confirmed') actions = [];
+        else if (state.confirmation.status === 'editing') actions = getEditBlockActions();
+        else actions = getConfirmActions();
+    } else {
+        actions = getActions(state);
+    }
+
+
     return {
 
         text:
             finalText,
 
-        actions:
-            readyForManager
-                ? [
-                    {
-                        type: 'quick_reply',
-                        tag: 'manager_handoff'
-                    }
-                ]
-                : getActions(
-                    state
-                ),
+        actions,
 
         project:
             state.project,
@@ -5891,10 +6447,16 @@ function prepareResult(
 
         intent,
 
-        readyForManager,
+        // Заявка полностью собрана (включая необязательные вопросы).
+        // Отправки менеджеру нет: диалог дублируется в Битрикс24.
+        readyForManager:
+            complete,
+
+        confirmationStatus:
+            state.confirmation.status,
 
         managerSummary:
-            readyForManager
+            complete
                 ? buildManagerSummary(
                     state
                 )
@@ -5979,7 +6541,100 @@ function parseTimeAnswer(text) {
     return null;
 }
 
+function to24h(hourValue, minuteValue, period) {
+    let hour = Number(hourValue);
+    const minute = Number(minuteValue || 0);
+    const p = String(period || '').toLowerCase();
+    if (hour > 23 || minute > 59) return null;
+    if (p === 'утра' && hour === 12) hour = 0;
+    else if ((p === 'дня' || p === 'вечера') && hour < 12) hour += 12;
+    else if (p === 'ночи' && hour === 12) hour = 0;
+    return { hour, minute, explicitPeriod: Boolean(p) };
+}
+
+const fmtTime = t => `${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`;
+
+// Возвращает { start, end } (строки HH:mm; любая может быть null).
+function parseEventTimes(text) {
+    const source = String(text || '').toLowerCase().replace(/ё/g, 'е');
+
+    // «с 10 до 18», «10:00-18:00», «с 10 утра до 6 вечера»
+    const range = source.match(/(?:^|[^\d:.])(\d{1,2})(?:[:.]([0-5]\d))?\s*(утра|дня|вечера|ночи)?\s*(?:до|по|[-–—])\s*(\d{1,2})(?:[:.]([0-5]\d))?\s*(утра|дня|вечера|ночи)?(?![\d:.]*\d{2,})/);
+    if (range) {
+        const a = to24h(range[1], range[2], range[3]);
+        let b = to24h(range[4], range[5], range[6]);
+        if (a && b) {
+            // «с 10 до 6» без пометок: скорее всего вечер.
+            if (!b.explicitPeriod && !range[5] && b.hour < a.hour && b.hour <= 11 && b.hour + 12 > a.hour) b = { ...b, hour: b.hour + 12 };
+            return { start: fmtTime(a), end: fmtTime(b) };
+        }
+    }
+
+    // «начало в 18:00, конец в 23:30»
+    const colonTimes = [...source.matchAll(/(?:^|[^\d])(\d{1,2}):([0-5]\d)(?!\d)/g)]
+        .map(m => to24h(m[1], m[2], ''))
+        .filter(Boolean);
+    if (colonTimes.length >= 2) return { start: fmtTime(colonTimes[0]), end: fmtTime(colonTimes[1]) };
+
+    const single = parseTimeAnswer(text);
+    if (single) {
+        const refersToEnd = /(?:заканч\w*|окончан\w*|законч\w*|заверш\w*|до\s*\d)/i.test(source) && !/(?:начал\w*|начн\w*|старт\w*)/i.test(source);
+        return refersToEnd ? { start: null, end: single } : { start: single, end: null };
+    }
+    return { start: null, end: null };
+}
+
+function applyEventTimes(state, text) {
+    const p = state.project;
+    syncEventDays(state);
+    const parsed = parseEventTimes(text);
+    if (!parsed.start && !parsed.end) return false;
+
+    const startDate = String(p.dateStart || '').slice(0, 10);
+    const endDate = String(p.dateEnd || '').slice(0, 10);
+    if (!parseIsoDateTime(startDate) || !parseIsoDateTime(endDate)) return false;
+
+    const approximate = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то|наверное|вероятно|скорее всего|возможно|может(?:\s+быть)?|не уверен(?:а)?)/i.test(String(text || ''));
+    state.confirmationStatus = state.confirmationStatus || {};
+    let applied = false;
+
+    let startTime = parsed.start;
+    let endTime = parsed.end;
+
+    // Если названо одно время, относим его к тому полю, где времени ещё нет.
+    if (startTime && !endTime && hasDateAndTime(p.dateStart) && !hasDateAndTime(p.dateEnd) && !/(?:начал\w*|начн\w*|старт\w*)/i.test(String(text || ''))) {
+        endTime = startTime; startTime = null;
+    }
+
+    if (startTime) {
+        p.dateStart = `${startDate} ${startTime}`;
+        p.dateStartApproximate = approximate;
+        state.confirmationStatus.dateStart = approximate ? 'tentative' : 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.dateStart;
+        applied = true;
+    }
+
+    if (endTime) {
+        let finalEndDate = endDate;
+        // Один день, но окончание после полуночи: «с 20:00 до 02:00».
+        const effectiveStart = String(p.dateStart).match(/\s+(\d{1,2}:\d{2})$/)?.[1];
+        if (p.multiDay === false && effectiveStart && endTime <= effectiveStart && finalEndDate === startDate) {
+            finalEndDate = addDaysToIsoDate(startDate, 1) || finalEndDate;
+        }
+        p.dateEnd = `${finalEndDate} ${endTime}`;
+        p.dateEndApproximate = approximate;
+        state.confirmationStatus.dateEnd = approximate ? 'tentative' : 'confirmed';
+        if (state.deferredFields) delete state.deferredFields.dateEnd;
+        applied = true;
+    }
+
+    return applied;
+}
+
+const TIME_FIELDS = ['eventTimes', 'dateStartTime', 'dateEndTime', 'readyDateTime'];
+
 function applyDirectTimeAnswer(state, expectedField, text) {
+    if (expectedField === 'eventTimes') return applyEventTimes(state, text);
     const fieldMap = { dateStartTime: 'dateStart', dateEndTime: 'dateEnd', readyDateTime: 'readyDate' };
     const target = fieldMap[expectedField];
     if (!target) return false;
@@ -5999,11 +6654,147 @@ function applyDirectTimeAnswer(state, expectedField, text) {
     return true;
 }
 
+
+// ============================================================
+// APPLICATION SNAPSHOT / CONFIRMATION HELPERS
+// ============================================================
+
+const QUESTION_INTENTS = ['question', 'equipment_question', 'portfolio_question', 'objection'];
+
+const CONFIRM_RE = /^(?:да[,.\s]*)?(?:подтвержда\w*|подтверд\w*|всё\s+верно|все\s+верно|верно|правильно|согласен|согласна|ок|окей|хорошо|да)[\s.!]*$/i;
+
+function applicationSnapshot(state) {
+    const optional = state.optional || {};
+    return JSON.stringify({
+        project: state.project,
+        deferredFields: state.deferredFields,
+        confirmationStatus: state.confirmationStatus,
+        optional: { budget: optional.budget, extra: optional.extra, contacts: optional.contacts },
+        contacts: state.client ? state.client.contacts : ''
+    });
+}
+
+function hasApplicationProgress(state) {
+    const p = state && state.project;
+    if (!p) return false;
+    return Boolean(
+        p.eventType ||
+        (Array.isArray(p.equipment) && p.equipment.length) ||
+        p.dateStart ||
+        p.location ||
+        p.personnel ||
+        p.guestCount
+    );
+}
+
+function applyOptionalAnswer(state, step, text) {
+    const optional = ensureOptional(state);
+    const value = String(text || '').trim();
+    const skip = value.length <= 30 &&
+        /^(?:нет|ничего|пропусти\w*|пока\s+нет|не\s+знаю|не\s+хочу|не\s+надо|не\s+нужно|позже|потом|без\s+\w+|-)(?:[\s,.!]|$)/i.test(value);
+
+    if (skip) {
+        optional[step] = 'skipped';
+        return 'skipped';
+    }
+
+    if (step === 'budget') {
+        state.project.budget = value;
+    } else if (step === 'extra') {
+        state.project.additionalInfo = state.project.additionalInfo
+            ? `${state.project.additionalInfo}; ${value}`
+            : value;
+    } else if (step === 'contacts') {
+        state.client.contacts = value;
+    }
+
+    optional[step] = 'done';
+    return 'done';
+}
+
+function confirmApplication(state) {
+    ensureStateExtras(state);
+    state.confirmation.status = 'confirmed';
+    state.confirmation.editBlock = null;
+    refreshApplicationCode(state);
+
+    const text = `✅ Клиент подтвердил заявку № ${state.applicationCode}.\n\nСпасибо! Менеджер MLK подготовит коммерческое предложение в рабочие дни: Пн–Пт, 9:00–17:00. Если захотите что-то изменить, просто напишите.`;
+
+    addHistory(state, 'assistant', text);
+    return prepareResult(state, text, 'confirmation');
+}
+
+// Кнопки подтверждения, исправления и «продолжить» после /start.
+async function handleControlAction(state, normalized, initialGreeting) {
+    ensureStateExtras(state);
+
+    const tag = normalized.tag;
+    const value = normalized.value;
+    const withGreeting = result => {
+        if (initialGreeting) result.text = `${initialGreeting}\n\n${result.text}`;
+        return result;
+    };
+
+    if (tag === 'restart_confirm') {
+        addHistory(state, 'user', 'Продолжить заявку');
+        const question = buildControlledQuestion(state);
+        const text = ['Хорошо, продолжаем.', question].filter(Boolean).join('\n\n');
+        addHistory(state, 'assistant', text);
+        return withGreeting(prepareResult(state, text, 'qualification'));
+    }
+
+    if (tag === 'confirm_application') {
+
+        if (!isApplicationComplete(state)) {
+            const question = buildControlledQuestion(state);
+            const text = question || 'Давайте сначала закончим заявку.';
+            addHistory(state, 'assistant', text);
+            return withGreeting(prepareResult(state, text, 'qualification'));
+        }
+
+        if (value === 'yes') {
+            addHistory(state, 'user', 'Подтверждаю заявку');
+            return withGreeting(confirmApplication(state));
+        }
+
+        addHistory(state, 'user', 'Хочу исправить заявку');
+        state.confirmation.status = 'editing';
+        state.confirmation.editBlock = null;
+        const text = 'Что хотите изменить? Выберите раздел или просто напишите, что нужно поправить.';
+        addHistory(state, 'assistant', text);
+        return withGreeting(prepareResult(state, text, 'correction'));
+    }
+
+    if (tag === 'edit_block') {
+
+        if (value === 'back') {
+            addHistory(state, 'user', 'Назад к заявке');
+            state.confirmation.status = 'awaiting';
+            state.confirmation.editBlock = null;
+            const text = buildClientSummary(state);
+            addHistory(state, 'assistant', text);
+            return withGreeting(prepareResult(state, text, 'qualification'));
+        }
+
+        const block = EDIT_BLOCKS[value];
+        if (block) {
+            addHistory(state, 'user', `Исправить: ${block.label}`);
+            state.confirmation.status = 'editing';
+            state.confirmation.editBlock = value;
+            addHistory(state, 'assistant', block.prompt);
+            return withGreeting(prepareResult(state, block.prompt, 'correction'));
+        }
+    }
+
+    return null;
+}
+
+
 // ============================================================
 // PROCESS SALES MESSAGE
 // ============================================================
 
-async function processSalesMessage(
+async function processSalesMessageInner(
     clientId,
     message
 ) {
@@ -6033,6 +6824,8 @@ async function processSalesMessage(
             clientName
         );
 
+    ensureStateExtras(state);
+
 
     // --------------------------------------------------------
     // START
@@ -6045,6 +6838,19 @@ async function processSalesMessage(
         return await processStart(
             clientId,
             clientName
+        );
+    }
+
+    if (
+        normalized.type === 'action' &&
+        normalized.tag === 'restart_confirm' &&
+        normalized.value === 'restart'
+    ) {
+
+        return await processStart(
+            clientId,
+            clientName,
+            { force: true }
         );
     }
 
@@ -6093,56 +6899,49 @@ async function processSalesMessage(
                     normalized
                 );
 
+            cleanDependentFields(state);
 
-            const missing =
-                calculateMissing(
+            const pendingOptional =
+                getPendingOptionalStep(
                     state
                 );
 
+            let text =
+                fileText;
 
-            state.missing =
-                missing;
+            if (
+                pendingOptional
+            ) {
 
+                state.optional.asked =
+                    pendingOptional;
 
-            const actions =
-                getActions(
-                    state
+                text =
+                    `${fileText}\n\n${OPTIONAL_QUESTIONS[pendingOptional]}`;
+            }
+
+            addHistory(
+                state,
+                'assistant',
+                text
+            );
+
+            const result =
+                prepareResult(
+                    state,
+                    text,
+                    'qualification'
                 );
 
-
-            const text =
+            if (
                 initialGreeting
-                    ? `${initialGreeting}\n\n${fileText}`
-                    : fileText;
+            ) {
 
+                result.text =
+                    `${initialGreeting}\n\n${result.text}`;
+            }
 
-            return {
-
-                text,
-
-                actions,
-
-                project:
-                    state.project,
-
-                missing,
-
-                stage:
-                    state.stage,
-
-                intent:
-                    'qualification',
-
-                readyForManager:
-                    missing.length === 0,
-
-                managerSummary:
-                    missing.length === 0
-                        ? buildManagerSummary(
-                            state
-                        )
-                        : null
-            };
+            return result;
         }
 
 
@@ -6151,6 +6950,28 @@ async function processSalesMessage(
         // --------------------------------------------------------
 
         let userText = '';
+
+
+        // --------------------------------------------------------
+        // CONFIRM / EDIT / CONTINUE BUTTONS
+        // --------------------------------------------------------
+
+        if (
+            normalized.type === 'action' &&
+            ['confirm_application', 'edit_block', 'restart_confirm'].includes(normalized.tag)
+        ) {
+
+            const controlResult =
+                await handleControlAction(
+                    state,
+                    normalized,
+                    initialGreeting
+                );
+
+            if (controlResult) {
+                return controlResult;
+            }
+        }
 
 
         // --------------------------------------------------------
@@ -6190,7 +7011,7 @@ addHistory(
         }
 
 
-        const applicationBeforeMessage = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus });
+        const applicationBeforeMessage = applicationSnapshot(state);
 
         // --------------------------------------------------------
         // OTHER ACTIONS
@@ -6302,8 +7123,105 @@ addHistory(
         let dateStartCorrectionRequest = false;
         let ambiguousEndDateRequest = false;
         let liftDimensionsLaterRequest = false;
+        let deterministicAssistantText = '';
+        let extractionFailed = false;
+        let optionalHandled = false;
+
+
+        // --------------------------------------------------------
+        // ПОДТВЕРЖДЕНИЕ ЗАЯВКИ ТЕКСТОМ («подтверждаю», «всё верно»)
+        // --------------------------------------------------------
+
+        if (
+            !isAction &&
+            state.confirmation.status === 'awaiting' &&
+            CONFIRM_RE.test(userText.trim()) &&
+            isApplicationComplete(state)
+        ) {
+
+            const confirmed = confirmApplication(state);
+
+            if (initialGreeting) {
+                confirmed.text = `${initialGreeting}\n\n${confirmed.text}`;
+            }
+
+            return confirmed;
+        }
+
+
+        // --------------------------------------------------------
+        // INTENT: определяем ДО извлечения данных, чтобы вопрос клиента
+        // не записывался как ответ на поле воронки.
+        // --------------------------------------------------------
+
+        let intent =
+            'qualification';
 
         if (!isAction) {
+
+            try {
+
+                intent =
+                    await detectIntent(
+                        state,
+                        userText
+                    );
+
+            } catch (error) {
+
+                console.warn(
+                    '⚠️ Sales Engine intent error:',
+                    error.message
+                );
+            }
+        }
+
+        const isQuestionIntent =
+            QUESTION_INTENTS.includes(intent);
+
+        const skipExtraction =
+            ['greeting', 'manager_request', 'out_of_scope'].includes(intent);
+
+
+        // --------------------------------------------------------
+        // НЕОБЯЗАТЕЛЬНЫЕ ВОПРОСЫ (бюджет, «что-то добавить?», контакты)
+        // --------------------------------------------------------
+
+        const pendingOptional =
+            getPendingOptionalStep(state);
+
+        if (
+            !isAction &&
+            pendingOptional &&
+            state.optional.asked === pendingOptional &&
+            ['qualification', 'other'].includes(intent)
+        ) {
+
+            const outcome =
+                applyOptionalAnswer(
+                    state,
+                    pendingOptional,
+                    userText
+                );
+
+            deterministicAssistantText =
+                outcome === 'skipped'
+                    ? 'Хорошо.'
+                    : 'Записал.';
+
+            optionalHandled = true;
+        }
+
+        if (
+            isAction &&
+            normalized.tag === 'optional_skip'
+        ) {
+
+            deterministicAssistantText = 'Хорошо.';
+        }
+
+
+        if (!isAction && !skipExtraction && !optionalHandled) {
 
             let expectedField = null;
             suppressControlledQuestion = isConversationalMetaMessage(userText);
@@ -6312,8 +7230,11 @@ addHistory(
 
                 // Сначала определяем, какой вопрос сейчас ожидает
                 // Sales Engine. Это нужно ДО extraction.
-                expectedField =
-                    calculateMissing(state)[0]?.field || inferCorrectionField(state, userText);
+                // Для вопроса клиента ожидаемого поля нет: ответ на вопрос не должен
+                // попадать в поле воронки.
+                expectedField = isQuestionIntent
+                    ? null
+                    : (calculateMissing(state)[0]?.field || inferCorrectionField(state, userText));
                 endDateCorrectionRequest = expectedField === 'dateEnd' && /(?:дата\s+и\s+время\s+)?окончан\w*.{0,35}(?:поменял\w*|изменил\w*|перенес\w*)|(?:поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*|врем\w*).{0,25}окончан\w*/i.test(userText);
                 const hasExplicitDateInCorrection = parseRussianDateMentions(userText).length > 0 || /\b(?:19|20)\d{2}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[./]\d{1,2}(?:[./](?:\d{2}|\d{4}))?\b/i.test(userText);
                 dateStartCorrectionRequest = expectedField === 'dateStart' && !hasExplicitDateInCorrection && /(?:дата\s+начала|начало\s+мероприятия|дата\s+старта).{0,35}(?:друг\w*|поменял\w*|изменил\w*|перенес\w*)|(?:друг\w*|поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*\s+начала|начал\w*\s+мероприятия)/i.test(userText);
@@ -6327,7 +7248,11 @@ addHistory(
                 const extracted =
                     await extractClientData(
                         state,
-                        userText
+                        userText,
+                        {
+                            expectedField,
+                            editBlock: state.confirmation.editBlock
+                        }
                     );
 
 
@@ -6468,7 +7393,7 @@ addHistory(
                     extracted.ledContent = 'Контент предоставляет команда MLK';
                 }
 
-                if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+                if (TIME_FIELDS.includes(expectedField)) {
                     extracted.dateStart = undefined;
                     extracted.dateEnd = undefined;
                     extracted.readyDate = undefined;
@@ -6633,7 +7558,7 @@ addHistory(
 
                 // Если клиент ответил на общий вопрос о датах, не задаём тот же вопрос
                 // повторно: нераспознанные части помечаем как требующие ручного уточнения.
-                if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+                if (TIME_FIELDS.includes(expectedField)) {
                     // Вопрос касается только времени: не позволяем модели перезаписать другие даты.
                     extracted.dateStart = undefined;
                     extracted.dateEnd = undefined;
@@ -6643,7 +7568,7 @@ addHistory(
                     const startDate = parseIsoDateTime(state.project.dateStart);
                     const endDate = parseIsoDateTime(state.project.dateEnd);
                     if (startDate && endDate && endDate < startDate) deferField(state, 'dateConflict', userText);
-                } else if (!suppressControlledQuestion && !endDateCorrectionRequest) {
+                } else if (!suppressControlledQuestion && !endDateCorrectionRequest && !isQuestionIntent) {
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
 
@@ -6654,8 +7579,10 @@ addHistory(
                     error.message
                 );
 
+                extractionFailed = true;
+
                 // Даже при ошибке DeepSeek не возвращаем клиенту тот же вопрос.
-                if (!suppressControlledQuestion) {
+                if (!suppressControlledQuestion && !isQuestionIntent) {
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
             }
@@ -6682,13 +7609,27 @@ addHistory(
                 }
             }
 
-            if (['dateStartTime', 'dateEndTime', 'readyDateTime'].includes(expectedField)) {
+            if (TIME_FIELDS.includes(expectedField)) {
                 const appliedTime = applyDirectTimeAnswer(state, expectedField, userText);
                 if (!appliedTime && !suppressControlledQuestion) {
                     // Не откладываем дату целиком: просим только корректное время повторно.
                     state.confirmationStatus = state.confirmationStatus || {};
                     state.confirmationStatus[expectedField] = 'unknown';
                 }
+            }
+
+            // Клиент выбрал блок «Исправить» и написал правку: возвращаемся к подтверждению.
+            if (state.confirmation.editBlock && !isQuestionIntent) {
+
+                if (
+                    state.confirmation.editBlock === 'other' &&
+                    /\+?\d[\d\s()\-]{8,}\d/.test(userText)
+                ) {
+                    state.client.contacts = userText.trim();
+                }
+
+                state.confirmation.editBlock = null;
+                state.confirmation.status = 'awaiting';
             }
         }
 
@@ -6701,29 +7642,7 @@ addHistory(
         refreshApplicationCode(state);
 
 
-        // --------------------------------------------------------
-        // INTENT
-        // --------------------------------------------------------
-
-        let intent =
-            'qualification';
-
-
-        try {
-
-            intent =
-                await detectIntent(
-                    state,
-                    userText
-                );
-
-        } catch (error) {
-
-            console.warn(
-                '⚠️ Sales Engine intent error:',
-                error.message
-            );
-        }
+        // INTENT уже определён выше, до извлечения данных.
 
 
         // --------------------------------------------------------
@@ -6842,7 +7761,9 @@ addHistory(
         );
 
         try {
-            if (endDateCorrectionRequest || dateStartCorrectionRequest || liftDimensionsLaterRequest || ambiguousEndDateRequest) {
+            if (deterministicAssistantText) {
+                assistantText = deterministicAssistantText;
+            } else if (endDateCorrectionRequest || dateStartCorrectionRequest || liftDimensionsLaterRequest || ambiguousEndDateRequest) {
                 // Ответ задан детерминированно: нужно уточнение/подтверждение, а не догадка модели.
             } else if (repeatedPortfolioQuestion) {
                 assistantText = 'Я уже отвечал на этот вопрос и не хочу повторяться или додумывать детали. Если нужны конкретные примеры проектов, площадок или мероприятий, могу передать этот вопрос менеджеру MLK.';
@@ -6857,8 +7778,10 @@ addHistory(
                 error.message
             );
 
-            assistantText =
-                'Спасибо. Информация зафиксирована.';
+            // Если и извлечение данных упало, нельзя говорить, что всё записано.
+            assistantText = extractionFailed
+                ? 'Извините, произошёл технический сбой, и часть информации могла не сохраниться. Давайте продолжим, а если что-то пропущу, вы сможете поправить.'
+                : 'Спасибо. Информация зафиксирована.';
         }
 
 
@@ -6875,9 +7798,15 @@ addHistory(
             );
 
 
-        // Убираем вопросы, которые DeepSeek мог скопировать из старой
-        // истории диалога. Следующий вопрос выбирается только по текущему
-        // структурированному состоянию Sales Engine.
+        // Следующий вопрос выбирает только Sales Engine по структурному
+        // состоянию. Если модель всё же закончила ответ своим вопросом,
+        // убираем только это последнее предложение (остальной ответ не трогаем).
+        const deterministicReply =
+            endDateCorrectionRequest ||
+            dateStartCorrectionRequest ||
+            ambiguousEndDateRequest ||
+            liftDimensionsLaterRequest;
+
         let finalAssistantText = endDateCorrectionRequest
             ? 'Конечно. На какую дату и время теперь нужно перенести окончание мероприятия? Напишите новую дату и время, пожалуйста.'
             : dateStartCorrectionRequest
@@ -6887,17 +7816,36 @@ addHistory(
                     : ambiguousEndDateRequest
                         ? 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.'
                         : cleanAcknowledgementText(varyAcknowledgement(
-                            stripQualificationQuestions(String(assistantText || '').trim()),
+                            String(assistantText || '').trim(),
                             state
                         ));
 
-        const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
-        const applicationChanged = JSON.stringify({ project: state.project, deferredFields: state.deferredFields, confirmationStatus: state.confirmationStatus }) !== applicationBeforeMessage;
+        const requiredMissing = calculateMissing(state);
+        const optionalStep = requiredMissing.length ? null : getPendingOptionalStep(state);
+        const applicationComplete = !requiredMissing.length && !optionalStep;
 
-        // Если заявка уже собрана и клиент уточнил/исправил данные, повторяем полный итог.
-        // Вопросы о компании/портфолио без изменения заявки под это правило не попадают.
-        if (!endDateCorrectionRequest && !dateStartCorrectionRequest && !ambiguousEndDateRequest && !liftDimensionsLaterRequest && !calculateMissing(state).length && applicationChanged && !['manager_request', 'out_of_scope'].includes(intent)) {
+        const questionToAppend = suppressControlledQuestion ? '' : (controlledQuestion || '');
+        const applicationChanged = applicationSnapshot(state) !== applicationBeforeMessage;
+
+        if (questionToAppend && !deterministicReply) {
+            finalAssistantText = dropTrailingModelQuestion(finalAssistantText);
+        }
+
+        // Клиент изменил уже подтверждённую заявку: нужно подтвердить заново.
+        if (applicationChanged && state.confirmation.status === 'confirmed') {
+            state.confirmation.status = 'awaiting';
+        }
+
+        // Если заявка собрана и клиент уточнил/исправил данные (или закрыл последний
+        // необязательный вопрос), показываем полный итог с кнопками «Подтвердить / Исправить».
+        const showSummary = !deterministicReply &&
+            applicationComplete &&
+            applicationChanged &&
+            !['manager_request', 'out_of_scope'].includes(intent);
+
+        if (showSummary) {
             finalAssistantText = buildClientSummary(state);
+            state.confirmation.status = 'awaiting';
         }
 
         // Если Sales Engine всё ещё требует ответ, удаляем заявления модели
@@ -6913,18 +7861,24 @@ addHistory(
                 .trim();
         }
 
-        if (questionToAppend && !(applicationChanged && !calculateMissing(state).length)) {
+        if (questionToAppend && !showSummary) {
+            // Клиент задал вопрос: отвечаем и мягко возвращаемся к заявке.
+            const bridge = isQuestionIntent && finalAssistantText ? 'Вернёмся к заявке.' : '';
             finalAssistantText = [
                 finalAssistantText,
+                bridge,
                 questionToAppend
             ]
                 .filter(Boolean)
                 .join('\n\n');
+
+            // Запоминаем, какой необязательный вопрос задан: следующий ответ клиента
+            // будет считаться ответом именно на него.
+            state.optional.asked = optionalStep || null;
         }
 
-        // Удаляем повторяющиеся строки, если AI уже выдал тот же контролируемый вопрос.
-        finalAssistantText = cleanAcknowledgementText(finalAssistantText);
-        finalAssistantText = [...new Set(finalAssistantText.split('\n').map(line => line.trim()).filter(Boolean))].join('\n');
+        // Удаляем повторяющиеся длинные строки, сохраняя пустые строки и абзацы.
+        finalAssistantText = dedupeLines(cleanAcknowledgementText(finalAssistantText));
 
         if (!finalAssistantText) {
             finalAssistantText = questionToAppend || 'Спасибо. Информация зафиксирована.';
@@ -6979,6 +7933,39 @@ addHistory(
 
 
 // ============================================================
+// PER-CLIENT QUEUE
+// ============================================================
+// Клиент может прислать несколько сообщений подряд. Обрабатываем их
+// строго по очереди, чтобы состояние и история не перемешивались.
+
+const clientQueues = new Map();
+
+function runInClientQueue(clientId, task) {
+
+    const key = String(clientId || '');
+    const previous = clientQueues.get(key) || Promise.resolve();
+    const run = previous.catch(() => {}).then(task);
+    const tail = run.catch(() => {});
+
+    clientQueues.set(key, tail);
+
+    tail.then(() => {
+        if (clientQueues.get(key) === tail) clientQueues.delete(key);
+    });
+
+    return run;
+}
+
+function processSalesMessage(clientId, message) {
+    return runInClientQueue(clientId, () => processSalesMessageInner(clientId, message));
+}
+
+function processStartQueued(clientId, clientName = '', options = {}) {
+    return runInClientQueue(clientId, () => processStart(clientId, clientName, options));
+}
+
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -6986,7 +7973,7 @@ module.exports = {
 
     processSalesMessage,
 
-    processStart,
+    processStart: processStartQueued,
 
     getSalesState,
 
