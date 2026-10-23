@@ -6428,7 +6428,7 @@ function cleanAcknowledgementText(text) {
     // Добавляем пробел после пунктуации, но не разрываем время 19:00.
     value = value
         .replace(/([,;!?])(?=[^\s\d,;!?])/g, '$1 ')
-        .replace(/([а-яёa-z])([,;])(?=\d)/gi, '$1$2 ')
+        .replace(/([а-яёa-z])([,;:])(?=\d)/gi, '$1$2 ')
         .replace(/:(?=\S)(?!\d)/g, ': ')
         .replace(/^(\s*(?:Хорошо|Отлично)),\s*[—–-]\s*/i, '$1, ')
         .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s*[—–-]\s*/i, '$1: ')
@@ -6668,6 +6668,38 @@ function to24h(hourValue, minuteValue, period) {
 
 const fmtTime = t => `${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`;
 
+// Время в свободном тексте. Число считается временем, если у него есть минуты,
+// перед ним стоит предлог (с, в, к, до, по, около) или после него «утра/вечера/часов».
+// Даты («5 декабря», «12.12.2026») пропускаются.
+function extractTimeCandidates(source) {
+    const result = [];
+    const regex = /(?<![\d:.,])(\d{1,2})(?:[:.]([0-5]\d))?(?!\d)/g;
+    let match;
+
+    while ((match = regex.exec(source))) {
+        const end = match.index + match[0].length;
+        const before = source.slice(Math.max(0, match.index - 14), match.index);
+        const after = source.slice(end, end + 14);
+
+        if (/^\s*(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря|числа)/.test(after)) continue;
+        if (/^\.\d{2}/.test(source.slice(end))) continue;
+
+        const hasMinutes = match[2] !== undefined;
+        const prepositionBefore = /(?:^|[\s(,])(?:с|со|c|в|к|до|по|около|примерно)\s*$/i.test(before);
+        const periodAfter = after.match(/^\s*(утра|дня|вечера|ночи)/);
+        const hourWord = /^\s*(?:час(?:а|ов)?|ч)(?![а-я])/.test(after);
+
+        if (!(hasMinutes || prepositionBefore || periodAfter || hourWord)) continue;
+
+        const parsed = to24h(match[1], match[2], periodAfter ? periodAfter[1] : '');
+        if (!parsed) continue;
+
+        result.push({ time: fmtTime(parsed), before });
+    }
+
+    return result;
+}
+
 // Возвращает { start, end } (строки HH:mm; любая может быть null).
 function parseEventTimes(text) {
     const source = String(text || '').toLowerCase().replace(/ё/g, 'е');
@@ -6684,11 +6716,16 @@ function parseEventTimes(text) {
         }
     }
 
-    // «начало в 18:00, конец в 23:30»
-    const colonTimes = [...source.matchAll(/(?:^|[^\d])(\d{1,2}):([0-5]\d)(?!\d)/g)]
-        .map(m => to24h(m[1], m[2], ''))
-        .filter(Boolean);
-    if (colonTimes.length >= 2) return { start: fmtTime(colonTimes[0]), end: fmtTime(colonTimes[1]) };
+    // «c 15:00 и закончится в 21», «начало в 18:00, конец в 23:30»
+    const found = extractTimeCandidates(source);
+    if (found.length >= 2) return { start: found[0].time, end: found[1].time };
+
+    if (found.length === 1) {
+        const only = found[0];
+        const endish = /(?:заканч|окончан|законч|заверш|конец)/.test(source) || /(?:^|\s)до\s*$/.test(only.before);
+        const startish = /(?:начал|начн|старт|открыт)/.test(source) || /(?:^|\s)(?:с|со|c)\s*$/i.test(only.before);
+        return endish && !startish ? { start: null, end: only.time } : { start: only.time, end: null };
+    }
 
     const single = parseTimeAnswer(text);
     if (single) {
@@ -6774,6 +6811,15 @@ function applyDirectTimeAnswer(state, expectedField, text) {
 // ============================================================
 
 const QUESTION_INTENTS = ['question', 'equipment_question', 'portfolio_question', 'objection'];
+
+// Модель иногда называет вопросом обычный ответ про оборудование («есть возможность
+// подвесить»). Считаем сообщение вопросом, только если оно им и выглядит.
+function looksLikeClientQuestion(text) {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    if (/\?/.test(value)) return true;
+    return /^(?:а\s+)?(?:как|какой|какая|какие|какое|каком|сколько|можно|можете|можешь|есть\s+ли|что|почему|зачем|где|когда|умеете|работаете|делаете|подскажите|подскажи|расскажите|расскажи|объясните|поясните|скажите|скажи|а\s+если)(?![а-яё])/i.test(value);
+}
 
 const CONFIRM_RE = /^(?:да[,.\s]*)?(?:подтвержда[а-яё]*|подтверд[а-яё]*|всё\s+верно|все\s+верно|верно|правильно|согласен|согласна|ок|окей|хорошо|да)[\s.!]*$/i;
 
@@ -7402,7 +7448,8 @@ addHistory(
         }
 
         const isQuestionIntent =
-            QUESTION_INTENTS.includes(intent);
+            QUESTION_INTENTS.includes(intent) &&
+            looksLikeClientQuestion(userText);
 
         const skipExtraction =
             ['greeting', 'manager_request', 'out_of_scope'].includes(intent);
@@ -7457,7 +7504,7 @@ addHistory(
                 // Sales Engine. Это нужно ДО extraction.
                 // Для вопроса клиента ожидаемого поля нет: ответ на вопрос не должен
                 // попадать в поле воронки.
-                expectedField = isQuestionIntent
+                expectedField = (isQuestionIntent || ['equipment', 'other'].includes(state.confirmation.editBlock))
                     ? null
                     : (calculateMissing(state)[0]?.field || inferCorrectionField(state, userText));
                 endDateCorrectionRequest = expectedField === 'dateEnd' && /(?:дата\s+и\s+время\s+)?окончан\w*.{0,35}(?:поменял\w*|изменил\w*|перенес\w*)|(?:поменял\w*|изменил\w*|перенес\w*).{0,35}(?:дат\w*|врем\w*).{0,25}окончан\w*/i.test(userText);
@@ -7502,6 +7549,14 @@ addHistory(
                 // соответствующего условия или времени.
                 const explicitMountCondition = /(?:монтаж|монтировать|монтировк|установк).{0,70}(?:ночью|ночн\w*|рано утром|в любое время|любое время|по согласован\w*|после \d|до \d|с \d|\b\d{1,2}[:.]\d{2}\b)|(?:ночью|рано утром|в любое время|по согласован\w*).{0,70}(?:монтаж|монтировать|установк)/i.test(userText);
                 const explicitDemountCondition = /(?:демонтаж|демонтировать|сняти\w*).{0,70}(?:ночью|ночн\w*|рано утром|в любое время|любое время|по согласован\w*|после \d|до \d|с \d|\b\d{1,2}[:.]\d{2}\b)|(?:ночью|рано утром|в любое время|по согласован\w*).{0,70}(?:демонтаж|демонтировать|сняти\w*)/i.test(userText);
+
+                // Контент и подвес LED заполняем только если клиент о них действительно говорит.
+                if (expectedField !== 'ledContent' && !/(?:ролик|заставк|видео|логотип|трансляц|презентац|контент|картинк|фото|слайд|камер|реклам)/i.test(userText)) {
+                    extracted.ledContent = undefined;
+                }
+                if (expectedField !== 'ledSuspension' && !/(?:подвес|подвеш|напол|ферм|стойк|треног|крепл)/i.test(userText)) {
+                    extracted.ledSuspension = undefined;
+                }
 
                 if (expectedField !== 'mount' && !explicitMountCondition) {
                     extracted.mount = undefined;
