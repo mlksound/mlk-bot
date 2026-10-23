@@ -2099,9 +2099,20 @@ function hasExplicitDimensions(value) {
     return /\d+\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*\d+/i.test(String(value || ''));
 }
 
+// Клиент просит перейти к следующему вопросу или говорит, что уже ответил.
+const SKIP_QUESTION_RE = /^(?:ну\s+|давай\s+|давайте\s+)?(?:к\s+следующему(?:\s+вопросу)?|дальше|следующий\s+вопрос|пропустим|пропустить|идем\s+дальше|идём\s+дальше|хватит\s+(?:уже\s+)?(?:спрашивать|уточнять)|уже\s+(?:говорил|сказал)[а-я]*|так\s+я\s+(?:же\s+)?(?:тебе\s+)?(?:уже\s+)?(?:сказал|говорил)[а-я]*(?:\s+уже)?)[\s.!?]*$/i;
+
 function hasLedQuantity(value) {
-    const text = String(value || '').toLowerCase();
-    return /\b\d+\s*(?:led[- ]?)?экран\w*|\b(?:один|одна|одно|два|две|три|четыре|пять|несколько|пара)\s+(?:led[- ]?)?экран\w*|центральн\w* экран|боков\w* экран\w*|экраны по обеим сторонам/i.test(text);
+    const text = String(value || '').toLowerCase().replace(/ё/g, 'е');
+    // «3 экрана», «один экран», «два боковых», «центральный экран»,
+    // «центральный 8 на 4 и по бокам 2 на 3», «один по центру».
+    return (
+        /\d+\s*(?:led[- ]?)?экран[а-я]*/.test(text) ||
+        /(?:^|[^а-я])(?:один|одна|одно|два|две|три|четыре|пять|шесть|несколько|пара)\s+(?:led[- ]?)?(?:экран[а-я]*|боков[а-я]*|по\s+(?:бокам|центру|сторонам))/.test(text) ||
+        /центральн[а-я]*\s+(?:led[- ]?)?экран|боков[а-я]*\s+(?:led[- ]?)?экран[а-я]*|экраны\s+по\s+обеим\s+сторонам/.test(text) ||
+        /(?:центральн[а-я]*|боков[а-я]*)\s+\d/.test(text) ||
+        /по\s+бокам\s+\d/.test(text)
+    );
 }
 
 function explicitlyUnknownDimensions(value) {
@@ -4147,6 +4158,72 @@ function dropTrailingModelQuestion(text) {
     }
 
     return lines.join('\n').trim();
+}
+
+// Фраза-запрос к клиенту: вопрос или просьба что-то написать/уточнить.
+function looksLikeFunnelRequest(sentence) {
+    const value = String(sentence || '');
+    return /\?/.test(value) ||
+        /(?:^|[\s,;:—–-])(?:подскажите|уточните|укажите|расскажите|напишите|выберите|сообщите|опишите|пришлите)(?![а-яё])/i.test(value);
+}
+
+function stemTokens(text) {
+    const words = String(text || '').toLowerCase().replace(/ё/g, 'е').match(/[а-я]{4,}/g) || [];
+    return new Set(words.map(word => word.slice(0, 5)));
+}
+
+function overlapRatio(a, b) {
+    const left = stemTokens(a);
+    const right = stemTokens(b);
+    if (!left.size || !right.size) return 0;
+    let common = 0;
+    for (const token of left) if (right.has(token)) common++;
+    return common / Math.min(left.size, right.size);
+}
+
+// DeepSeek часто повторяет следующий вопрос воронки своими словами. Вопрос задаёт
+// только Sales Engine, поэтому из ответа модели убираем повторы вопроса.
+// Подтверждение («Записал: ...») остаётся.
+function removeEchoedQuestions(text, engineQuestion, isClientQuestion) {
+    const paragraphs = String(text || '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+    const kept = [];
+
+    for (const paragraph of paragraphs) {
+
+        const sentences = paragraph.split(/(?<=[.!?])\s+/);
+        const index = sentences.findIndex(looksLikeFunnelRequest);
+
+        if (index === -1) {
+            kept.push(paragraph);
+            continue;
+        }
+
+        const questionPart = sentences.slice(index).join(' ');
+
+        // Клиент сам задал вопрос: убираем только то, что повторяет наш вопрос.
+        if (isClientQuestion && overlapRatio(questionPart, engineQuestion) < 0.5) {
+            kept.push(paragraph);
+            continue;
+        }
+
+        // Абзац начинается с вопроса: это повтор вопроса воронки, убираем целиком.
+        if (index === 0) continue;
+
+        // Подтверждение стояло перед вопросом в том же абзаце: оставляем его и обычные
+        // предложения после вопроса. Продолжения вопроса («Например…», «Если…») убираем.
+        const rest = [...sentences.slice(0, index)];
+        let skipping = true;
+        for (const sentence of sentences.slice(index + 1)) {
+            if (skipping && (looksLikeFunnelRequest(sentence) || /^(?:например|если|можно|можете|либо|или|допустим|к\s+примеру)(?![а-яё])/i.test(sentence.trim()))) continue;
+            skipping = false;
+            rest.push(sentence);
+        }
+        kept.push(rest.join(' '));
+    }
+
+    let result = kept.join('\n\n');
+    if (isClientQuestion) result = dropTrailingModelQuestion(result);
+    return result;
 }
 
 function dedupeLines(text) {
@@ -6351,6 +6428,7 @@ function cleanAcknowledgementText(text) {
     // Добавляем пробел после пунктуации, но не разрываем время 19:00.
     value = value
         .replace(/([,;!?])(?=[^\s\d,;!?])/g, '$1 ')
+        .replace(/([а-яёa-z])([,;])(?=\d)/gi, '$1$2 ')
         .replace(/:(?=\S)(?!\d)/g, ': ')
         .replace(/^(\s*(?:Хорошо|Отлично)),\s*[—–-]\s*/i, '$1, ')
         .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s*[—–-]\s*/i, '$1: ')
@@ -7180,6 +7258,7 @@ addHistory(
         let deterministicAssistantText = '';
         let extractionFailed = false;
         let optionalHandled = false;
+        let skipPreserve = false;
 
 
         // --------------------------------------------------------
@@ -7594,6 +7673,12 @@ addHistory(
                     deferField(state, 'ledDetails', `Размеры LED-экрана пока неизвестны; ответ клиента: ${userText}`);
                 }
 
+                // «К следующему вопросу», «я же уже сказал»: не зацикливаемся на LED.
+                if (expectedField === 'ledDetails' && SKIP_QUESTION_RE.test(userText.trim()) && state.project.ledDetails) {
+                    deferField(state, 'ledDetails', 'Размеры LED-экрана пока неизвестны: клиент предложил перейти к следующему вопросу, детали уточнит менеджер');
+                    skipPreserve = true;
+                }
+
                 // Извлекаем даты, условия монтажа/демонтажа и поздние уточнения лифта
                 // непосредственно из формулировки клиента, не полагаясь только на JSON DeepSeek.
 
@@ -7602,7 +7687,7 @@ addHistory(
                 // экран описан через сцену/расположение или решение оставлено MLK.
                 if (expectedField === 'ledDetails' && previousLedDetails) {
                     const ledReply = userText.trim();
-                    const acknowledgementOnly = /^(?:супер|отлично|хорошо|ок|окей|понятно|спасибо|да|ага|класс|замечательно)[.!\s🙏👍🙂😊]*$/i.test(ledReply);
+                    const acknowledgementOnly = /^(?:супер|отлично|хорошо|ок|окей|понятно|спасибо|да|ага|класс|замечательно)[.!\s🙏👍🙂😊]*$/i.test(ledReply) || SKIP_QUESTION_RE.test(ledReply);
                     const ledDimensions = ledReply.match(/(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?/i);
                     const isLedCorrection = /не\s+(?:его\s+)?располож\w*.{0,30}(?:а|,)?\s*(?:именно\s*)?(?:его\s*)?размер\w*|не\s+располож\w*.{0,30}размер\w*|нужен\s+один\s+такого\s+размер/i.test(ledReply);
                     // Короткий ответ только с новыми габаритами (например, «3 на 3»)
@@ -7623,6 +7708,17 @@ addHistory(
                         !String(previousLedDetails).toLowerCase().includes(ledReply.toLowerCase())
                     ) {
                         state.project.ledDetails = `${previousLedDetails}; уточнение: ${ledReply}`;
+
+                        // После трёх безуспешных уточнений не мучаем клиента: передаём менеджеру.
+                        state.unparsedAttempts = state.unparsedAttempts || {};
+                        state.unparsedAttempts.ledDetails = (state.unparsedAttempts.ledDetails || 0) + 1;
+                        if (
+                            state.unparsedAttempts.ledDetails >= 2 &&
+                            (!hasLedQuantity(state.project.ledDetails) || !hasExplicitDimensions(state.project.ledDetails))
+                        ) {
+                            deferField(state, 'ledDetails', 'Размеры LED-экрана пока неизвестны: количество и размеры нужно уточнить у клиента');
+                            skipPreserve = true;
+                        }
                     }
                 }
 
@@ -7714,7 +7810,7 @@ addHistory(
                     const startDate = parseIsoDateTime(state.project.dateStart);
                     const endDate = parseIsoDateTime(state.project.dateEnd);
                     if (startDate && endDate && endDate < startDate) deferField(state, 'dateConflict', userText);
-                } else if (!suppressControlledQuestion && !endDateCorrectionRequest && !isQuestionIntent) {
+                } else if (!suppressControlledQuestion && !endDateCorrectionRequest && !isQuestionIntent && !skipPreserve) {
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
 
@@ -7728,7 +7824,7 @@ addHistory(
                 extractionFailed = true;
 
                 // Даже при ошибке DeepSeek не возвращаем клиенту тот же вопрос.
-                if (!suppressControlledQuestion && !isQuestionIntent) {
+                if (!suppressControlledQuestion && !isQuestionIntent && !skipPreserve) {
                     preserveUnparsedAnswer(state, expectedField, userText);
                 }
             }
@@ -7974,7 +8070,7 @@ addHistory(
         const applicationChanged = applicationSnapshot(state) !== applicationBeforeMessage;
 
         if (questionToAppend && !deterministicReply) {
-            finalAssistantText = dropTrailingModelQuestion(finalAssistantText);
+            finalAssistantText = removeEchoedQuestions(finalAssistantText, questionToAppend, isQuestionIntent);
         }
 
         // Клиент изменил уже подтверждённую заявку: нужно подтвердить заново.
