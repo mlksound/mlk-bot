@@ -812,9 +812,9 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
 
     // Количество дней, названное клиентом в свободной форме.
     if (state.project.multiDay === null || state.project.multiDay === undefined) {
-        if (/(?:в\s+один\s+день|один\s+день|однодневн\w*|только\s+один\s+день)/i.test(lower)) {
+        if (/(?:в\s+один\s+день|один\s+день|однодневн[а-яё]*|только\s+один\s+день)/i.test(lower)) {
             state.project.multiDay = false;
-        } else if (/(?:несколько\s+дней|многодневн\w*|\b(?:2|3|4|5|6|7|два|три|четыре|пять)\s+дн(?:я|ей)\b|\bдвух\s+дн|\bтр[её]х\s+дн)/i.test(lower)) {
+        } else if (/(?:несколько\s+дней|многодневн[а-яё]*|(?<![а-яё\d])(?:2|3|4|5|6|7|два|три|четыре|пять)\s+дн(?:я|ей)(?![а-яё])|(?<![а-яё])двух\s+дн|(?<![а-яё])тр[её]х\s+дн)/i.test(lower)) {
             state.project.multiDay = true;
         }
     }
@@ -1783,6 +1783,23 @@ function mergeProjectData(
 
             let incomingValue = extracted[field];
 
+            // Клиент перенёс дату начала, а дату окончания не назвал: если окончание было
+            // в тот же или на следующий день, сдвигаем его на столько же дней.
+            if (field === 'dateStart' && extracted.dateEnd === undefined && hasDateOrDateTime(p.dateStart) && hasDateOrDateTime(p.dateEnd)) {
+                const oldStart = parseIsoDateTime(String(p.dateStart).slice(0, 10));
+                const oldEnd = parseIsoDateTime(String(p.dateEnd).slice(0, 10));
+                const newStart = parseIsoDateTime(String(incomingValue).slice(0, 10));
+                if (oldStart && oldEnd && newStart) {
+                    const span = Math.round((oldEnd - oldStart) / 86400000);
+                    const delta = Math.round((newStart - oldStart) / 86400000);
+                    if (delta !== 0 && span >= 0 && span <= 1) {
+                        const newEndDate = addDaysToIsoDate(String(p.dateEnd).slice(0, 10), delta);
+                        const endTime = String(p.dateEnd).match(/\s+(\d{1,2}:\d{2})$/)?.[1] || '';
+                        if (newEndDate) p.dateEnd = `${newEndDate}${endTime ? ` ${endTime}` : ''}`;
+                    }
+                }
+            }
+
             // Клиент перенёс только дату: сохраняем ранее названное время.
             if (['dateStart', 'dateEnd', 'readyDate'].includes(field) && /^\d{4}-\d{2}-\d{2}$/.test(String(incomingValue))) {
                 const previousTime = String(p[field] || '').match(/\s+(\d{1,2}:\d{2})$/)?.[1];
@@ -2266,6 +2283,21 @@ function syncEventDays(state) {
 
     if (!endDate || (endDate !== startDate && endDate !== addDaysToIsoDate(startDate, 1))) {
         p.dateEnd = `${startDate}${endTime ? ` ${endTime}` : ''}`;
+    }
+
+    // Мероприятие в один день, но заканчивается после полуночи («до 00:00», «до 2 ночи»):
+    // окончание переносим на следующую дату. Границу ставим на 08:00, чтобы опечатку
+    // вроде «с 19:00 до 18:00» не принять за ночное окончание.
+    const startTime = String(p.dateStart).match(/\s+(\d{1,2}):(\d{2})$/);
+    const finalEnd = String(p.dateEnd || '');
+    const finalEndTime = finalEnd.match(/\s+(\d{1,2}):(\d{2})$/);
+
+    if (startTime && finalEndTime && finalEnd.slice(0, 10) === startDate) {
+        const startMinutes = Number(startTime[1]) * 60 + Number(startTime[2]);
+        const endMinutes = Number(finalEndTime[1]) * 60 + Number(finalEndTime[2]);
+        if (endMinutes <= startMinutes && endMinutes <= 8 * 60) {
+            p.dateEnd = `${addDaysToIsoDate(startDate, 1)} ${finalEndTime[1]}:${finalEndTime[2]}`;
+        }
     }
 }
 
@@ -5784,6 +5816,8 @@ async function processStart(
         const text =
             'У вас уже есть начатая заявка. Продолжить с того же места или начать заново? Если начать заново, данные заявки будут сброшены.';
 
+        existing.pendingRestart = true;
+
         addHistory(
             existing,
             'assistant',
@@ -6304,8 +6338,9 @@ function varyAcknowledgement(text, state) {
     const available = variants.filter(value => !recent.includes(value.toLowerCase()));
     const choices = available.length ? available : variants;
     const index = Math.max(0, Number(state?.history?.length || 0)) % choices.length;
-    const punctuation = match[2] || ',';
-    return choices[index] + punctuation + source.slice(match[0].length);
+    const rest = source.slice(match[0].length);
+    const punctuation = match[2] || (!rest || /^[.!?]/.test(rest) ? '' : ',');
+    return choices[index] + punctuation + rest;
 }
 
 
@@ -6339,7 +6374,8 @@ function cleanAcknowledgementText(text) {
     const duplicate = value.match(new RegExp('^\\s*(' + ack + ')\\s*[:,!]\\s*(.+?)\\.\\s*' + ack + '[.!?]*\\s*$', 'i'));
     if (duplicate) value = `${duplicate[1][0].toUpperCase()}${duplicate[1].slice(1)}: ${duplicate[2].trim()}.`;
 
-    value = value.replace(/\s+([,.!?;:])/g, '$1').replace(/([,;:])\s{2,}/g, '$1 ');
+    // Только пробелы и табуляции: переводы строк (абзацы, списки) не трогаем.
+    value = value.replace(/[ \t]+([,.!?;:])/g, '$1').replace(/([,;:])[ \t]{2,}/g, '$1 ');
     return value.trim();
 }
 
@@ -6618,7 +6654,7 @@ function applyEventTimes(state, text) {
         let finalEndDate = endDate;
         // Один день, но окончание после полуночи: «с 20:00 до 02:00».
         const effectiveStart = String(p.dateStart).match(/\s+(\d{1,2}:\d{2})$/)?.[1];
-        if (p.multiDay === false && effectiveStart && endTime <= effectiveStart && finalEndDate === startDate) {
+        if (p.multiDay === false && effectiveStart && endTime <= effectiveStart && Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3, 5)) <= 8 * 60 && finalEndDate === startDate) {
             finalEndDate = addDaysToIsoDate(startDate, 1) || finalEndDate;
         }
         p.dateEnd = `${finalEndDate} ${endTime}`;
@@ -6661,7 +6697,24 @@ function applyDirectTimeAnswer(state, expectedField, text) {
 
 const QUESTION_INTENTS = ['question', 'equipment_question', 'portfolio_question', 'objection'];
 
-const CONFIRM_RE = /^(?:да[,.\s]*)?(?:подтвержда\w*|подтверд\w*|всё\s+верно|все\s+верно|верно|правильно|согласен|согласна|ок|окей|хорошо|да)[\s.!]*$/i;
+const CONFIRM_RE = /^(?:да[,.\s]*)?(?:подтвержда[а-яё]*|подтверд[а-яё]*|всё\s+верно|все\s+верно|верно|правильно|согласен|согласна|ок|окей|хорошо|да)[\s.!]*$/i;
+
+const EDIT_RE = /^(?:да[,.\s]*)?(?:исправить|исправлю|исправляем|изменить|поменять|поправить|редактировать|внести\s+правки|нужно\s+исправить|хочу\s+исправить|хочу\s+изменить)[\s.!]*$/i;
+
+// Клиент просит начать заявку заново (без точки опоры на \w: кириллица).
+const RESTART_RE = /(?:нов(?:ую|ая)\s+заявк|начать\s+(?:всё\s+|все\s+)?заново|начни(?:те)?\s+заново|начинай(?:те)?\s+заново|начать\s+с\s+(?:самого\s+начала|нуля)|давай(?:те)?\s+(?:вообще\s+)?(?:с\s+самого\s+начала|сначала|заново))/i;
+
+// Ответ на вопрос «продолжить или начать заново?»: здесь можно трактовать шире.
+const RESTART_ANSWER_RE = /(?:нов[а-яё]*|заново|сначала|с\s+самого\s+начала|с\s+нуля|сброс[а-яё]*|очисти[а-яё]*)/i;
+const CONTINUE_RE = /(?:продолж[а-яё]*|оставь(?:те)?\s+(?:как\s+есть|всё)|не\s+(?:надо|нужно)\s+(?:заново|сбрасывать))/i;
+
+// Название блока при исправлении: «дату начала и готовность», «адрес», «монтаж».
+const EDIT_BLOCK_KEYWORDS = [
+    ['dates', /(?:дат[а-яё]*|врем[а-яё]*|готовност[а-яё]*|начал[а-яё]*|окончани[а-яё]*|календар[а-яё]*)/i],
+    ['venue', /(?:адрес[а-яё]*|площадк[а-яё]*|этаж[а-яё]*|лифт[а-яё]*|мест[а-яё]*)/i],
+    ['equipment', /(?:оборудовани[а-яё]*|звук[а-яё]*|свет[а-яё]*|экран[а-яё]*|led|сцен[а-яё]*)/i],
+    ['service', /(?:персонал[а-яё]*|монтаж[а-яё]*|демонтаж[а-яё]*)/i]
+];
 
 function applicationSnapshot(state) {
     const optional = state.optional || {};
@@ -6691,7 +6744,7 @@ function applyOptionalAnswer(state, step, text) {
     const optional = ensureOptional(state);
     const value = String(text || '').trim();
     const skip = value.length <= 30 &&
-        /^(?:нет|ничего|пропусти\w*|пока\s+нет|не\s+знаю|не\s+хочу|не\s+надо|не\s+нужно|позже|потом|без\s+\w+|-)(?:[\s,.!]|$)/i.test(value);
+        /^(?:нет|ничего|пропусти[а-яё]*|пропуск|пока\s+нет|не\s+знаю|не\s+хочу|не\s+надо|не\s+нужно|позже|потом|без\s+[а-яё]+|-)(?:[\s,.!]|$)/i.test(value);
 
     if (skip) {
         optional[step] = 'skipped';
@@ -6730,6 +6783,7 @@ async function handleControlAction(state, normalized, initialGreeting) {
 
     const tag = normalized.tag;
     const value = normalized.value;
+    state.pendingRestart = false;
     const withGreeting = result => {
         if (initialGreeting) result.text = `${initialGreeting}\n\n${result.text}`;
         return result;
@@ -7126,6 +7180,98 @@ addHistory(
         let deterministicAssistantText = '';
         let extractionFailed = false;
         let optionalHandled = false;
+
+
+        // --------------------------------------------------------
+        // ТЕКСТОВЫЕ ОТВЕТЫ НА КНОПКИ (если клиент пишет вместо нажатия)
+        // --------------------------------------------------------
+
+        if (!isAction && state.pendingRestart) {
+
+            const answerText = userText.trim();
+            const wantsRestart = RESTART_RE.test(answerText) || RESTART_ANSWER_RE.test(answerText);
+            const wantsContinue = CONTINUE_RE.test(answerText) && !wantsRestart;
+
+            state.pendingRestart = false;
+
+            if (wantsRestart && !wantsContinue) {
+                return await processStart(clientId, clientName, { force: true });
+            }
+
+            if (wantsContinue) {
+                const resumed = await handleControlAction(
+                    state,
+                    { tag: 'restart_confirm', value: 'continue' },
+                    initialGreeting
+                );
+                if (resumed) return resumed;
+            }
+        }
+
+        if (
+            !isAction &&
+            userText.length <= 80 &&
+            hasApplicationProgress(state) &&
+            RESTART_RE.test(userText) &&
+            !state.pendingRestart
+        ) {
+
+            // Явная просьба начать заново: переспрашиваем, чтобы не стереть заявку случайно.
+            state.pendingRestart = true;
+
+            const confirmText =
+                'Понял. Если начать заново, данные текущей заявки будут сброшены. Начать новую заявку или продолжить текущую?';
+
+            addHistory(state, 'assistant', confirmText);
+
+            return {
+                text: confirmText,
+                actions: [
+                    makeButtonsAction('restart_confirm', [
+                        { text: 'Начать заново', value: 'restart' },
+                        { text: 'Продолжить', value: 'continue' }
+                    ])
+                ],
+                project: state.project,
+                missing: calculateMissing(state),
+                stage: state.stage,
+                intent: 'greeting',
+                readyForManager: false,
+                confirmationStatus: state.confirmation.status,
+                managerSummary: null
+            };
+        }
+
+        if (!isAction && isApplicationComplete(state) && state.confirmation.status === 'awaiting' && EDIT_RE.test(userText.trim())) {
+
+            const editResult = await handleControlAction(
+                state,
+                { tag: 'confirm_application', value: 'edit' },
+                initialGreeting
+            );
+            if (editResult) return editResult;
+        }
+
+        if (
+            !isAction &&
+            state.confirmation.status === 'editing' &&
+            !state.confirmation.editBlock &&
+            userText.length <= 60 &&
+            !/\d/.test(userText)
+        ) {
+
+            const matched = EDIT_BLOCK_KEYWORDS.filter(([, re]) => re.test(userText));
+
+            if (matched.length) {
+
+                const blockResult = await handleControlAction(
+                    state,
+                    { tag: 'edit_block', value: matched[0][0] },
+                    initialGreeting
+                );
+                if (blockResult) return blockResult;
+            }
+        }
 
 
         // --------------------------------------------------------

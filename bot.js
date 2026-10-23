@@ -1344,6 +1344,40 @@ function buildTelegramReplyMarkup(actions) {
 
         if (action.type === 'quick_reply') {
 
+            // Кнопки, которые Sales Engine передаёт явно (подтверждение заявки,
+            // исправление, «один день / несколько», пропуск необязательных вопросов и т.д.).
+            if (
+                Array.isArray(action.buttons) &&
+                action.buttons.length
+            ) {
+
+                const buttons =
+                    action.buttons
+                        .filter(button => button && button.text && button.value !== undefined)
+                        .map(button => ({
+                            text:
+                                String(button.text),
+
+                            callback_data:
+                                `sales:action:${action.tag}:${button.value}`
+                        }));
+
+                const sameRow =
+                    buttons.length === 2 &&
+                    buttons.every(button => button.text.length <= 20);
+
+                if (sameRow) {
+                    keyboard.push(buttons);
+                } else {
+                    for (const button of buttons) {
+                        keyboard.push([button]);
+                    }
+                }
+
+                continue;
+            }
+
+
             if (
                 action.tag === 'discuss_project'
             ) {
@@ -3529,7 +3563,28 @@ function salesButtonChoiceText(tag, value) {
         ask_sound_rider: { yes: 'Звуковой райдер есть', no: 'Звукового райдера нет' },
         ask_light_fixtures: { yes: 'Требования к световым приборам есть', no: 'Отдельных требований к световым приборам нет' },
         ask_mount: { any: 'Монтаж по согласованию', night: 'Монтаж ночью / рано утром' },
-        ask_demount: { any: 'Демонтаж по согласованию', deadline: 'Демонтаж до определённого времени' }
+        ask_demount: { any: 'Демонтаж по согласованию', deadline: 'Демонтаж до определённого времени' },
+        ask_days: { one_day: 'Мероприятие в один день', multi_day: 'Мероприятие в несколько дней' },
+        ask_ready_choice: {
+            event_day: 'Готовность: в день мероприятия',
+            day_before: 'Готовность: за день до мероприятия',
+            earlier: 'Готовность: раньше / другая дата'
+        },
+        optional_skip: {
+            budget: 'Пропустить вопрос о бюджете',
+            extra: 'Нечего добавить',
+            contacts: 'Пропустить контакты'
+        },
+        confirm_application: { yes: '✅ Подтверждаю заявку', edit: '✏️ Хочу исправить заявку' },
+        edit_block: {
+            dates: 'Исправить: даты и время',
+            venue: 'Исправить: площадка',
+            equipment: 'Исправить: оборудование',
+            service: 'Исправить: персонал и монтаж',
+            other: 'Исправить: другое',
+            back: 'Назад к заявке'
+        },
+        restart_confirm: { continue: 'Продолжить текущую заявку', restart: 'Начать заявку заново' }
     };
 
     if (tag === 'ask_equipment' && Array.isArray(value)) {
