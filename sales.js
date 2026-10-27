@@ -1131,6 +1131,29 @@ function normalizeEquipment(value) {
 }
 
 
+const EVENT_SHORT_LABELS = {
+    concerts: 'Концерты и фестивали',
+    conferences: 'Конференции, презентации и TV-проекты',
+    corporate: 'Корпоративы и торжества',
+    exhibitions: 'Выставки',
+    sports: 'Спортивные мероприятия'
+};
+
+// «Концерты и фестивали (Мюзикл)»: короткая категория и то, как клиент назвал мероприятие.
+function formatEventForSummary(p) {
+    const category = EVENT_SHORT_LABELS[p.eventType] || getEventLabel(p.eventType);
+    const original = String(p.eventTypeOriginal || '').trim();
+    if (!original) return category;
+
+    const normalize = value => String(value).toLowerCase().replace(/ё/g, 'е').replace(/[&,]/g, ' ').replace(/\s+/g, ' ').trim();
+    const same = normalize(original) === normalize(category) ||
+        normalize(original) === normalize(getEventLabel(p.eventType));
+    if (same) return category;
+    if (!EVENT_SHORT_LABELS[p.eventType]) return original;
+
+    return `${category} (${original})`;
+}
+
 function getEventLabel(value) {
     if (isUnknown(value)) return 'Нужно уточнить';
     return EVENT_TYPES[value]?.label || value || 'Не указано';
@@ -4036,7 +4059,7 @@ function buildControlledQuestion(
                 return `Дата готовности оборудования (${String(state.deferredFields.readyDate).match(/Указана готовность ([^,]+)/i)?.[1] || 'указанная ранее'}) позже начала мероприятия (${formatDateForQuestion(state.project.dateStart) || state.project.dateStart}). Оборудование должно быть готово до начала. Уточните, пожалуйста, правильную дату и время готовности.`;
             }
             if (first.action === 'ask_ready_choice') {
-                return 'Когда оборудование должно быть полностью готово? Выберите вариант или сразу напишите дату и время, например: «9 декабря к 18:00».';
+                return 'Когда оборудование должно быть полностью готово? Выберите вариант или напишите дату и время.';
             }
             return 'Выберите дату, к которой оборудование должно быть полностью готово.';
 
@@ -4553,7 +4576,7 @@ function buildManagerSummary(
     };
     const statusDisplayValue = field => {
         const value = state.project[field];
-        if (field === 'eventType') return state.project.eventTypeOriginal || getEventLabel(value);
+        if (field === 'eventType') return formatEventForSummary(state.project);
         if (['dateStart', 'dateEnd', 'readyDate'].includes(field) && state.project[`${field}Approximate`]) return `ориентировочно ${displayProjectValue(value)}`;
         if (field === 'eventLevel') return getLevelLabel(value);
         if (field === 'personnel') return getPersonnelLabel(value);
@@ -4597,7 +4620,7 @@ function buildManagerSummary(
     );
 
     lines.push(
-        `Формат: ${p.eventTypeOriginal || getEventLabel(p.eventType)}`
+        `Формат: ${formatEventForSummary(p)}`
     );
 
 
@@ -5113,7 +5136,7 @@ function buildClientSummary(
 
 
     lines.push(
-        `• Формат: ${p.eventTypeOriginal || getEventLabel(p.eventType)}`
+        `• Формат: ${formatEventForSummary(p)}`
     );
 
 
@@ -6437,6 +6460,7 @@ function cleanAcknowledgementText(text) {
     value = value
         .replace(/([,;!?])(?=[^\s\d,;!?])/g, '$1 ')
         .replace(/([а-яёa-z])([,;:])(?=\d)/gi, '$1$2 ')
+        .replace(/(?<!\.)\.\.(?!\.)/g, '.')
         .replace(/:(?=\S)(?!\d)/g, ': ')
         .replace(/^(\s*(?:Хорошо|Отлично)),\s*[—–-]\s*/i, '$1, ')
         .replace(/^(\s*(?:Записал|Записала|Зафиксировал|Зафиксировала|Понял вас|Понял|Поняла|Принял|Приняла)),\s*[—–-]\s*/i, '$1: ')
@@ -6831,7 +6855,7 @@ function looksLikeClientQuestion(text) {
 
 const CONFIRM_RE = /^(?:да[,.\s]*)?(?:подтвержда[а-яё]*|подтверд[а-яё]*|всё\s+верно|все\s+верно|верно|правильно|согласен|согласна|ок|окей|хорошо|да)[\s.!]*$/i;
 
-const EDIT_RE = /^(?:да[,.\s]*)?(?:исправить|исправлю|исправляем|изменить|поменять|поправить|редактировать|внести\s+правки|нужно\s+исправить|хочу\s+исправить|хочу\s+изменить)[\s.!]*$/i;
+const EDIT_RE = /^(?:да[,.\s]*)?(?:исправить|исправлю|исправляем|изменить|поменять|поправить|редактировать|внести\s+правки|внести\s+изменения|нужно\s+(?:исправить|изменить|поправить)|хочу\s+(?:исправить|изменить|поправить|поменять|внести\s+изменения|внести\s+правки))[\s.!?]*$/i;
 
 // Клиент просит начать заявку заново (без точки опоры на \w: кириллица).
 const RESTART_RE = /(?:нов(?:ую|ая)\s+заявк|начать\s+(?:всё\s+|все\s+)?заново|начни(?:те)?\s+заново|начинай(?:те)?\s+заново|начать\s+с\s+(?:самого\s+начала|нуля)|давай(?:те)?\s+(?:вообще\s+)?(?:с\s+самого\s+начала|сначала|заново))/i;
@@ -6881,6 +6905,11 @@ function applyOptionalAnswer(state, step, text) {
     if (skip) {
         optional[step] = 'skipped';
         return 'skipped';
+    }
+
+    // Похоже на номер телефона, но цифр мало («+37529»): просим указать полностью.
+    if (step === 'contacts' && /^[+\d\s()\-]+$/.test(value) && value.replace(/\D/g, '').length < 9) {
+        return 'invalid';
     }
 
     if (step === 'budget') {
@@ -7382,7 +7411,7 @@ addHistory(
             };
         }
 
-        if (!isAction && isApplicationComplete(state) && state.confirmation.status === 'awaiting' && EDIT_RE.test(userText.trim())) {
+        if (!isAction && isApplicationComplete(state) && ['awaiting', 'confirmed'].includes(state.confirmation.status) && EDIT_RE.test(userText.trim())) {
 
             const editResult = await handleControlAction(
                 state,
@@ -7494,7 +7523,12 @@ addHistory(
             deterministicAssistantText =
                 outcome === 'skipped'
                     ? 'Хорошо.'
-                    : 'Записал.';
+                    : outcome === 'invalid'
+                        ? 'Похоже, номер указан не полностью. Напишите его целиком или «пропустить».'
+                        : 'Записал.';
+
+            // Неполный номер: повторяем только эту просьбу, без длинного вопроса.
+            if (outcome === 'invalid') suppressControlledQuestion = true;
 
             optionalHandled = true;
         }
@@ -7928,6 +7962,19 @@ addHistory(
                     state.confirmationStatus = state.confirmationStatus || {};
                     state.confirmationStatus[expectedField] = 'unknown';
                 }
+            }
+
+            // Клиент назвал формат своими словами («Мюзикл»): запоминаем его слово вместе с категорией.
+            if (
+                expectedField === 'eventType' &&
+                state.project.eventType &&
+                !state.project.eventTypeOriginal &&
+                !isQuestionIntent &&
+                userText.trim().length <= 60 &&
+                !/\?/.test(userText)
+            ) {
+                const word = userText.trim().replace(/[.!]+$/, '');
+                state.project.eventTypeOriginal = word.charAt(0).toUpperCase() + word.slice(1);
             }
 
             // Клиент выбрал блок «Исправить» и написал правку: возвращаемся к подтверждению.
