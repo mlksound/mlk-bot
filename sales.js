@@ -810,6 +810,8 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
     const lower = value.toLowerCase().replace(/ё/g, 'е');
     if (!value) return;
 
+    if (expectedField === 'readyDate' && applyRelativeReadiness(state, text)) return;
+
     // Количество дней, названное клиентом в свободной форме.
     if (state.project.multiDay === null || state.project.multiDay === undefined) {
         if (/(?:в\s+один\s+день|один\s+день|однодневн[а-яё]*|только\s+один\s+день)/i.test(lower)) {
@@ -3931,6 +3933,11 @@ other —
 // BUILD AI CONTEXT
 // ============================================================
 
+function buildPersonnelPromptText() {
+    return 'Когда клиент спрашивает, что входит в варианты персонала или обслуживания, отвечай ДОСЛОВНО следующим текстом, без перефразирования, без своих списков и без markdown:\n\n' +
+        PERSONNEL_OPTION_TEXTS.map((option, index) => `${index + 1}. ${option.title}\n${option.body}`).join('\n\n');
+}
+
 function buildSalesContext(
     state
 ) {
@@ -4325,10 +4332,7 @@ ${JSON.stringify(
 
 ПРАВИЛА ОБСЛУЖИВАНИЯ ОБОРУДОВАНИЯ MLK
 
-Используй следующие определения, когда клиент спрашивает о вариантах персонала или обслуживания:
-- Полное управление оборудованием: MLK доставляет, монтирует и настраивает оборудование; технические специалисты управляют им во время мероприятия; после мероприятия выполняются демонтаж и вывоз. На небольшом мероприятии может работать один специалист, на сложном состав команды больше. Окончательное количество персонала определяет менеджер проекта.
-- Дежурный техник: MLK доставляет, монтирует и настраивает оборудование; специалист остаётся на площадке, следит за исправностью и устраняет неисправности, но НЕ управляет оборудованием во время мероприятия. Подходит, если постоянное управление не требуется или у клиента есть свои операторы.
-- Только монтаж/демонтаж: MLK доставляет, монтирует и настраивает оборудование, передаёт его клиенту по акту; во время мероприятия клиент управляет им самостоятельно; после аренды MLK демонтирует и вывозит комплект.
+${buildPersonnelPromptText()}
 
 Не смешивай эти варианты и не обещай конкретное количество специалистов: оно определяется менеджером проекта. Если клиент выбирает дежурного техника, не говори, что техник будет запускать контент, управлять светом, звуком или экраном. Если такая задача нужна, уточни её и объясни, что для управления требуется соответствующий формат обслуживания.
 
@@ -6814,10 +6818,91 @@ function applyEventTimes(state, text) {
     return applied;
 }
 
+// Пояснения вариантов персонала. Показываются дословно, когда клиент просит объяснить.
+const PERSONNEL_OPTION_TEXTS = [
+    {
+        key: 'full',
+        title: 'Полное обслуживание оборудования',
+        body: 'Мы обеспечиваем полный цикл: доставка, монтаж, настройка, работа технических специалистов (работа на пульте управления), демонтаж и вывоз. Для небольших мероприятий это может быть один человек, который управляет всем оборудованием, для сложных - количество персонала может быть больше (звукорежиссер, художник по свету, видеоинженер, техники и т.д), Итоговое количество обслуживающего персонала определяется менеджером проекта'
+    },
+    {
+        key: 'duty',
+        title: 'Дежурный техник',
+        body: 'Мы привозим, монтируем и настраиваем оборудование. На время мероприятия на площадке остаётся наш специалист, который контролирует работу техники и оперативно устраняет неисправности.\nДежурный техник не управляет оборудованием во время мероприятия, только следит за его работой.\nПодойдет если не требуется постоянное вмешательство в работу оборудования или у заказчика есть свои специалисты, способные управлять оборудованием.'
+    },
+    {
+        key: 'mount',
+        title: 'Только монтаж/демонтаж',
+        body: 'Мы доставляем комплект, профессионально монтируем и настраиваем всё оборудование, передаём его по акту. Во время мероприятия заказчик самостоятельно управляет техникой. После завершения аренды мы приезжаем, демонтируем и увозим комплект'
+    }
+];
+
+// Если клиент просит пояснить варианты персонала, возвращает готовый текст
+// (все варианты или только названные клиентом). Иначе null.
+function buildPersonnelExplanation(userText) {
+    const t = String(userText || '').toLowerCase().replace(/ё/g, 'е');
+
+    const wants = {
+        full: /полн[а-я]*\s+(?:обслуж|управлен)|полное|звукореж|на\s+пульт/.test(t),
+        duty: /дежурн/.test(t),
+        mount: /только\s+монтаж|монтаж\s*\/\s*демонтаж|монтаж\s+и\s+демонтаж|по\s+акту/.test(t)
+    };
+
+    const explicitRequest = /(?:что\s+входит|чем\s+отлича|в\s+чем\s+разниц|разниц|что\s+значит|что\s+такое|что\s+это|расскаж|поясни|объясни|подробн|услуг|вариант|что\s+делает|что\s+включает)/.test(t);
+
+    if (!explicitRequest && !wants.full && !wants.duty && !wants.mount) return null;
+
+    const chosen = PERSONNEL_OPTION_TEXTS.filter(option => wants[option.key]);
+    const items = chosen.length ? chosen : PERSONNEL_OPTION_TEXTS;
+    const numbered = items.length === PERSONNEL_OPTION_TEXTS.length;
+
+    return items
+        .map((option, index) => `${numbered ? `${index + 1}. ` : ''}${option.title}\n${option.body}`)
+        .join('\n\n');
+}
+
+// ---------- ГОТОВНОСТЬ ОТНОСИТЕЛЬНО НАЧАЛА («за час», «за 2 часа», «за день») ----------
+
+function parseLeadMinutes(text) {
+    const t = String(text || '').toLowerCase().replace(/ё/g, 'е');
+    const words = { один: 1, одну: 1, два: 2, две: 2, три: 3, четыре: 4, пять: 5, шесть: 6, пару: 2, пара: 2, полтора: 1.5 };
+    const num = value => (/^\d/.test(value) ? parseFloat(value.replace(',', '.')) : words[value]);
+    let match;
+
+    if (/за\s+полчаса/.test(t)) return 30;
+    if ((match = t.match(/за\s+(\d+(?:[.,]\d+)?)\s*мин/))) return Math.round(num(match[1]));
+    if ((match = t.match(/за\s+(\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|шесть|пару|пара|полтора)\s*час/))) return Math.round(num(match[1]) * 60);
+    if (/за\s+час(?![а-я])/.test(t)) return 60;
+    if ((match = t.match(/за\s+(\d+|один|одни|два|две|три|четыре|пять|пару)\s*(?:дня|дней|суток|дн)/))) return Math.round(num(match[1]) * 1440);
+    if (/за\s+(?:сутки|день|денек)(?![а-я])/.test(t)) return 1440;
+    return null;
+}
+
+function applyRelativeReadiness(state, text) {
+    const p = state.project;
+    const lead = parseLeadMinutes(text);
+    if (!lead) return false;
+
+    const match = String(p.dateStart || '').match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$/);
+    if (!match) return false;
+
+    const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]) - lead);
+    const pad = n => String(n).padStart(2, '0');
+
+    p.readyDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    p.readyDateTimeRange = null;
+    p.readyChoice = 'custom';
+    state.confirmationStatus = state.confirmationStatus || {};
+    state.confirmationStatus.readyDate = 'confirmed';
+    if (state.deferredFields) delete state.deferredFields.readyDate;
+    return true;
+}
+
 const TIME_FIELDS = ['eventTimes', 'dateStartTime', 'dateEndTime', 'readyDateTime'];
 
 function applyDirectTimeAnswer(state, expectedField, text) {
     if (expectedField === 'eventTimes') return applyEventTimes(state, text);
+    if (expectedField === 'readyDateTime' && applyRelativeReadiness(state, text)) return true;
     const fieldMap = { dateStartTime: 'dateStart', dateEndTime: 'dateEnd', readyDateTime: 'readyDate' };
     const target = fieldMap[expectedField];
     if (!target) return false;
@@ -7531,6 +7616,19 @@ addHistory(
             if (outcome === 'invalid') suppressControlledQuestion = true;
 
             optionalHandled = true;
+        }
+
+        // Клиент просит пояснить варианты персонала: отвечаем утверждённым текстом MLK.
+        if (!isAction && isQuestionIntent && !optionalHandled) {
+
+            const currentField = calculateMissing(state)[0]?.field || null;
+
+            if (currentField === 'personnel' || currentField === 'personnelDetails') {
+
+                const explanation = buildPersonnelExplanation(userText);
+
+                if (explanation) deterministicAssistantText = explanation;
+            }
         }
 
         if (
