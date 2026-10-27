@@ -4017,7 +4017,7 @@ function buildControlledQuestion(
             return `Во сколько закончится мероприятие${formatDateForQuestion(state.project.dateEnd) ? ` ${formatDateForQuestion(state.project.dateEnd)}` : ''}?`;
 
         case 'readyDateTime':
-            return `К какому времени оборудование должно быть полностью готово${formatDateForQuestion(state.project.readyDate) ? ` (${formatDateForQuestion(state.project.readyDate)})` : ''}? От этого зависит объём работ и стоимость, поэтому укажите, пожалуйста, точное время.`;
+            return `К какому времени оборудование должно быть полностью готово${formatDateForQuestion(state.project.readyDate) ? ` (${formatDateForQuestion(state.project.readyDate)})` : ''}?`;
 
         case 'dateConflict':
             return 'Похоже, дата окончания указана раньше даты начала. Проверьте, пожалуйста, даты начала и окончания и напишите корректный вариант.';
@@ -4036,7 +4036,7 @@ function buildControlledQuestion(
                 return `Дата готовности оборудования (${String(state.deferredFields.readyDate).match(/Указана готовность ([^,]+)/i)?.[1] || 'указанная ранее'}) позже начала мероприятия (${formatDateForQuestion(state.project.dateStart) || state.project.dateStart}). Оборудование должно быть готово до начала. Уточните, пожалуйста, правильную дату и время готовности.`;
             }
             if (first.action === 'ask_ready_choice') {
-                return 'Когда оборудование должно быть полностью готово? Это влияет на стоимость: монтаж накануне и в день мероприятия считаются по-разному. Выберите вариант или сразу напишите дату и время, например: «9 декабря к 18:00».';
+                return 'Когда оборудование должно быть полностью готово? Выберите вариант или сразу напишите дату и время, например: «9 декабря к 18:00».';
             }
             return 'Выберите дату, к которой оборудование должно быть полностью готово.';
 
@@ -4189,6 +4189,11 @@ function removeEchoedQuestions(text, engineQuestion, isClientQuestion) {
     const kept = [];
 
     for (const paragraph of paragraphs) {
+
+        // Пояснения вариантов «• Вариант — описание» нужны Дмитрию на случай вопроса клиента.
+        // В обычном ответе их не показываем: варианты уже есть в вопросе или на кнопках.
+        const definitionItems = (paragraph.match(/•[^•\n]{2,160}?\s[—–-]\s/g) || []).length;
+        if (!isClientQuestion && definitionItems >= 2) continue;
 
         const sentences = paragraph.split(/(?<=[.!?])\s+/);
         const index = sentences.findIndex(looksLikeFunnelRequest);
@@ -6415,7 +6420,10 @@ function varyAcknowledgement(text, state) {
     const available = variants.filter(value => !recent.includes(value.toLowerCase()));
     const choices = available.length ? available : variants;
     const index = Math.max(0, Number(state?.history?.length || 0)) % choices.length;
-    const rest = source.slice(match[0].length);
+    let rest = source.slice(match[0].length);
+    // Модель иногда повторяет глагол в конце: «Зафиксировал: улица — зафиксировал.»
+    const trimmedRest = rest.replace(/\s*[—–,-]?\s*(?:зафиксировал[аи]?|записал[аи]?|принял[аи]?|понял[аи]?)(?=[.!]*[ \t]*(?:\n|$))/i, '');
+    if (trimmedRest.trim().length > 2 && trimmedRest !== rest) rest = trimmedRest;
     const punctuation = match[2] || (!rest || /^[.!?]/.test(rest) ? '' : ',');
     return choices[index] + punctuation + rest;
 }
@@ -6537,7 +6545,7 @@ function prepareResult(
         actions = getOptionalSkipActions(optionalStep);
     } else if (complete) {
         if (state.confirmation.status === 'confirmed') actions = [];
-        else if (state.confirmation.status === 'editing') actions = getEditBlockActions();
+        else if (state.confirmation.status === 'editing') actions = state.confirmation.editBlock ? [] : getEditBlockActions();
         else actions = getConfirmActions();
     } else {
         actions = getActions(state);
@@ -6829,7 +6837,7 @@ const EDIT_RE = /^(?:да[,.\s]*)?(?:исправить|исправлю|исп�
 const RESTART_RE = /(?:нов(?:ую|ая)\s+заявк|начать\s+(?:всё\s+|все\s+)?заново|начни(?:те)?\s+заново|начинай(?:те)?\s+заново|начать\s+с\s+(?:самого\s+начала|нуля)|давай(?:те)?\s+(?:вообще\s+)?(?:с\s+самого\s+начала|сначала|заново))/i;
 
 // Ответ на вопрос «продолжить или начать заново?»: здесь можно трактовать шире.
-const RESTART_ANSWER_RE = /(?:нов[а-яё]*|заново|сначала|с\s+самого\s+начала|с\s+нуля|сброс[а-яё]*|очисти[а-яё]*)/i;
+const RESTART_ANSWER_RE = /(?<![а-яё])(?:нов[а-яё]*|заново|сначала|с\s+самого\s+начала|с\s+нуля|сброс[а-яё]*|очисти[а-яё]*)/i;
 const CONTINUE_RE = /(?:продолж[а-яё]*|оставь(?:те)?\s+(?:как\s+есть|всё)|не\s+(?:надо|нужно)\s+(?:заново|сбрасывать))/i;
 
 // Название блока при исправлении: «дату начала и готовность», «адрес», «монтаж».
@@ -7314,10 +7322,17 @@ addHistory(
         if (!isAction && state.pendingRestart) {
 
             const answerText = userText.trim();
-            const wantsRestart = RESTART_RE.test(answerText) || RESTART_ANSWER_RE.test(answerText);
-            const wantsContinue = CONTINUE_RE.test(answerText) && !wantsRestart;
 
-            state.pendingRestart = false;
+            // Клиент задаёт вопрос вместо ответа («а смогу восстановить по номеру?»): отвечаем на него,
+            // а вопрос про «продолжить или начать заново» остаётся в силе.
+            if (looksLikeClientQuestion(answerText)) {
+                state.pendingRestart = true;
+            }
+
+            const wantsRestart = !looksLikeClientQuestion(answerText) && (RESTART_RE.test(answerText) || RESTART_ANSWER_RE.test(answerText));
+            const wantsContinue = CONTINUE_RE.test(answerText) && !wantsRestart && !looksLikeClientQuestion(answerText);
+
+            if (!looksLikeClientQuestion(answerText)) state.pendingRestart = false;
 
             if (wantsRestart && !wantsContinue) {
                 return await processStart(clientId, clientName, { force: true });
