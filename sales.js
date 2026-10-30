@@ -2152,17 +2152,14 @@ const SKIP_QUESTION_RE = /^(?:ну\s+|давай\s+|давайте\s+)?(?:к\s+�
 
 function hasLedQuantity(value) {
     const text = String(value || '').toLowerCase().replace(/ё/g, 'е');
-    // «3 экрана», «один экран», «два боковых», «центральный экран», «количество 1»,
-    // «экран 8 на 4» / «экран размером 3x2 м» (один экран с размером: количество понятно).
+    // «3 экрана», «один экран», «два боковых», «центральный экран»,
+    // «центральный 8 на 4 и по бокам 2 на 3», «один по центру».
     return (
         /\d+\s*(?:led[- ]?)?экран[а-я]*/.test(text) ||
         /(?:^|[^а-я])(?:один|одна|одно|два|две|три|четыре|пять|шесть|несколько|пара)\s+(?:led[- ]?)?(?:экран[а-я]*|боков[а-я]*|по\s+(?:бокам|центру|сторонам))/.test(text) ||
         /центральн[а-я]*\s+(?:led[- ]?)?экран|боков[а-я]*\s+(?:led[- ]?)?экран[а-я]*|экраны\s+по\s+обеим\s+сторонам/.test(text) ||
         /(?:центральн[а-я]*|боков[а-я]*)\s+\d/.test(text) ||
-        /по\s+бокам\s+\d/.test(text) ||
-        /количеств[а-я]*\s*[:\-—]?\s*\d+/.test(text) ||
-        /\d+\s*шт/.test(text) ||
-        /(?:^|[^а-я])экран(?:а)?(?![а-я])[^.;,\d]{0,25}\d+(?:[.,]\d+)?\s*(?:м\s*)?(?:[xх×*]|на)\s*\d/.test(text)
+        /по\s+бокам\s+\d/.test(text)
     );
 }
 
@@ -2294,7 +2291,6 @@ const DEFERRED_FIELD_LABELS = {
     place: 'Место проведения: улица или помещение',
     eventDays: 'Сколько дней идёт мероприятие',
     city: 'Город площадки',
-    stageDims: 'Размеры сценических конструкций',
     floor: 'Этаж площадки',
     lift: 'Тип лифта / способ подъёма',
     liftDimensions: 'Размеры лифта',
@@ -2324,24 +2320,6 @@ function canonicalCity(answer) {
     const found = CITY_CANON.find(([re]) => re.test(value));
     if (found) return found[1];
     return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-// Из ответа вроде «извини, не написал. Орша» берём только город.
-function parseCityAnswer(text) {
-    const raw = String(text || '').trim().replace(/[.!]+$/, '');
-    const words = raw.split(/[\s,.;:!?]+/).filter(Boolean);
-
-    for (const word of words) {
-        const found = CITY_CANON.find(([re]) => re.test(word));
-        if (found) return found[1];
-    }
-
-    const parts = raw.split(/[.!?,;]+/).map(part => part.trim()).filter(Boolean);
-    const last = (parts[parts.length - 1] || raw).replace(/^(?:это\s+)?(?:в|во|г\.?|город)\s+/i, '').trim();
-
-    if (!last || last.length > 30 || last.split(/\s+/).length > 3) return null;
-    if (/(?:извин|не\s+|пока|потом|уточн|написал|забыл|знаю|сам)/i.test(last)) return null;
-    return last.charAt(0).toUpperCase() + last.slice(1);
 }
 
 function locationHasCity(location) {
@@ -2758,26 +2736,6 @@ if (
 
         missing.push({
             field: 'stageDetails',
-            action: 'text_question'
-        });
-
-        return missing;
-    }
-
-
-    // STAGE DIMENSIONS: клиент назвал конструкцию («арка из ферм»), но без размеров.
-    // Спрашиваем один раз.
-    if (
-        p.equipment.includes('stage') &&
-        p.stageDetails &&
-        !p.stageDimsAsked &&
-        !hasExplicitDimensions(p.stageDetails) &&
-        !explicitlyUnknownDimensions(p.stageDetails) &&
-        !isDeferred(state, 'stageDetails')
-    ) {
-
-        missing.push({
-            field: 'stageDims',
             action: 'text_question'
         });
 
@@ -3797,7 +3755,6 @@ specialConditions — особые условия:
 - Если сообщение клиента — вопрос или просьба, а не сообщение
   с данными о проекте, верни пустой project: {}.
 - Не записывай в поля текст вопроса клиента.
-- additionalInfo — только особые пожелания и условия клиента. Не пересказывай сюда сам запрос («нужна аренда арки и экрана»): он уже записан в других полях.
 - eventName — название мероприятия, компании, бренда или стенда, если клиент его назвал
   (например «Комунарка»). Не записывай сюда тип мероприятия.
 `;
@@ -4203,9 +4160,6 @@ function buildControlledQuestion(
 
         case 'stageDetails':
             return 'Укажите, пожалуйста, тип и размеры сценических конструкций. Например: конструкция крыши, боковые уши, подиум, пультовая, фермы и другие конструкции.';
-
-        case 'stageDims':
-            return `Какие размеры у конструкции «${String(state.project.stageDetails || 'сценические конструкции').replace(/[.!]+$/, '')}»? Если пока неизвестны — так и напишите.`;
 
         case 'stageSurface':
             return 'Укажите, пожалуйста, поверхность установки конструкций: плитка, асфальт, грунт, трава и т. д.';
@@ -7810,11 +7764,6 @@ addHistory(
 
             let expectedField = null;
             suppressControlledQuestion = isConversationalMetaMessage(userText);
-            const datesBefore = {
-                dateStart: state.project.dateStart,
-                dateEnd: state.project.dateEnd,
-                readyDate: state.project.readyDate
-            };
 
             try {
 
@@ -7867,16 +7816,6 @@ addHistory(
                 // соответствующего условия или времени.
                 const explicitMountCondition = /(?:монтаж|монтировать|монтировк|установк).{0,70}(?:ночью|ночн\w*|рано утром|в любое время|любое время|по согласован\w*|после \d|до \d|с \d|\b\d{1,2}[:.]\d{2}\b)|(?:ночью|рано утром|в любое время|по согласован\w*).{0,70}(?:монтаж|монтировать|установк)/i.test(userText);
                 const explicitDemountCondition = /(?:демонтаж|демонтировать|сняти\w*).{0,70}(?:ночью|ночн\w*|рано утром|в любое время|любое время|по согласован\w*|после \d|до \d|с \d|\b\d{1,2}[:.]\d{2}\b)|(?:ночью|рано утром|в любое время|по согласован\w*).{0,70}(?:демонтаж|демонтировать|сняти\w*)/i.test(userText);
-
-                // Модель иногда ставит «00:00» там, где клиент назвал только дату:
-                // это не время, спросим его отдельно. Настоящая полночь: «до 00:00», «до полуночи».
-                if (!/(?:(?<![\d:])0{1,2}[:.]00|24[:.]00|полноч)/i.test(userText)) {
-                    for (const key of ['dateStart', 'dateEnd', 'readyDate']) {
-                        if (typeof extracted[key] === 'string' && /\s00:00$/.test(extracted[key])) {
-                            extracted[key] = extracted[key].replace(/\s00:00$/, '');
-                        }
-                    }
-                }
 
                 // Ответ «Минск» на вопрос о городе не должен заменять адрес площадки.
                 if (expectedField === 'city') {
@@ -8075,7 +8014,7 @@ addHistory(
                 // экран описан через сцену/расположение или решение оставлено MLK.
                 if (expectedField === 'ledDetails' && previousLedDetails) {
                     const ledReply = userText.trim();
-                    const acknowledgementOnly = /^(?:супер|отлично|хорошо|ок|окей|понятно|спасибо|да|ага|класс|замечательно)[.!\s🙏👍🙂😊]*$/i.test(ledReply) || SKIP_QUESTION_RE.test(ledReply) || /(?:написано|писал[а-я]*|говорил[а-я]*|сказал[а-я]*)\s+(?:же|уже)|я\s+же|уже\s+(?:писал|говорил|сказал)/i.test(ledReply);
+                    const acknowledgementOnly = /^(?:супер|отлично|хорошо|ок|окей|понятно|спасибо|да|ага|класс|замечательно)[.!\s🙏👍🙂😊]*$/i.test(ledReply) || SKIP_QUESTION_RE.test(ledReply);
                     const ledDimensions = ledReply.match(/(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?\s*(?:×|х|x|на)\s*(\d+(?:[,.]\d+)?)\s*(?:м|метр(?:а|ов)?)?/i);
                     const isLedCorrection = /не\s+(?:его\s+)?располож\w*.{0,30}(?:а|,)?\s*(?:именно\s*)?(?:его\s*)?размер\w*|не\s+располож\w*.{0,30}размер\w*|нужен\s+один\s+такого\s+размер/i.test(ledReply);
                     // Короткий ответ только с новыми габаритами (например, «3 на 3»)
@@ -8256,35 +8195,10 @@ addHistory(
                 }
             }
 
-            // Вопрос касался только времени: остальные даты остаются как были.
-            if (expectedField && TIME_FIELDS.includes(expectedField)) {
-                const keep = {
-                    dateStartTime: ['dateEnd', 'readyDate'],
-                    dateEndTime: ['dateStart', 'readyDate'],
-                    readyDateTime: ['dateStart', 'dateEnd'],
-                    eventTimes: ['readyDate']
-                }[expectedField] || [];
-                for (const field of keep) {
-                    if (datesBefore[field] !== undefined && state.project[field] !== datesBefore[field]) {
-                        state.project[field] = datesBefore[field];
-                    }
-                }
-            }
-
-            // Размеры конструкции (арка, подиум): дописываем к описанию, спрашиваем один раз.
-            if (expectedField === 'stageDims' && !isQuestionIntent && !state.project.stageDimsAsked) {
-                state.project.stageDimsAsked = true;
-                const reply = userText.trim().replace(/[.!]+$/, '');
-                if (reply && !hasExplicitDimensions(state.project.stageDetails)) {
-                    const unknown = explicitlyUnknownDimensions(reply) || /^(?:не\s+знаю|пока\s+нет|потом|уточню|не\s+определ)/i.test(reply);
-                    state.project.stageDetails = `${state.project.stageDetails}; ${unknown ? 'размеры пока неизвестны' : `размеры: ${reply}`}`;
-                }
-            }
-
             // Ответ на вопрос о городе: дописываем город к адресу.
             if (expectedField === 'city' && !isQuestionIntent && !state.project.city) {
-                const answer = parseCityAnswer(userText);
-                if (!answer) {
+                const answer = userText.trim().replace(/^(?:это\s+)?(?:в|г\.?|город)\s+/i, '').replace(/[.!]+$/, '').trim();
+                if (!answer || answer.length > 40 || /^(?:не\s+знаю|потом|уточню|пока\s+не)/i.test(answer)) {
                     deferField(state, 'city', 'Город площадки нужно уточнить');
                 } else {
                     state.project.city = canonicalCity(answer);
