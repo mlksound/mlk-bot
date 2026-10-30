@@ -170,7 +170,7 @@ const PERSONNEL = {
 
     installation_dismantling: {
         value: 'installation_dismantling',
-        label: 'Только монтаж/демонтаж',
+        label: 'Только монтаж-демонтаж',
         description: 'MLK доставляет комплект, профессионально монтирует и настраивает оборудование, затем передаёт его заказчику по акту. Во время мероприятия заказчик самостоятельно управляет техникой. После завершения аренды MLK демонтирует и вывозит комплект.'
     },
 
@@ -284,7 +284,6 @@ function ensureStateExtras(state) {
     if (p.multiDay === undefined) p.multiDay = null;
     if (p.readyChoice === undefined) p.readyChoice = null;
     if (p.budget === undefined) p.budget = null;
-    if (p.eventName === undefined) p.eventName = null;
     if (!state.client) state.client = { id: '', name: '', contacts: '' };
     if (state.client.contacts === undefined) state.client.contacts = '';
     if (!state.optional || typeof state.optional !== 'object') {
@@ -465,7 +464,6 @@ function createSalesState(clientId, clientName = '') {
             specialConditions: null,
 
             budget: null,
-            eventName: null,
 
             multiDay: null,
             readyChoice: null,
@@ -889,7 +887,7 @@ function applyDirectContextualAnswers(state, text, expectedField = null) {
         if (!readyDate && hasDateOrDateTime(state.project.readyDate)) {
             readyDate = String(state.project.readyDate).slice(0, 10);
         }
-        const time = parseReadinessTime(value);
+        const time = parseTimeAnswer(value);
         if (readyDate && time) {
             if (!state.project.readyDateTimeRange) state.project.readyDate = `${readyDate} ${time}`;
             state.project.readyDateApproximate = Boolean(state.project.readyDateTimeRange) || /(?:около|примерно|приблизительно|ориентировочно|где-то|где то)/i.test(value);
@@ -1196,27 +1194,12 @@ function getEquipmentLabels(items) {
 }
 
 
-// «Стенд фирмы Комунарка», «компания Ромашка»: название после слов «фирма / компания / бренд».
-function extractEventNameFromText(text) {
-    const source = String(text || '');
-    const keyword = source.match(/(?:фирм[аыуе]|компани[яиюе]|бренд[а-яё]*|организаци[яиюе])/i);
-    if (!keyword) return null;
-
-    const rest = source.slice(keyword.index + keyword[0].length);
-    const name = rest.match(/^\s+[«"“]?([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9-]*(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё0-9-]*)?)/);
-    if (!name) return null;
-
-    const value = name[1].trim();
-    if (/^(?:Мы|Я|Наша|Наш|Наше|Это|Она|Он|Есть|Нужно|Нужна|Нужен|Если|Как|Что|Мне|Нам)$/.test(value)) return null;
-    return value;
-}
-
 function inferEventTypeFromText(text) {
     const raw = String(text || '').trim().replace(/[.!?]+$/g, '');
     const value = raw.toLowerCase().replace(/ё/g, 'е');
     if (!value) return null;
     const rules = [
-        { category: 'exhibitions', re: /(?:выставк|стенд(?:а|е|ы|ов)?(?:\s+(?:компани|фирм|бренд)[а-я]*)?|экспозици|промо[- ]?зон|выставочн)/i },
+        { category: 'exhibitions', re: /(?:выставк|стенд(?:а|е|ы|ов)?(?:\s+(?:компан|фирм|бренд))?|экспозици|промо[- ]?зон|выставочн)/i },
         { category: 'sports', re: /(?:спортивн|матч|турнир|спартакиад|марафон)/i },
         { category: 'corporate', re: /(?:корпоратив|юбиле|свадьб|тимбилдинг|награждени|открыти\s+(?:магазин|заведени))/i },
         { category: 'conferences', re: /(?:конференц|презентац|форум|саммит|конгресс|семинар|телевизионн|tv[- ]?проект|пресс[- ]конференц)/i },
@@ -1554,11 +1537,6 @@ function normalizeExtractedData(
         if (budget) data.budget = budget;
     }
 
-    if (p.eventName !== undefined) {
-        const eventName = cleanString(p.eventName);
-        if (eventName) data.eventName = eventName;
-    }
-
     if (p.additionalServices !== undefined) {
         data.additionalServices =
             normalizeNotRequired(
@@ -1805,7 +1783,6 @@ function mergeProjectData(
         'additionalServices',
         'specialConditions',
         'budget',
-        'eventName',
 
         'clientRequest',
         'additionalInfo'
@@ -2290,42 +2267,12 @@ const DEFERRED_FIELD_LABELS = {
     ledDetails: 'Тип, расположение и размеры LED-экранов',
     place: 'Место проведения: улица или помещение',
     eventDays: 'Сколько дней идёт мероприятие',
-    city: 'Город площадки',
     floor: 'Этаж площадки',
     lift: 'Тип лифта / способ подъёма',
     liftDimensions: 'Размеры лифта',
     soundRider: 'Звуковой райдер',
     lightFixtures: 'Требования к световым приборам'
 };
-
-// ============================================================
-// CITY HELPERS
-// ============================================================
-
-const KNOWN_CITY_RE = /(?:минск|брест|гомел|гродн|витебск|могил[её]в|барановичи|бобруйск|борисов|пинск|орша|мозыр|солигорск|новополоцк|лид[аы]|молодечно|полоцк|жлобин|светлогорск|речиц|слуцк|кобрин|слоним|волковыск|смолевич|заславл|дзержинск|фаниполь|марьина\s+горка|москв|санкт-петербург|петербург|питер|киев|вильнюс|варшав|риг[аеи]|таллин|тбилиси|ереван|алматы|астан|ташкент|баку|казан|екатеринбург|новосибирск|краснодар|сочи|смоленск|самар|воронеж|minsk)/i;
-
-// В адресе уже есть город: запятая («Минск, парк Горького»), название города или «г.».
-const CITY_CANON = [
-    [/^минск/i, 'Минск'], [/^брест/i, 'Брест'], [/^гомел/i, 'Гомель'], [/^гродн/i, 'Гродно'], [/^витебск/i, 'Витебск'],
-    [/^могил[её]в/i, 'Могилёв'], [/^барановичи/i, 'Барановичи'], [/^бобруйск/i, 'Бобруйск'], [/^борисов/i, 'Борисов'],
-    [/^пинск/i, 'Пинск'], [/^орш/i, 'Орша'], [/^мозыр/i, 'Мозырь'], [/^солигорск/i, 'Солигорск'], [/^новополоцк/i, 'Новополоцк'],
-    [/^лид[аеы]/i, 'Лида'], [/^молодечн/i, 'Молодечно'], [/^полоцк/i, 'Полоцк'], [/^жлобин/i, 'Жлобин'], [/^слуцк/i, 'Слуцк'],
-    [/^москв/i, 'Москва'], [/^санкт-петербург|^петербург|^питер/i, 'Санкт-Петербург'], [/^киев/i, 'Киев'], [/^вильнюс/i, 'Вильнюс'],
-    [/^варшав/i, 'Варшава'], [/^риг[аеи]/i, 'Рига'], [/^казан/i, 'Казань'], [/^сочи/i, 'Сочи']
-];
-
-// «в минске» -> «Минск»; незнакомые города оставляем как написал клиент.
-function canonicalCity(answer) {
-    const value = String(answer || '').trim();
-    const found = CITY_CANON.find(([re]) => re.test(value));
-    if (found) return found[1];
-    return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function locationHasCity(location) {
-    const value = String(location || '');
-    return /,/.test(value) || KNOWN_CITY_RE.test(value) || /(?:^|\s)(?:г\.|гор\.|город)\s*[А-ЯЁA-Z]/.test(value);
-}
 
 // ============================================================
 // EVENT DAYS HELPERS
@@ -2622,17 +2569,6 @@ if (
 
         missing.push({
             field: 'location',
-            action: 'text_question'
-        });
-
-        return missing;
-    }
-
-    // Адрес назван без города («футбольный манеж»): уточняем город один раз.
-    if (p.location && !p.city && !isDeferred(state, 'city') && !locationHasCity(p.location)) {
-
-        missing.push({
-            field: 'city',
             action: 'text_question'
         });
 
@@ -3517,7 +3453,7 @@ const EDIT_BLOCKS = {
     },
     other: {
         label: 'Другое',
-        fields: 'eventType, eventName, eventLevel, guestCount, budget, additionalInfo, specialConditions',
+        fields: 'eventType, eventLevel, guestCount, budget, additionalInfo, specialConditions',
         prompt: 'Напишите, что нужно изменить: формат мероприятия, количество гостей, бюджет или другие детали.'
     }
 };
@@ -3720,7 +3656,6 @@ specialConditions — особые условия:
     "additionalServices": "...",
     "specialConditions": "...",
     "budget": "...",
-    "eventName": "...",
 
     "clientRequest": "...",
     "additionalInfo": "..."
@@ -3755,8 +3690,6 @@ specialConditions — особые условия:
 - Если сообщение клиента — вопрос или просьба, а не сообщение
   с данными о проекте, верни пустой project: {}.
 - Не записывай в поля текст вопроса клиента.
-- eventName — название мероприятия, компании, бренда или стенда, если клиент его назвал
-  (например «Комунарка»). Не записывай сюда тип мероприятия.
 `;
 
 
@@ -4061,9 +3994,6 @@ function buildControlledQuestion(
         case 'eventDays':
             return 'Мероприятие пройдёт в один день или продлится несколько дней?';
 
-        case 'city':
-            return 'В каком городе находится площадка?';
-
         case 'eventTimes': {
             const startLabel = formatDateForQuestion(state.project.dateStart);
             const endLabel = formatDateForQuestion(state.project.dateEnd);
@@ -4331,24 +4261,6 @@ function removeEchoedQuestions(text, engineQuestion, isClientQuestion) {
     return result;
 }
 
-// Отправки менеджеру из бота нет: менеджер видит диалог в Битриксе. Поэтому фразы
-// «могу передать менеджеру запрос» заменяем честной.
-function softenManagerPromises(text) {
-    const replacement = 'Менеджер увидит этот вопрос в нашем диалоге и уточнит детали при подготовке предложения.';
-    let replaced = false;
-
-    const result = String(text || '').replace(
-        /[^.!?\n]*(?:передам|передаю|передать|передадим|направлю|направить)[^.!?\n]*менеджер[^.!?\n]*[.!?]?/gi,
-        () => {
-            if (replaced) return '';
-            replaced = true;
-            return replacement;
-        }
-    );
-
-    return result.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-}
-
 function dedupeLines(text) {
     const seen = new Set();
     const out = [];
@@ -4423,10 +4335,6 @@ ${JSON.stringify(
 ${buildPersonnelPromptText()}
 
 Не смешивай эти варианты и не обещай конкретное количество специалистов: оно определяется менеджером проекта. Если клиент выбирает дежурного техника, не говори, что техник будет запускать контент, управлять светом, звуком или экраном. Если такая задача нужна, уточни её и объясни, что для управления требуется соответствующий формат обслуживания.
-
-ПРАВИЛО ПРО МЕНЕДЖЕРА
-
-Не предлагай «передать запрос менеджеру» и не обещай передать информацию менеджеру: менеджер видит весь диалог и заявку сам. Если не можешь ответить, скажи, что менеджер уточнит это при подготовке предложения.
 
 1. JS Sales Engine является источником истины
    по состоянию проекта и порядку квалификации.
@@ -4718,10 +4626,6 @@ function buildManagerSummary(
     lines.push(
         `Формат: ${formatEventForSummary(p)}`
     );
-
-    if (p.eventName) {
-        lines.push(`Название / компания: ${displayProjectValue(p.eventName)}`);
-    }
 
 
     if (
@@ -5238,10 +5142,6 @@ function buildClientSummary(
     lines.push(
         `• Формат: ${formatEventForSummary(p)}`
     );
-
-    if (p.eventName) {
-        lines.push(`• Название / компания: ${displayProjectValue(p.eventName)}`);
-    }
 
 
     if (
@@ -6746,21 +6646,6 @@ function normalizeKeyboardLayoutToRussian(value) {
     return [...String(value || '').toLowerCase()].map(char => map.get(char) || char).join('');
 }
 
-// Время для «готовности оборудования»: ищем его в самой фразе про готовность
-// («Все должно стоять 4 декабря в 10.00»), а не берём первое время из сообщения
-// (начало мероприятия «с 9.00»).
-function parseReadinessTime(text) {
-    const value = String(text || '');
-    const phrase = value.match(/(?:все|всё)\s+должно\s+(?:стоять|быть\s+готово)|должн[аоы]\s+быть\s+готов[аоы]?|готовност[а-яё]*|оборудовани[а-яё]*[^.\n]{0,40}готов[а-яё]*/i);
-    if (!phrase) return parseTimeAnswer(value);
-
-    const afterPhrase = parseTimeAnswer(value.slice(phrase.index));
-    if (afterPhrase) return afterPhrase;
-
-    const clauseBefore = value.slice(0, phrase.index).split(/[.;\n]/).pop();
-    return parseTimeAnswer(clauseBefore);
-}
-
 function parseTimeAnswer(text) {
     const source = String(text || '').trim().toLowerCase().replace(/ё/g, 'е');
     const candidates = [source, normalizeKeyboardLayoutToRussian(source)];
@@ -7542,8 +7427,6 @@ addHistory(
         let extractionFailed = false;
         let optionalHandled = false;
         let skipPreserve = false;
-        let fixedAck = false;
-        let silentAck = false;
 
 
         // --------------------------------------------------------
@@ -7712,7 +7595,7 @@ addHistory(
             !isAction &&
             pendingOptional &&
             state.optional.asked === pendingOptional &&
-            (['qualification', 'other'].includes(intent) || (intent === 'manager_request' && pendingOptional === 'extra'))
+            ['qualification', 'other'].includes(intent)
         ) {
 
             const outcome =
@@ -7722,15 +7605,12 @@ addHistory(
                     userText
                 );
 
-            if (outcome === 'skipped') {
-                // Клиент ничего не ввёл: подтверждение не нужно, сразу следующий вопрос.
-                silentAck = true;
-            } else {
-                deterministicAssistantText = outcome === 'invalid'
-                    ? 'Похоже, номер указан не полностью. Напишите его целиком или «пропустить».'
-                    : 'Записал.';
-                fixedAck = true;
-            }
+            deterministicAssistantText =
+                outcome === 'skipped'
+                    ? 'Хорошо.'
+                    : outcome === 'invalid'
+                        ? 'Похоже, номер указан не полностью. Напишите его целиком или «пропустить».'
+                        : 'Записал.';
 
             // Неполный номер: повторяем только эту просьбу, без длинного вопроса.
             if (outcome === 'invalid') suppressControlledQuestion = true;
@@ -7756,7 +7636,7 @@ addHistory(
             normalized.tag === 'optional_skip'
         ) {
 
-            silentAck = true;
+            deterministicAssistantText = 'Хорошо.';
         }
 
 
@@ -7816,11 +7696,6 @@ addHistory(
                 // соответствующего условия или времени.
                 const explicitMountCondition = /(?:монтаж|монтировать|монтировк|установк).{0,70}(?:ночью|ночн\w*|рано утром|в любое время|любое время|по согласован\w*|после \d|до \d|с \d|\b\d{1,2}[:.]\d{2}\b)|(?:ночью|рано утром|в любое время|по согласован\w*).{0,70}(?:монтаж|монтировать|установк)/i.test(userText);
                 const explicitDemountCondition = /(?:демонтаж|демонтировать|сняти\w*).{0,70}(?:ночью|ночн\w*|рано утром|в любое время|любое время|по согласован\w*|после \d|до \d|с \d|\b\d{1,2}[:.]\d{2}\b)|(?:ночью|рано утром|в любое время|по согласован\w*).{0,70}(?:демонтаж|демонтировать|сняти\w*)/i.test(userText);
-
-                // Ответ «Минск» на вопрос о городе не должен заменять адрес площадки.
-                if (expectedField === 'city') {
-                    extracted.location = undefined;
-                }
 
                 // Контент и подвес LED заполняем только если клиент о них действительно говорит.
                 if (expectedField !== 'ledContent' && !/(?:ролик|заставк|видео|логотип|трансляц|презентац|контент|картинк|фото|слайд|камер|реклам)/i.test(userText)) {
@@ -8034,15 +7909,7 @@ addHistory(
                         ledReply.toLowerCase() !== String(previousLedDetails).trim().toLowerCase() &&
                         !String(previousLedDetails).toLowerCase().includes(ledReply.toLowerCase())
                     ) {
-                        // Добавляем только новое: без повтора количества и без служебной приписки.
-                        let clause = ledReply
-                            .replace(/^\s*(?:\d+|один|одна|два|две|три)\s+экран[а-я]*\s*[.,;:—-]?\s*/i, '')
-                            .trim() || ledReply;
-                        clause = clause
-                            .replace(/^расположен[а-я]*\s*/i, 'расположение: ')
-                            .replace(/[.!]+$/, '');
-                        clause = clause.charAt(0).toLowerCase() + clause.slice(1);
-                        state.project.ledDetails = `${previousLedDetails}; ${clause}`;
+                        state.project.ledDetails = `${previousLedDetails}; уточнение: ${ledReply}`;
 
                         // После трёх безуспешных уточнений не мучаем клиента: передаём менеджеру.
                         state.unparsedAttempts = state.unparsedAttempts || {};
@@ -8195,26 +8062,6 @@ addHistory(
                 }
             }
 
-            // Ответ на вопрос о городе: дописываем город к адресу.
-            if (expectedField === 'city' && !isQuestionIntent && !state.project.city) {
-                const answer = userText.trim().replace(/^(?:это\s+)?(?:в|г\.?|город)\s+/i, '').replace(/[.!]+$/, '').trim();
-                if (!answer || answer.length > 40 || /^(?:не\s+знаю|потом|уточню|пока\s+не)/i.test(answer)) {
-                    deferField(state, 'city', 'Город площадки нужно уточнить');
-                } else {
-                    state.project.city = canonicalCity(answer);
-                    const normalize = value => String(value).toLowerCase().replace(/ё/g, 'е');
-                    if (!normalize(state.project.location || '').includes(normalize(state.project.city))) {
-                        state.project.location = `${state.project.location}, ${state.project.city}`;
-                    }
-                }
-            }
-
-            // Название мероприятия или компании («Стенд фирмы Комунарка»).
-            if (!state.project.eventName && !isQuestionIntent && userText.length <= 600) {
-                const name = extractEventNameFromText(userText);
-                if (name) state.project.eventName = name;
-            }
-
             // Клиент назвал формат своими словами («Мюзикл»): запоминаем его слово вместе с категорией.
             if (
                 expectedField === 'eventType' &&
@@ -8276,12 +8123,11 @@ addHistory(
         // --------------------------------------------------------
 
         if (
-            intent === 'manager_request' &&
-            !optionalHandled
+            intent === 'manager_request'
         ) {
 
             const text =
-                'Понял. Менеджер видит наш диалог и сможет подключиться к нему.';
+                'Конечно. Передам ваш запрос менеджеру.';
 
 
             addHistory(
@@ -8374,8 +8220,6 @@ addHistory(
         try {
             if (deterministicAssistantText) {
                 assistantText = deterministicAssistantText;
-            } else if (silentAck) {
-                assistantText = '';
             } else if (endDateCorrectionRequest || dateStartCorrectionRequest || liftDimensionsLaterRequest || ambiguousEndDateRequest) {
                 // Ответ задан детерминированно: нужно уточнение/подтверждение, а не догадка модели.
             } else if (repeatedPortfolioQuestion) {
@@ -8428,12 +8272,10 @@ addHistory(
                     ? 'Хорошо, размеры грузового лифта уточним позже.'
                     : ambiguousEndDateRequest
                         ? 'Вы назвали несколько возможных дат окончания. Какую дату считать окончательной? Пока не буду фиксировать один из вариантов без подтверждения.'
-                        : (fixedAck || silentAck)
-                            ? String(assistantText || '').trim()
-                            : cleanAcknowledgementText(varyAcknowledgement(
-                                String(assistantText || '').trim(),
-                                state
-                            ));
+                        : cleanAcknowledgementText(varyAcknowledgement(
+                            String(assistantText || '').trim(),
+                            state
+                        ));
 
         const requiredMissing = calculateMissing(state);
         const optionalStep = requiredMissing.length ? null : getPendingOptionalStep(state);
@@ -8493,7 +8335,7 @@ addHistory(
         }
 
         // Удаляем повторяющиеся длинные строки, сохраняя пустые строки и абзацы.
-        finalAssistantText = dedupeLines(cleanAcknowledgementText(softenManagerPromises(finalAssistantText)));
+        finalAssistantText = dedupeLines(cleanAcknowledgementText(finalAssistantText));
 
         if (!finalAssistantText) {
             finalAssistantText = questionToAppend || 'Спасибо. Информация зафиксирована.';
