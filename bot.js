@@ -5935,6 +5935,21 @@ if (
     '/bitrix-webhook'
 ) {
 
+    // Диагностика всех входящих запросов Bitrix (без токенов и тела запроса)
+    log(
+        '📡 BITRIX WEBHOOK REQUEST',
+        JSON.stringify({
+            method: req.method,
+            path: url.pathname,
+            contentType:
+                req.headers['content-type'] || 'unknown',
+            contentLength:
+                req.headers['content-length'] || 'unknown',
+            userAgent:
+                req.headers['user-agent'] || 'unknown'
+        })
+    );
+
     if (
         req.method !==
         'POST'
