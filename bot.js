@@ -1819,6 +1819,22 @@ async function editTelegramMessageReplyMarkup(
     );
 }
 
+// Убирает кнопки под сообщением после ответа клиента, чтобы нельзя было нажать их позже.
+async function hideCallbackKeyboard(callbackQuery) {
+
+    try {
+
+        await editTelegramMessageReplyMarkup(
+            callbackQuery,
+            { inline_keyboard: [] }
+        );
+
+    } catch (error) {
+
+        // Кнопки уже убраны или сообщение изменено: продолжаем.
+    }
+}
+
 async function answerTelegramCallback(
     callbackQueryId,
     text = ''
@@ -3879,6 +3895,10 @@ async function processTelegramCallback(
                 'Принято'
             );
 
+            await hideCallbackKeyboard(
+                callbackQuery
+            );
+
 
             const result =
                 await processSalesMessage(
@@ -4227,6 +4247,10 @@ async function processTelegramCallback(
                 await answerTelegramCallback(
                     callbackQuery.id,
                     'Время выбрано'
+                );
+
+                await hideCallbackKeyboard(
+                    callbackQuery
                 );
 
 
@@ -5934,21 +5958,6 @@ if (
     url.pathname ===
     '/bitrix-webhook'
 ) {
-
-    // Диагностика всех входящих запросов Bitrix (без токенов и тела запроса)
-    log(
-        '📡 BITRIX WEBHOOK REQUEST',
-        JSON.stringify({
-            method: req.method,
-            path: url.pathname,
-            contentType:
-                req.headers['content-type'] || 'unknown',
-            contentLength:
-                req.headers['content-length'] || 'unknown',
-            userAgent:
-                req.headers['user-agent'] || 'unknown'
-        })
-    );
 
     if (
         req.method !==
