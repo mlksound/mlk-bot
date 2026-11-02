@@ -41,6 +41,12 @@ const {
     processSalesMessage
 } = require('./sales.js');
 
+const {
+    initStorage,
+    loadBitrixAuth,
+    saveBitrixAuth
+} = require('./storage.js');
+
 // ============================================================
 // 1. ENV
 // ============================================================
@@ -596,41 +602,28 @@ function ensureDataDir() {
     } catch (e) {}
 }
 
-function loadAuth() {
+// Старое файловое хранилище оставляем как резерв на период перехода.
+function loadLegacyAuth() {
     ensureDataDir();
 
     try {
-        if (!fs.existsSync(AUTH_FILE)) {
-            return null;
-        }
+        if (!fs.existsSync(AUTH_FILE)) return null;
 
-        const raw =
-            fs.readFileSync(AUTH_FILE, 'utf8');
-
-        const data =
-            JSON.parse(raw);
-
-        if (
-            data &&
-            data.access_token &&
-            data.refresh_token
-        ) {
-            return data;
-        }
-
-        return null;
-
-    } catch (e) {
-        error(
-            'OAuth auth load error:',
-            e.message
+        const data = JSON.parse(
+            fs.readFileSync(AUTH_FILE, 'utf8')
         );
 
+        return data && data.access_token && data.refresh_token
+            ? data
+            : null;
+
+    } catch (e) {
+        error('Legacy OAuth auth load error:', e.message);
         return null;
     }
 }
 
-function saveAuth(auth) {
+function saveLegacyAuth(auth) {
     ensureDataDir();
 
     fs.writeFileSync(
@@ -643,7 +636,42 @@ function saveAuth(auth) {
     );
 }
 
-let bitrixAuth = loadAuth();
+// OAuth загружается асинхронно из Turso внутри startup().
+let bitrixAuth = null;
+
+async function loadBitrixAuthWithMigration() {
+    // Сначала читаем основное хранилище. Ошибку Turso не маскируем.
+    let auth = await loadBitrixAuth();
+
+    if (auth) {
+        log('✅ Bitrix OAuth loaded from Turso');
+        return auth;
+    }
+
+    // Если записи в Turso ещё нет, переносим старые токены из файла.
+    auth = loadLegacyAuth();
+
+    if (auth) {
+        await saveBitrixAuth(auth);
+        log('✅ Legacy Bitrix OAuth migrated to Turso');
+        return auth;
+    }
+
+    log('ℹ️ Bitrix OAuth not found in Turso or legacy file');
+    return null;
+}
+
+async function persistBitrixAuth(auth) {
+    // Сначала обязательная запись в Turso.
+    await saveBitrixAuth(auth);
+
+    // Файловую копию временно сохраняем для безопасного отката.
+    try {
+        saveLegacyAuth(auth);
+    } catch (e) {
+        warn('⚠️ Legacy OAuth mirror save failed:', e.message);
+    }
+}
 
 // ============================================================
 // 5. BITRIX WEBHOOK — СТАРЫЙ КОНТУР
@@ -823,7 +851,7 @@ async function refreshBitrixOAuth() {
         client_endpoint: portalClientEndpoint
     };
 
-    saveAuth(bitrixAuth);
+    await persistBitrixAuth(bitrixAuth);
 
     bitrixDiagnosticState.lastOAuthRefreshAt = new Date().toISOString();
         bitrixDiagnosticState.lastOAuthError = null;
@@ -6273,7 +6301,7 @@ if (
 
         try {
 
-            saveAuth(
+            await persistBitrixAuth(
                 bitrixAuth
             );
 
@@ -6795,6 +6823,12 @@ body {
 // ============================================================
 
 async function startup() {
+
+    // Инициализируем общую базу и загружаем OAuth до запуска Connector.
+    // При недоступности Turso не продолжаем работу с потенциально устаревшими токенами.
+    log('🗄️ Initializing Turso storage...');
+    await initStorage();
+    bitrixAuth = await loadBitrixAuthWithMigration();
 
     log(
         '========================================'

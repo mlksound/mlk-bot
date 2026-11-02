@@ -64,6 +64,16 @@ async function initStorage() {
                     )
                 `);
 
+                // Отдельное постоянное хранилище OAuth Bitrix.
+                // id всегда равен 1: в приложении подключён один портал.
+                await db.execute(`
+                    CREATE TABLE IF NOT EXISTS bitrix_oauth (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        auth_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                `);
+
             })();
     }
 
@@ -204,6 +214,72 @@ async function deleteSalesState(
 
 
 // ============================================================
+// BITRIX OAUTH STORAGE
+// ============================================================
+
+async function loadBitrixAuth() {
+
+    await initStorage();
+
+    const db = getTursoClient();
+
+    const result = await db.execute({
+        sql: `
+            SELECT auth_json
+            FROM bitrix_oauth
+            WHERE id = 1
+            LIMIT 1
+        `
+    });
+
+    if (!result.rows || result.rows.length === 0) {
+        return null;
+    }
+
+    let auth;
+
+    try {
+        auth = JSON.parse(String(result.rows[0].auth_json));
+    } catch (error) {
+        throw new Error(`Invalid saved Bitrix OAuth data: ${error.message}`);
+    }
+
+    if (!auth || !auth.access_token || !auth.refresh_token) {
+        throw new Error('Saved Bitrix OAuth data is incomplete');
+    }
+
+    return auth;
+}
+
+
+async function saveBitrixAuth(auth) {
+
+    if (!auth || !auth.access_token || !auth.refresh_token) {
+        throw new Error('Cannot save incomplete Bitrix OAuth data');
+    }
+
+    await initStorage();
+
+    const db = getTursoClient();
+    const updatedAt = new Date().toISOString();
+
+    await db.execute({
+        sql: `
+            INSERT INTO bitrix_oauth (id, auth_json, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id)
+            DO UPDATE SET
+                auth_json = excluded.auth_json,
+                updated_at = excluded.updated_at
+        `,
+        args: [JSON.stringify(auth), updatedAt]
+    });
+
+    return true;
+}
+
+
+// ============================================================
 // CONNECTION TEST
 // ============================================================
 
@@ -248,6 +324,10 @@ module.exports = {
     saveSalesState,
 
     deleteSalesState,
+
+    loadBitrixAuth,
+
+    saveBitrixAuth,
 
     testTursoConnection
 
