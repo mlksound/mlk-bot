@@ -1233,9 +1233,18 @@ function buildTelegramReplyMarkup(actions) {
         ],
 
         ask_level: [
-            ['Стандартный', 'standard'],
-            ['Высокие требования', 'high'],
-            ['Высший уровень', 'highest']
+            [
+                'Стандартный (обычные требования к оборудованию и документации)',
+                'standard'
+            ],
+            [
+                'Высокие требования (повышенные требования к оборудованию и документации, прямые ТВ-трансляции)',
+                'high'
+            ],
+            [
+                'Высший уровень (с высшими должностными лицами, масштабные и международные мероприятия)',
+                'highest'
+            ]
         ],
 
         ask_personnel: [
@@ -1253,7 +1262,6 @@ function buildTelegramReplyMarkup(actions) {
 
         ask_lift: [
             ['🏗 Есть грузовой лифт', 'has_lift'],
-            ['🛗 Только пассажирский лифт', 'passenger_lift'],
             ['🪜 По лестнице', 'stairs'],
             ['❓ Не знаю', 'unknown']
         ],
@@ -1343,40 +1351,6 @@ function buildTelegramReplyMarkup(actions) {
         // ----------------------------------------------------
 
         if (action.type === 'quick_reply') {
-
-            // Кнопки, которые Sales Engine передаёт явно (подтверждение заявки,
-            // исправление, «один день / несколько», пропуск необязательных вопросов и т.д.).
-            if (
-                Array.isArray(action.buttons) &&
-                action.buttons.length
-            ) {
-
-                const buttons =
-                    action.buttons
-                        .filter(button => button && button.text && button.value !== undefined)
-                        .map(button => ({
-                            text:
-                                String(button.text),
-
-                            callback_data:
-                                `sales:action:${action.tag}:${button.value}`
-                        }));
-
-                const sameRow =
-                    buttons.length === 2 &&
-                    buttons.every(button => button.text.length <= 20);
-
-                if (sameRow) {
-                    keyboard.push(buttons);
-                } else {
-                    for (const button of buttons) {
-                        keyboard.push([button]);
-                    }
-                }
-
-                continue;
-            }
-
 
             if (
                 action.tag === 'discuss_project'
@@ -1817,22 +1791,6 @@ async function editTelegramMessageReplyMarkup(
                 replyMarkup
         }
     );
-}
-
-// Убирает кнопки под сообщением после ответа клиента, чтобы нельзя было нажать их позже.
-async function hideCallbackKeyboard(callbackQuery) {
-
-    try {
-
-        await editTelegramMessageReplyMarkup(
-            callbackQuery,
-            { inline_keyboard: [] }
-        );
-
-    } catch (error) {
-
-        // Кнопки уже убраны или сообщение изменено: продолжаем.
-    }
 }
 
 async function answerTelegramCallback(
@@ -3544,96 +3502,6 @@ async function processTelegramAdminMessage(
 }
 
 // ============================================================
-// MIRROR SALES BUTTON INTERACTIONS TO BITRIX
-// ============================================================
-
-function salesButtonChoiceText(tag, value) {
-    const labels = {
-        ask_format: {
-            concerts: 'Концерты / фестивали',
-            conferences: 'Конференции / презентации / TV-проекты',
-            corporate: 'Корпоративы / торжества',
-            exhibitions: 'Выставки',
-            sports: 'Спортивные мероприятия'
-        },
-        ask_level: {
-            standard: 'Стандартный уровень',
-            high: 'Высокие требования',
-            highest: 'Высший уровень'
-        },
-        ask_personnel: {
-            management: 'Полное управление оборудованием',
-            duty_technician: 'Дежурный техник',
-            installation_dismantling: 'Только монтаж / демонтаж',
-            other: 'Другой персонал'
-        },
-        ask_place: {
-            outdoor: 'Улица', indoor: 'Помещение', covered: 'Под навесом'
-        },
-        ask_lift: {
-            has_lift: 'Есть грузовой лифт',
-            passenger_lift: 'Только пассажирский лифт',
-            stairs: 'Нужно носить по лестнице',
-            unknown: 'Не знаю'
-        },
-        ask_sound_rider: { yes: 'Звуковой райдер есть', no: 'Звукового райдера нет' },
-        ask_light_fixtures: { yes: 'Требования к световым приборам есть', no: 'Отдельных требований к световым приборам нет' },
-        ask_mount: { any: 'Монтаж по согласованию', night: 'Монтаж ночью / рано утром' },
-        ask_demount: { any: 'Демонтаж по согласованию', deadline: 'Демонтаж до определённого времени' },
-        ask_days: { one_day: 'Мероприятие в один день', multi_day: 'Мероприятие в несколько дней' },
-        ask_ready_choice: {
-            event_day: 'Готовность: в день мероприятия',
-            day_before: 'Готовность: за день до мероприятия',
-            earlier: 'Готовность: раньше / другая дата'
-        },
-        optional_skip: {
-            budget: 'Пропустить вопрос о бюджете',
-            extra: 'Нечего добавить',
-            contacts: 'Пропустить контакты'
-        },
-        confirm_application: { yes: '✅ Подтверждаю заявку', edit: '✏️ Хочу исправить заявку' },
-        edit_block: {
-            dates: 'Исправить: даты и время',
-            venue: 'Исправить: площадка',
-            equipment: 'Исправить: оборудование',
-            service: 'Исправить: персонал и монтаж',
-            other: 'Исправить: другое',
-            back: 'Назад к заявке'
-        },
-        restart_confirm: { continue: 'Продолжить текущую заявку', restart: 'Начать заявку заново' }
-    };
-
-    if (tag === 'ask_equipment' && Array.isArray(value)) {
-        const equipmentLabels = {
-            sound: 'Звуковое оборудование', led: 'LED-экраны',
-            light: 'Световое оборудование', stage: 'Сценические конструкции'
-        };
-        return 'Выбрано оборудование: ' + value.map(v => v === 'all' ? 'Полный комплекс' : equipmentLabels[v] || v).join(', ');
-    }
-
-    return labels[tag]?.[value] || `${tag}: ${value}`;
-}
-
-async function relaySalesCallbackToBitrix(clientId, clientText, result, callbackQuery) {
-    const telegramUser = callbackQuery?.from || null;
-    const aiText = String(result?.text || '').trim();
-
-    if (clientText) {
-        try { await mirrorToAdmin(clientId, 'client', clientText); }
-        catch (e) { warn('Button choice mirror-to-admin error:', e.message); }
-        try { await sendToBitrixConnector(clientId, clientText, 'client', telegramUser, []); }
-        catch (e) { error('Button choice Telegram -> Bitrix error:', e.message); }
-    }
-
-    if (aiText) {
-        try { await mirrorToAdmin(clientId, 'ai', aiText); }
-        catch (e) { warn('Button response mirror-to-admin error:', e.message); }
-        try { await sendToBitrixConnector(clientId, aiText, 'ai', telegramUser, []); }
-        catch (e) { error('Button response AI -> Bitrix error:', e.message); }
-    }
-}
-
-// ============================================================
 // 15. TELEGRAM CALLBACK
 // ============================================================
 
@@ -3695,17 +3563,12 @@ async function processTelegramCallback(
             const equipmentValue =
                 parts[3] || '';
 
-            // toggle payload: sales:equipment:toggle:<value>:<selected>
-            // all/done payload: sales:equipment:<action>:<selected>
-            const selectedPayload =
-                equipmentAction === 'toggle'
-                    ? (parts[4] || '')
-                    : (parts[3] || '');
-
             const selected =
-                selectedPayload
-                    .split(',')
-                    .filter(Boolean);
+                parts[4]
+                    ? parts[4]
+                        .split(',')
+                        .filter(Boolean)
+                    : [];
 
 
             // ----------------------------------------------
@@ -3834,12 +3697,6 @@ async function processTelegramCallback(
                         }
                     );
 
-                await relaySalesCallbackToBitrix(
-                    clientId,
-                    salesButtonChoiceText('ask_equipment', selected),
-                    result,
-                    callbackQuery
-                );
 
                 const replyMarkup =
                     buildTelegramReplyMarkup(
@@ -3895,10 +3752,6 @@ async function processTelegramCallback(
                 'Принято'
             );
 
-            await hideCallbackKeyboard(
-                callbackQuery
-            );
-
 
             const result =
                 await processSalesMessage(
@@ -3915,12 +3768,6 @@ async function processTelegramCallback(
                     }
                 );
 
-            await relaySalesCallbackToBitrix(
-                clientId,
-                salesButtonChoiceText(salesTag, salesValue),
-                result,
-                callbackQuery
-            );
 
             const replyMarkup =
                 buildTelegramReplyMarkup(
@@ -4249,10 +4096,6 @@ async function processTelegramCallback(
                     'Время выбрано'
                 );
 
-                await hideCallbackKeyboard(
-                    callbackQuery
-                );
-
 
                 const result =
                     await processSalesMessage(
@@ -4268,12 +4111,6 @@ async function processTelegramCallback(
                         }
                     );
 
-                await relaySalesCallbackToBitrix(
-                    clientId,
-                    `${calendarTag}: ${value}`,
-                    result,
-                    callbackQuery
-                );
 
                 const replyMarkup =
                     buildTelegramReplyMarkup(
@@ -4339,13 +4176,6 @@ async function processTelegramCallback(
                             'discuss_project'
                     }
                 );
-
-            await relaySalesCallbackToBitrix(
-                clientId,
-                'Клиент нажал «Обсудить проект»',
-                result,
-                callbackQuery
-            );
 
             const replyMarkup =
                 buildTelegramReplyMarkup(
@@ -5958,22 +5788,6 @@ if (
     url.pathname ===
     '/bitrix-webhook'
 ) {
-
-    // Диагностика каждого обращения к URL установки Bitrix.
-    // Тело запроса и OAuth-токены намеренно не логируются.
-    log(
-        '📡 BITRIX WEBHOOK REQUEST',
-        JSON.stringify({
-            method: req.method,
-            path: url.pathname,
-            contentType:
-                req.headers['content-type'] || 'unknown',
-            contentLength:
-                req.headers['content-length'] || 'unknown',
-            userAgent:
-                req.headers['user-agent'] || 'unknown'
-        })
-    );
 
     if (
         req.method !==
