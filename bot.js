@@ -6549,16 +6549,12 @@ if (
                                 tokenParams.set('client_secret', BITRIX_CLIENT_SECRET);
                                 tokenParams.set('code', oauthCode);
 
-                                const authData = await fetchJson(
-                                    'https://oauth.bitrix.info/oauth/token/',
-                                    {
-                                        method: 'POST',
-                                        headers: {
-                                            'Content-Type': 'application/x-www-form-urlencoded'
-                                        },
-                                        body: tokenParams.toString()
-                                    }
-                                );
+                                // Bitrix24 documents authorization-code exchange as GET.
+                                const tokenUrl =
+                                    'https://oauth.bitrix.info/oauth/token/?' +
+                                    tokenParams.toString();
+
+                                const authData = await fetchJson(tokenUrl);
 
                                 if (!authData || !authData.access_token || !authData.refresh_token) {
                                     throw new Error('Bitrix OAuth returned incomplete token data');
