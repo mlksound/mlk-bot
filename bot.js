@@ -157,6 +157,10 @@ const BITRIX_HANDLER_URL =
 const BITRIX_INSTALL_URL =
     PUBLIC_BASE_URL + '/bitrix-webhook';
 
+// Одноразовые state для ручного восстановления OAuth через Bitrix24.
+const bitrixOAuthStates = new Map();
+const BITRIX_OAUTH_STATE_TTL = 10 * 60 * 1000;
+
 // ------------------------------------------------------------
 // STORAGE
 // ------------------------------------------------------------
@@ -5689,6 +5693,42 @@ const server =
                     );
 
                 // ==================================================
+                // BITRIX OAUTH RECOVERY — START
+                // ==================================================
+                if (
+                    req.method === 'GET' &&
+                    url.pathname === '/bitrix-oauth-start'
+                ) {
+                    if (!BITRIX_CLIENT_ID || !BITRIX_DOMAIN) {
+                        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+                        res.end('Bitrix OAuth client ID or portal domain is missing');
+                        return;
+                    }
+
+                    const now = Date.now();
+                    for (const [key, value] of bitrixOAuthStates) {
+                        if (value.expiresAt < now) bitrixOAuthStates.delete(key);
+                    }
+
+                    const state = crypto.randomBytes(32).toString('hex');
+                    bitrixOAuthStates.set(state, {
+                        expiresAt: now + BITRIX_OAUTH_STATE_TTL
+                    });
+
+                    const authorizeUrl = new URL(
+                        `https://${BITRIX_DOMAIN}/oauth/authorize/`
+                    );
+                    authorizeUrl.searchParams.set('client_id', BITRIX_CLIENT_ID);
+                    authorizeUrl.searchParams.set('state', state);
+
+                    log('🔐 Bitrix OAuth recovery authorization started');
+                    res.writeHead(302, { Location: authorizeUrl.toString() });
+                    res.end();
+                    return;
+                }
+
+
+                // ==================================================
                 // BITRIX FILE ENDPOINT
                 // ==================================================
 
@@ -6474,6 +6514,92 @@ if (
                     if (
                         req.method === 'GET'
                     ) {
+
+                        // ========================================================
+                        // BITRIX OAUTH RECOVERY — CALLBACK
+                        // ========================================================
+                        const oauthCode = url.searchParams.get('code');
+
+                        if (oauthCode) {
+                            const oauthState = url.searchParams.get('state');
+                            const savedState = oauthState
+                                ? bitrixOAuthStates.get(oauthState)
+                                : null;
+
+                            if (!savedState || savedState.expiresAt < Date.now()) {
+                                if (oauthState) bitrixOAuthStates.delete(oauthState);
+                                warn('⚠️ Bitrix OAuth callback rejected: invalid or expired state');
+                                res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+                                res.end('OAuth authorization failed: invalid or expired state');
+                                return;
+                            }
+
+                            bitrixOAuthStates.delete(oauthState);
+
+                            try {
+                                if (!BITRIX_CLIENT_ID || !BITRIX_CLIENT_SECRET) {
+                                    throw new Error('Bitrix OAuth client credentials are missing');
+                                }
+
+                                log('🔐 Bitrix OAuth authorization code received');
+
+                                const tokenParams = new URLSearchParams();
+                                tokenParams.set('grant_type', 'authorization_code');
+                                tokenParams.set('client_id', BITRIX_CLIENT_ID);
+                                tokenParams.set('client_secret', BITRIX_CLIENT_SECRET);
+                                tokenParams.set('code', oauthCode);
+
+                                const authData = await fetchJson(
+                                    'https://oauth.bitrix.info/oauth/token/',
+                                    {
+                                        method: 'POST',
+                                        headers: {
+                                            'Content-Type': 'application/x-www-form-urlencoded'
+                                        },
+                                        body: tokenParams.toString()
+                                    }
+                                );
+
+                                if (!authData || !authData.access_token || !authData.refresh_token) {
+                                    throw new Error('Bitrix OAuth returned incomplete token data');
+                                }
+
+                                const newAuth = {
+                                    ...authData,
+                                    domain: BITRIX_DOMAIN,
+                                    client_endpoint: `https://${BITRIX_DOMAIN}/rest/`
+                                };
+
+                                // Turso — основное хранилище. Не обновляем RAM, пока запись не успешна.
+                                await persistBitrixAuth(newAuth);
+                                bitrixAuth = newAuth;
+
+                                log('✅ Bitrix OAuth recovery tokens saved to Turso');
+
+                                let connectorMessage = 'OAuth saved. Connector setup is starting.';
+                                try {
+                                    await setupConnector();
+                                    connectorMessage = connectorReady
+                                        ? 'Connector setup completed successfully.'
+                                        : 'OAuth saved, but Connector is not yet confirmed ready. Check Render logs.';
+                                } catch (setupError) {
+                                    error('❌ Connector setup after OAuth recovery failed:', setupError.message);
+                                    connectorMessage = 'OAuth saved, but Connector setup failed. Check Render logs.';
+                                }
+
+                                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                                res.end(`<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MLK — Bitrix OAuth</title>
+<style>body{font-family:Arial,sans-serif;background:#f3f5f8;padding:24px}.box{max-width:560px;margin:50px auto;background:#fff;padding:28px;border-radius:14px;box-shadow:0 5px 25px #00000012}h2{color:#168a42}p{line-height:1.6}</style></head>
+<body><div class="box"><h2>Авторизация Bitrix24 завершена</h2><p>OAuth-токены сохранены в Turso.</p><p>${connectorMessage}</p><p>Можно закрыть эту страницу.</p></div></body></html>`);
+                                return;
+                            } catch (oauthError) {
+                                error('❌ Bitrix OAuth recovery failed:', oauthError.message);
+                                res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+                                res.end('Bitrix OAuth recovery failed. Check Render logs.');
+                                return;
+                            }
+                        }
 
                         const placementOptions =
                             url.searchParams.get(
