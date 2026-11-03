@@ -2690,6 +2690,45 @@ async function bindConnectorEvent() {
     }
 }
 
+async function logConnectorEventBindings() {
+
+    log('🔎 Checking registered Bitrix event handlers...');
+
+    try {
+        const response = await bitrixOAuthCall('event.get', {});
+        const handlers = Array.isArray(response?.result)
+            ? response.result
+            : [];
+
+        const targetHandlers = handlers.filter(item =>
+            String(item?.event || '').toUpperCase() ===
+            'ONIMCONNECTORMESSAGEADD'
+        );
+
+        log('🔎 ONIMCONNECTORMESSAGEADD registrations:', targetHandlers.length);
+
+        if (targetHandlers.length === 0) {
+            warn('⚠️ No ONIMCONNECTORMESSAGEADD handler is visible to the current OAuth user.');
+        }
+
+        for (const item of targetHandlers) {
+            log('🔎 REGISTERED CONNECTOR EVENT:', JSON.stringify({
+                event: item.event || null,
+                handler: item.handler || null,
+                auth_type: item.auth_type ?? null,
+                offline: item.offline ?? null,
+                connector_id: item.connector_id || null
+            }));
+        }
+
+        return targetHandlers;
+
+    } catch (e) {
+        error('❌ Could not read Bitrix event registrations:', e.message);
+        return null;
+    }
+}
+
 async function activateConnector(
     lineId
 ) {
@@ -2852,6 +2891,9 @@ async function setupConnector() {
         await registerConnector();
 
         await bindConnectorEvent();
+
+        // Read-only diagnostic: show which URL Bitrix has registered for this event.
+        await logConnectorEventBindings();
 
         await findOpenLine();
 
