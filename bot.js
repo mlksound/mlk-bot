@@ -6776,6 +6776,30 @@ body {
                                 req
                             );
 
+                        // ========================================================
+                        // TEMP BITRIX RAW POST DIAGNOSTICS
+                        // ========================================================
+
+                        const safeBody = String(body || '')
+                            // Скрываем OAuth и другие чувствительные значения в JSON
+                            .replace(
+                                /("(?:access_token|refresh_token|client_secret|token)"\s*:\s*)"[^"]*"/gi,
+                                '$1"[REDACTED]"'
+                            )
+                            // Скрываем чувствительные значения в form-urlencoded
+                            .replace(
+                                /((?:access_token|refresh_token|client_secret|token)[^=&]*=)[^&]*/gi,
+                                '$1[REDACTED]'
+                            );
+
+                        log('========================================');
+                        log('🧪 BITRIX RAW POST DIAGNOSTICS');
+                        log('METHOD:', req.method);
+                        log('CONTENT-TYPE:', req.headers['content-type']);
+                        log('BODY LENGTH:', body.length);
+                        log('RAW BODY:', safeBody.slice(0, 4000));
+                        log('========================================');
+
                         let payload = {};
 
                         try {
