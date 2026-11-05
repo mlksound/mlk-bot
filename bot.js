@@ -2876,6 +2876,36 @@ async function setupConnector() {
 
     try {
 
+        // Диагностика: проверяем, считает ли Bitrix24 приложение установленным.
+        log('🔎 CHECKING BITRIX APPLICATION INSTALLATION...');
+
+        try {
+
+            const appInfo = await bitrixOAuthCall(
+                'app.info',
+                {},
+                false
+            );
+
+            log(
+                '📋 BITRIX APP INSTALLATION STATUS:',
+                JSON.stringify({
+                    installed: appInfo?.result?.INSTALLED,
+                    appId: appInfo?.result?.ID,
+                    appCode: appInfo?.result?.CODE,
+                    status: appInfo?.result?.STATUS
+                })
+            );
+
+        } catch (e) {
+
+            error(
+                '❌ BITRIX APP INFO ERROR:',
+                e.message
+            );
+
+        }
+
         log(
             '========================================'
         );
