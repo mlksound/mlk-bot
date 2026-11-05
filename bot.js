@@ -2768,45 +2768,28 @@ async function logConnectorEventBindings() {
             ? response.result
             : [];
 
-        const normalizedHandlers = handlers.map(item => ({
-            event: String(item?.event || '').toUpperCase() || null,
-            handler: item?.handler || null,
-            auth_type: item?.auth_type ?? null,
-            offline: item?.offline ?? null,
-            connector_id: item?.connector_id || null
-        }));
-
-        const connectorHandlers = normalizedHandlers.filter(item =>
-            item.event === 'ONIMCONNECTORMESSAGEADD'
+        const targetHandlers = handlers.filter(item =>
+            String(item?.event || '').toUpperCase() ===
+            'ONIMCONNECTORMESSAGEADD'
         );
 
-        const appTestHandlers = normalizedHandlers.filter(item =>
-            item.event === 'ONAPPTEST'
-        );
+        log('🔎 ONIMCONNECTORMESSAGEADD registrations:', targetHandlers.length);
 
-        const appTestForCurrentUrl = appTestHandlers.filter(item =>
-            item.handler === BITRIX_HANDLER_URL
-        );
-
-        log('🔎 BITRIX EVENT REGISTRATIONS TOTAL:', normalizedHandlers.length);
-        log('🔎 ONIMCONNECTORMESSAGEADD registrations:', connectorHandlers.length);
-        log('🔎 ONAPPTEST registrations:', appTestHandlers.length);
-        log('🔎 ONAPPTEST registrations for current handler URL:', appTestForCurrentUrl.length);
-        log('🔎 EXPECTED BITRIX HANDLER URL:', BITRIX_HANDLER_URL);
-
-        if (connectorHandlers.length === 0) {
+        if (targetHandlers.length === 0) {
             warn('⚠️ No ONIMCONNECTORMESSAGEADD handler is visible to the current OAuth user.');
         }
 
-        if (appTestForCurrentUrl.length === 0) {
-            warn('⚠️ ONAPPTEST registration for the current handler URL was not found.');
+        for (const item of targetHandlers) {
+            log('🔎 REGISTERED CONNECTOR EVENT:', JSON.stringify({
+                event: item.event || null,
+                handler: item.handler || null,
+                auth_type: item.auth_type ?? null,
+                offline: item.offline ?? null,
+                connector_id: item.connector_id || null
+            }));
         }
 
-        for (const item of normalizedHandlers) {
-            log('🔎 REGISTERED BITRIX EVENT:', JSON.stringify(item));
-        }
-
-        return normalizedHandlers;
+        return targetHandlers;
 
     } catch (e) {
         error('❌ Could not read Bitrix event registrations:', e.message);
@@ -5844,6 +5827,27 @@ function normalizeConnectorPayload(payload) {
 const server =
     http.createServer(
         async (req, res) => {
+
+            // ========================================================
+            // TEMP EARLY HTTP DIAGNOSTICS — BITRIX CONNECTIVITY
+            // Логируем входящие POST до маршрутизации и чтения body.
+            // Содержимое запроса и секретные заголовки не записываем.
+            // ========================================================
+            if (req.method === 'POST') {
+                const forwardedFor = req.headers['x-forwarded-for'];
+                log('🛰️ EARLY HTTP POST RECEIVED', {
+                    time: new Date().toISOString(),
+                    method: req.method,
+                    path: String(req.url || '').split('?')[0],
+                    host: req.headers.host || null,
+                    contentType: req.headers['content-type'] || null,
+                    contentLength: req.headers['content-length'] || null,
+                    userAgent: req.headers['user-agent'] || null,
+                    forwardedFor: forwardedFor || null,
+                    forwardedProto: req.headers['x-forwarded-proto'] || null,
+                    remoteAddress: req.socket?.remoteAddress || null
+                });
+            }
 
             try {
 
