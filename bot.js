@@ -2768,28 +2768,45 @@ async function logConnectorEventBindings() {
             ? response.result
             : [];
 
-        const targetHandlers = handlers.filter(item =>
-            String(item?.event || '').toUpperCase() ===
-            'ONIMCONNECTORMESSAGEADD'
+        const normalizedHandlers = handlers.map(item => ({
+            event: String(item?.event || '').toUpperCase() || null,
+            handler: item?.handler || null,
+            auth_type: item?.auth_type ?? null,
+            offline: item?.offline ?? null,
+            connector_id: item?.connector_id || null
+        }));
+
+        const connectorHandlers = normalizedHandlers.filter(item =>
+            item.event === 'ONIMCONNECTORMESSAGEADD'
         );
 
-        log('🔎 ONIMCONNECTORMESSAGEADD registrations:', targetHandlers.length);
+        const appTestHandlers = normalizedHandlers.filter(item =>
+            item.event === 'ONAPPTEST'
+        );
 
-        if (targetHandlers.length === 0) {
+        const appTestForCurrentUrl = appTestHandlers.filter(item =>
+            item.handler === BITRIX_HANDLER_URL
+        );
+
+        log('🔎 BITRIX EVENT REGISTRATIONS TOTAL:', normalizedHandlers.length);
+        log('🔎 ONIMCONNECTORMESSAGEADD registrations:', connectorHandlers.length);
+        log('🔎 ONAPPTEST registrations:', appTestHandlers.length);
+        log('🔎 ONAPPTEST registrations for current handler URL:', appTestForCurrentUrl.length);
+        log('🔎 EXPECTED BITRIX HANDLER URL:', BITRIX_HANDLER_URL);
+
+        if (connectorHandlers.length === 0) {
             warn('⚠️ No ONIMCONNECTORMESSAGEADD handler is visible to the current OAuth user.');
         }
 
-        for (const item of targetHandlers) {
-            log('🔎 REGISTERED CONNECTOR EVENT:', JSON.stringify({
-                event: item.event || null,
-                handler: item.handler || null,
-                auth_type: item.auth_type ?? null,
-                offline: item.offline ?? null,
-                connector_id: item.connector_id || null
-            }));
+        if (appTestForCurrentUrl.length === 0) {
+            warn('⚠️ ONAPPTEST registration for the current handler URL was not found.');
         }
 
-        return targetHandlers;
+        for (const item of normalizedHandlers) {
+            log('🔎 REGISTERED BITRIX EVENT:', JSON.stringify(item));
+        }
+
+        return normalizedHandlers;
 
     } catch (e) {
         error('❌ Could not read Bitrix event registrations:', e.message);
