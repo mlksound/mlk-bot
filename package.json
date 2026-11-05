@@ -14,5 +14,8 @@
     "@libsql/client": "^0.18.0",
     "dotenv": "^17.4.2",
     "telegraf": "^4.16.3"
+  },
+  "engines": {
+    "node": "24.22.1"
   }
 }
