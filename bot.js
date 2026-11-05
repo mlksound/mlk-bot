@@ -1,5 +1,7 @@
 'use strict';
 
+console.log("🟢 NODE.JS VERSION:", process.version);
+
 /*
 ===========================================================
  MLK BOT
