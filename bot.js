@@ -2690,6 +2690,74 @@ async function bindConnectorEvent() {
     }
 }
 
+async function testBitrixEventDelivery() {
+
+    if (!bitrixAuth?.access_token) {
+        warn('⚠️ ONAPPTEST skipped: OAuth is not installed');
+        return null;
+    }
+
+    log('🧪 Registering temporary ONAPPTEST event handler...');
+
+    try {
+
+        const bindResult = await bitrixOAuthCall(
+            'event.bind',
+            {
+                event: 'ONAPPTEST',
+                handler: BITRIX_HANDLER_URL
+            }
+        );
+
+        log(
+            '✅ ONAPPTEST event.bind result:',
+            JSON.stringify(bindResult)
+        );
+
+    } catch (e) {
+
+        const message = String(e?.message || '').toLowerCase();
+
+        if (message.includes('handler already binded')) {
+            warn('⚠️ ONAPPTEST handler already bound — continuing with test');
+        } else {
+            error('❌ ONAPPTEST event.bind failed:', e.message);
+            return null;
+        }
+    }
+
+    const testMarker = `MLK_EVENT_DELIVERY_TEST_${Date.now()}`;
+
+    log('🧪 Calling Bitrix event.test with marker:', testMarker);
+
+    try {
+
+        const testResult = await bitrixOAuthCall(
+            'event.test',
+            {
+                mlk_test_marker: testMarker
+            }
+        );
+
+        log(
+            '📤 BITRIX EVENT.TEST ACCEPTED:',
+            JSON.stringify({
+                result: testResult?.result ?? null,
+                marker: testMarker
+            })
+        );
+
+        log('⏳ Waiting for ONAPPTEST callback. Find ONAPPTEST in Render logs.');
+
+        return testResult;
+
+    } catch (e) {
+
+        error('❌ BITRIX EVENT.TEST FAILED:', e.message);
+        return null;
+    }
+}
+
 async function logConnectorEventBindings() {
 
     log('🔎 Checking registered Bitrix event handlers...');
@@ -2921,6 +2989,10 @@ async function setupConnector() {
         await registerConnector();
 
         await bindConnectorEvent();
+
+        // Temporary diagnostic: verify that Bitrix can deliver an event to this handler.
+        // The ONAPPTEST subscription is intentionally left registered until the test is reviewed.
+        await testBitrixEventDelivery();
 
         // Read-only diagnostic: show which URL Bitrix has registered for this event.
         await logConnectorEventBindings();
@@ -6813,7 +6885,7 @@ body {
                         const safeBody = String(body || '')
                             // Скрываем OAuth и другие чувствительные значения в JSON
                             .replace(
-                                /("(?:access_token|refresh_token|client_secret|token)"\s*:\s*)"[^"]*"/gi,
+                                /("(?:access_token|refresh_token|application_token|client_secret|token)"\s*:\s*)"[^"]*"/gi,
                                 '$1"[REDACTED]"'
                             )
                             // Скрываем чувствительные значения в form-urlencoded
@@ -6868,6 +6940,22 @@ body {
                             payload.event ||
                             'unknown'
                         );
+
+                        if (
+                            String(payload.event || '').toUpperCase() === 'ONAPPTEST'
+                        ) {
+                            const testData = payload.data || {};
+                            const testQuery = testData.QUERY || {};
+
+                            log(
+                                '🎯 ONAPPTEST CALLBACK RECEIVED:',
+                                JSON.stringify({
+                                    marker: testQuery.mlk_test_marker || null,
+                                    language: testData.LANGUAGE_ID || null,
+                                    eventHandlerId: payload.event_handler_id || null
+                                })
+                            );
+                        }
 
                         if (
                             String(
