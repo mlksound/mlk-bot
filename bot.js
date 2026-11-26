@@ -1289,15 +1289,101 @@ async function processTelegramBusinessMessage(message) {
     const messageText = String(message.text || message.caption || '').trim();
 
     if (isBusinessAccountMessage) {
-        if (messageText) {
-            setClientMode(clientId, 'MANAGER');
-            await recordExternalMessage(clientId, 'assistant', messageText, {
-                source: 'telegram_business',
-                sender: 'manager'
-            });
-            log(`👤 Telegram Business manager message recorded: ${clientId}`);
-            await mirrorToAdmin(clientId, 'manager', messageText);
+        if (!messageText) return;
+
+        // Команды управления вводятся менеджером прямо в Business-чате.
+        // Они не должны попадать в историю клиента как обычные сообщения.
+        const commandMatch = messageText.match(/^\/(ai|manager|ask)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+
+        if (commandMatch) {
+            const command = commandMatch[1].toLowerCase();
+            const argument = String(commandMatch[2] || '').trim();
+
+            if (command === 'manager' || command === 'ai') {
+                const mode = command === 'manager' ? 'MANAGER' : 'AI';
+                const previousMode = getClient(clientId).mode;
+                setClientMode(clientId, mode);
+
+                const notice = mode === 'MANAGER'
+                    ? '👤 Далее с вами будет общаться менеджер MLK.'
+                    : '🤖 К диалогу снова подключился Дмитрий, AI-консультант MLK. Продолжим!';
+
+                if (previousMode !== mode) {
+                    await sendTelegramMessage(clientId, notice);
+                    await mirrorToAdmin(clientId, 'system', notice);
+                }
+
+                log(`🔀 Telegram Business mode changed: ${clientId} -> ${mode}`);
+                return;
+            }
+
+            if (command === 'ask') {
+                if (!argument) {
+                    if (ADMIN_CHAT_ID) {
+                        await sendTelegramMessage(ADMIN_CHAT_ID, 'Укажите вопрос после команды: /ask текст вопроса');
+                    }
+                    return;
+                }
+
+                if (!ADMIN_CHAT_ID) {
+                    error('❌ /ask cannot reply: ADMIN_CHAT_ID is not configured');
+                    return;
+                }
+
+                const state = getSalesState(clientId);
+                const summary = buildManagerSummary(state);
+                const recentHistory = (Array.isArray(state.history) ? state.history : [])
+                    .slice(-30)
+                    .map(item => {
+                        const speaker = item.sender === 'manager'
+                            ? 'Менеджер MLK'
+                            : item.role === 'user'
+                                ? 'Клиент'
+                                : 'Дмитрий';
+                        return `${speaker}: ${item.content}`;
+                    })
+                    .join('\n');
+
+                const prompt = [
+                    'Ты — внутренний AI-помощник менеджера MLK.',
+                    'Отвечай только менеджеру. Не отправляй ответ клиенту.',
+                    'Используй сохранённую заявку и историю именно этого клиента.',
+                    'Если информации недостаточно, прямо скажи об этом и ничего не выдумывай.',
+                    '',
+                    'КЛИЕНТ:', clientId,
+                    '',
+                    'ТЕКУЩАЯ ЗАЯВКА:', summary || 'Сводка заявки отсутствует.',
+                    '',
+                    'ИСТОРИЯ ПЕРЕПИСКИ:', recentHistory || 'История пока пуста.',
+                    '',
+                    'ВОПРОС МЕНЕДЖЕРА:', argument
+                ].join('\n');
+
+                try {
+                    const answer = await askDeepSeek(prompt);
+                    await sendTelegramMessage(
+                        ADMIN_CHAT_ID,
+                        `🧠 Дмитрий — внутренний ответ по клиенту ${clientId}:\n\n${answer}`
+                    );
+                } catch (e) {
+                    error('Business /ask error:', e.message);
+                    await sendTelegramMessage(ADMIN_CHAT_ID, `Не удалось получить ответ Дмитрия: ${e.message}`);
+                }
+
+                log(`🧠 Business /ask processed for ${clientId}`);
+                return;
+            }
         }
+
+        // Обычное ручное сообщение менеджера: переводим клиента в MANAGER,
+        // сохраняем его текст и показываем в административной истории.
+        setClientMode(clientId, 'MANAGER');
+        await recordExternalMessage(clientId, 'assistant', messageText, {
+            source: 'telegram_business',
+            sender: 'manager'
+        });
+        log(`👤 Telegram Business manager message recorded: ${clientId}`);
+        await mirrorToAdmin(clientId, 'manager', messageText);
         return;
     }
 
@@ -3584,6 +3670,14 @@ async function mirrorToAdmin(
     }
 }
 
+// Business messages are sent from the company's account, so identify the AI author in text.
+function formatClientFacingAiText(clientId, text) {
+    const value = String(text || '').trim();
+    if (!value || !String(clientId).startsWith('business:')) return value;
+    if (/\bЯ Дмитрий\b|^Дмитрий[,—]/i.test(value)) return value;
+    return `🤖 Дмитрий, AI-консультант MLK:\n\n${value}`;
+}
+
 // ============================================================
 // 13. TELEGRAM CLIENT MESSAGE
 // ============================================================
@@ -3782,7 +3876,7 @@ async function processTelegramClientMessage(
 
         await sendTelegramMessage(
             clientId,
-            answer,
+            formatClientFacingAiText(clientId, answer),
             replyMarkup
                 ? {
                     reply_markup: replyMarkup
@@ -4323,7 +4417,7 @@ async function processTelegramCallback(
 
                 await sendTelegramMessage(
                     clientId,
-                    result?.text || '',
+                    formatClientFacingAiText(clientId, result?.text || ''),
 
                     replyMarkup
                         ? {
@@ -4404,7 +4498,7 @@ async function processTelegramCallback(
 
             await sendTelegramMessage(
                 clientId,
-                result?.text || '',
+                formatClientFacingAiText(clientId, result?.text || ''),
 
                 replyMarkup
                     ? {
@@ -4757,7 +4851,7 @@ async function processTelegramCallback(
 
                 await sendTelegramMessage(
                     clientId,
-                    result?.text || '',
+                    formatClientFacingAiText(clientId, result?.text || ''),
 
                     replyMarkup
                         ? {
@@ -4828,7 +4922,7 @@ async function processTelegramCallback(
 
             await sendTelegramMessage(
                 clientId,
-                result?.text || '',
+                formatClientFacingAiText(clientId, result?.text || ''),
                 replyMarkup
                     ? {
                         reply_markup:
