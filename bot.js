@@ -40,7 +40,8 @@ const path = require('path');
 const crypto = require('crypto');
 
 const {
-    processSalesMessage
+    processSalesMessage,
+    processBusinessMessage
 } = require('./sales.js');
 
 const {
@@ -1304,6 +1305,20 @@ async function sendTelegramTyping(
             e.message
         );
     }
+}
+
+function addClientSpeakerSignature(text, mode) {
+
+    const message = String(text || '').trim();
+    if (!message) return message;
+
+    const signature = mode === 'MANAGER'
+        ? 'Специалист MLK'
+        : 'Дмитрий — AI-консультант MLK';
+
+    if (message.endsWith(signature)) return message;
+
+    return `${message}\n\n${signature}`;
 }
 
 async function sendTelegramMessage(
@@ -3708,11 +3723,11 @@ async function processTelegramClientMessage(
             clientId
         );
 
-        const result =
-            await processSalesMessage(
-                clientId,
-                salesInput
-            );
+        // Telegram Business uses its dedicated application-flow handler.
+        // Ordinary Telegram chats keep the existing Sales Engine path.
+        const result = clientId.startsWith('business:')
+            ? await processBusinessMessage(clientId, salesInput)
+            : await processSalesMessage(clientId, salesInput);
 
         const answer =
             String(result?.text || '').trim();
@@ -3730,6 +3745,13 @@ async function processTelegramClientMessage(
             `intent=${result?.intent || ''}`
         );
 
+        // A manager may take over while DeepSeek is processing.
+        // Re-check immediately before sending to avoid a late AI reply.
+        if (getClient(clientId).mode === 'MANAGER') {
+            log('⏸ AI response discarded: MANAGER mode became active during processing');
+            return;
+        }
+
         const replyMarkup =
             buildTelegramReplyMarkup(
                 result?.actions
@@ -3737,7 +3759,7 @@ async function processTelegramClientMessage(
 
         await sendTelegramMessage(
             clientId,
-            answer,
+            addClientSpeakerSignature(answer, 'AI'),
             replyMarkup
                 ? {
                     reply_markup: replyMarkup
@@ -3776,14 +3798,14 @@ async function processTelegramClientMessage(
             e.message
         );
 
-        await sendTelegramMessage(
-            clientId,
-            'Извините, произошла ошибка. Сейчас подключу менеджера.'
-        );
-
         setClientMode(
             clientId,
             'MANAGER'
+        );
+
+        await sendTelegramMessage(
+            clientId,
+            'Диалог передан специалисту MLK.'
         );
     }
 }
@@ -3940,7 +3962,7 @@ async function processTelegramAdminMessage(
 
     await sendTelegramMessage(
         clientId,
-        text
+        addClientSpeakerSignature(text, 'MANAGER')
     );
 
     try {
@@ -4109,6 +4131,15 @@ async function processTelegramCallback(
             return;
         }
 
+        // Old inline keyboards can remain visible after manager takeover.
+        // Never allow their callbacks to mutate the Sales Engine in MANAGER mode.
+        if (getClient(clientId).mode === 'MANAGER') {
+            await answerTelegramCallback(
+                callbackQuery.id,
+                'Диалог сейчас ведёт менеджер'
+            );
+            return;
+        }
 
         // ----------------------------------------------------
         // EQUIPMENT MULTI-SELECT
@@ -4278,7 +4309,7 @@ async function processTelegramCallback(
 
                 await sendTelegramMessage(
                     clientId,
-                    result?.text || '',
+                    addClientSpeakerSignature(result?.text || '', 'AI'),
 
                     replyMarkup
                         ? {
@@ -4359,7 +4390,7 @@ async function processTelegramCallback(
 
             await sendTelegramMessage(
                 clientId,
-                result?.text || '',
+                addClientSpeakerSignature(result?.text || '', 'AI'),
 
                 replyMarkup
                     ? {
@@ -4712,7 +4743,7 @@ async function processTelegramCallback(
 
                 await sendTelegramMessage(
                     clientId,
-                    result?.text || '',
+                    addClientSpeakerSignature(result?.text || '', 'AI'),
 
                     replyMarkup
                         ? {
@@ -4783,7 +4814,7 @@ async function processTelegramCallback(
 
             await sendTelegramMessage(
                 clientId,
-                result?.text || '',
+                addClientSpeakerSignature(result?.text || '', 'AI'),
                 replyMarkup
                     ? {
                         reply_markup:
@@ -4847,8 +4878,13 @@ async function processTelegramCallback(
         );
 
         await sendTelegramMessage(
+            clientId,
+            'Диалог передан специалисту MLK.'
+        );
+
+        await sendTelegramMessage(
             callbackChatId,
-            `👤 MANAGER для ${clientId}`
+            `MANAGER включён для ${clientId}`
         );
 
     } else if (action === 'ai') {
@@ -4864,8 +4900,13 @@ async function processTelegramCallback(
         );
 
         await sendTelegramMessage(
+            clientId,
+            'К диалогу снова подключился Дмитрий, AI-консультант MLK.'
+        );
+
+        await sendTelegramMessage(
             callbackChatId,
-            `🤖 AI для ${clientId}`
+            `AI включён для ${clientId}`
         );
     }
 }
