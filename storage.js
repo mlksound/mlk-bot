@@ -74,6 +74,25 @@ async function initStorage() {
                     )
                 `);
 
+                // Telegram Business connection lifecycle and client routing.
+                await db.execute(`
+                    CREATE TABLE IF NOT EXISTS telegram_business_connections (
+                        connection_id TEXT PRIMARY KEY,
+                        connection_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                `);
+
+                await db.execute(`
+                    CREATE TABLE IF NOT EXISTS telegram_business_routes (
+                        client_id TEXT PRIMARY KEY,
+                        connection_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL,
+                        route_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                `);
+
             })();
     }
 
@@ -280,6 +299,106 @@ async function saveBitrixAuth(auth) {
 
 
 // ============================================================
+// TELEGRAM BUSINESS STORAGE
+// ============================================================
+
+async function saveTelegramBusinessConnection(connection) {
+
+    if (!connection?.id) {
+        throw new Error('Cannot save Telegram Business connection without id');
+    }
+
+    await initStorage();
+    const db = getTursoClient();
+    const updatedAt = new Date().toISOString();
+
+    await db.execute({
+        sql: `
+            INSERT INTO telegram_business_connections (
+                connection_id, connection_json, updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(connection_id)
+            DO UPDATE SET
+                connection_json = excluded.connection_json,
+                updated_at = excluded.updated_at
+        `,
+        args: [String(connection.id), JSON.stringify(connection), updatedAt]
+    });
+
+    return true;
+}
+
+async function loadTelegramBusinessConnections() {
+
+    await initStorage();
+    const db = getTursoClient();
+    const result = await db.execute(`
+        SELECT connection_json
+        FROM telegram_business_connections
+    `);
+
+    return (result.rows || []).map(row => {
+        try { return JSON.parse(String(row.connection_json)); }
+        catch (error) {
+            throw new Error(`Invalid Telegram Business connection JSON: ${error.message}`);
+        }
+    });
+}
+
+async function saveTelegramBusinessRoute(route) {
+
+    if (!route?.clientId || !route?.connectionId || !route?.chatId) {
+        throw new Error('Cannot save incomplete Telegram Business route');
+    }
+
+    await initStorage();
+    const db = getTursoClient();
+    const updatedAt = route.updatedAt || new Date().toISOString();
+    route.updatedAt = updatedAt;
+
+    await db.execute({
+        sql: `
+            INSERT INTO telegram_business_routes (
+                client_id, connection_id, chat_id, route_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(client_id)
+            DO UPDATE SET
+                connection_id = excluded.connection_id,
+                chat_id = excluded.chat_id,
+                route_json = excluded.route_json,
+                updated_at = excluded.updated_at
+        `,
+        args: [
+            String(route.clientId),
+            String(route.connectionId),
+            String(route.chatId),
+            JSON.stringify(route),
+            updatedAt
+        ]
+    });
+
+    return true;
+}
+
+async function loadTelegramBusinessRoutes() {
+
+    await initStorage();
+    const db = getTursoClient();
+    const result = await db.execute(`
+        SELECT route_json
+        FROM telegram_business_routes
+    `);
+
+    return (result.rows || []).map(row => {
+        try { return JSON.parse(String(row.route_json)); }
+        catch (error) {
+            throw new Error(`Invalid Telegram Business route JSON: ${error.message}`);
+        }
+    });
+}
+
+
+// ============================================================
 // CONNECTION TEST
 // ============================================================
 
@@ -328,6 +447,11 @@ module.exports = {
     loadBitrixAuth,
 
     saveBitrixAuth,
+
+    loadTelegramBusinessConnections,
+    saveTelegramBusinessConnection,
+    loadTelegramBusinessRoutes,
+    saveTelegramBusinessRoute,
 
     testTursoConnection
 

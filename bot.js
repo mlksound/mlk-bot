@@ -46,7 +46,11 @@ const {
 const {
     initStorage,
     loadBitrixAuth,
-    saveBitrixAuth
+    saveBitrixAuth,
+    loadTelegramBusinessConnections,
+    saveTelegramBusinessConnection,
+    loadTelegramBusinessRoutes,
+    saveTelegramBusinessRoute
 } = require('./storage.js');
 
 // ============================================================
@@ -1113,6 +1117,164 @@ async function telegramCall(
 }
 
 // ============================================================
+// TELEGRAM BUSINESS ROUTING
+// ============================================================
+
+// Business chats use a separate internal clientId namespace:
+// business:<connection_id>:<telegram_chat_id>
+// This keeps their Sales Engine state and AI/MANAGER mode separate
+// from the ordinary Telegram bot flow.
+const telegramBusinessConnections = new Map();
+const telegramBusinessRoutes = new Map();
+
+function resolveTelegramTarget(clientId) {
+
+    const key = String(clientId || '');
+
+    if (!key.startsWith('business:')) {
+        return {
+            chatId: key,
+            businessConnectionId: null
+        };
+    }
+
+    const route = telegramBusinessRoutes.get(key);
+
+    if (!route) {
+        throw new Error(`Telegram Business route not found for ${key}`);
+    }
+
+    const connection =
+        telegramBusinessConnections.get(String(route.connectionId || ''));
+
+    if (!connection || connection.is_enabled !== true) {
+        throw new Error('Telegram Business connection is disabled or unavailable');
+    }
+
+    if (connection.rights?.can_reply !== true) {
+        throw new Error('Telegram Business connection has no can_reply permission');
+    }
+
+    return {
+        chatId: String(route.chatId),
+        businessConnectionId: String(route.connectionId)
+    };
+}
+
+async function restoreTelegramBusinessStorage() {
+
+    const [connections, routes] = await Promise.all([
+        loadTelegramBusinessConnections(),
+        loadTelegramBusinessRoutes()
+    ]);
+
+    telegramBusinessConnections.clear();
+    telegramBusinessRoutes.clear();
+
+    for (const connection of connections || []) {
+        if (connection?.id) {
+            telegramBusinessConnections.set(String(connection.id), connection);
+        }
+    }
+
+    for (const route of routes || []) {
+        if (route?.clientId && route?.connectionId && route?.chatId) {
+            telegramBusinessRoutes.set(String(route.clientId), route);
+        }
+    }
+
+    log('📥 Telegram Business storage restored:', {
+        connections: telegramBusinessConnections.size,
+        routes: telegramBusinessRoutes.size
+    });
+}
+
+async function processTelegramBusinessConnection(connection) {
+
+    if (!connection?.id) {
+        return;
+    }
+
+    const normalized = {
+        ...connection,
+        id: String(connection.id)
+    };
+
+    await saveTelegramBusinessConnection(normalized);
+    telegramBusinessConnections.set(normalized.id, normalized);
+
+    log('🔗 Telegram Business connection updated:', {
+        id: normalized.id,
+        enabled: normalized.is_enabled === true,
+        canReply: normalized.rights?.can_reply
+    });
+}
+
+async function processTelegramBusinessMessage(message) {
+
+    const connectionId =
+        String(message?.business_connection_id || '');
+
+    const chatId =
+        String(message?.chat?.id || '');
+
+    if (!connectionId || !chatId) {
+        warn('⚠️ Business message skipped: missing connection_id or chat.id');
+        return;
+    }
+
+    let connection = telegramBusinessConnections.get(connectionId);
+
+    // A connection update normally arrives first. Fetch it once as a safe
+    // recovery path if Render restarted between updates.
+    if (!connection) {
+        const result = await telegramCall('getBusinessConnection', {
+            business_connection_id: connectionId
+        });
+        connection = result?.result || null;
+        if (connection?.id) {
+            await processTelegramBusinessConnection(connection);
+        }
+    }
+
+    if (!connection || connection.is_enabled !== true) {
+        warn('⚠️ Business message ignored: connection is not enabled');
+        return;
+    }
+
+    if (connection.rights?.can_reply !== true) {
+        warn('⚠️ Business message ignored: connection has no can_reply permission');
+        return;
+    }
+
+    // Do not answer messages sent by the business account itself or by this bot.
+    if (
+        message.sender_business_bot ||
+        (connection.user?.id && message.from?.id === connection.user.id)
+    ) {
+        log('↩️ Telegram Business outgoing message skipped');
+        return;
+    }
+
+    const clientId = `business:${connectionId}:${chatId}`;
+    const route = {
+        clientId,
+        connectionId,
+        chatId,
+        user: message.from || null,
+        chat: message.chat || null,
+        updatedAt: new Date().toISOString()
+    };
+
+    await saveTelegramBusinessRoute(route);
+    telegramBusinessRoutes.set(clientId, route);
+
+    log(`📨 Telegram Business client ${clientId}: ${message.text || message.caption || '[MEDIA]'}`);
+
+    await processTelegramClientMessage(message, { clientId });
+}
+
+// ============================================================
 // TYPING ACTION
 // ============================================================
 
@@ -1122,14 +1284,16 @@ async function sendTelegramTyping(
 
     try {
 
+        const target = resolveTelegramTarget(chatId);
+
         await telegramCall(
             'sendChatAction',
             {
-                chat_id:
-                    String(chatId),
-
-                action:
-                    'typing'
+                chat_id: target.chatId,
+                ...(target.businessConnectionId
+                    ? { business_connection_id: target.businessConnectionId }
+                    : {}),
+                action: 'typing'
             }
         );
 
@@ -1162,6 +1326,8 @@ async function sendTelegramMessage(
         );
     }
 
+    const target = resolveTelegramTarget(chatId);
+
     let last = null;
 
     for (const chunk of chunks) {
@@ -1170,9 +1336,12 @@ async function sendTelegramMessage(
             await telegramCall(
                 'sendMessage',
                 {
-                    chat_id: chatId,
+                    chat_id: target.chatId,
                     text: chunk,
-                    ...extra
+                    ...extra,
+                    ...(target.businessConnectionId
+                        ? { business_connection_id: target.businessConnectionId }
+                        : {})
                 }
             );
     }
@@ -1847,6 +2016,13 @@ async function editTelegramMessageReplyMarkup(
             message_id:
                 messageId,
 
+            ...(callbackQuery?.message?.business_connection_id
+                ? {
+                    business_connection_id:
+                        callbackQuery.message.business_connection_id
+                }
+                : {}),
+
             reply_markup:
                 replyMarkup
         }
@@ -2168,6 +2344,8 @@ async function sendTelegramFile(
         );
     }
 
+    const target = resolveTelegramTarget(chatId);
+
     const lowerName =
         String(fileName || 'file')
             .toLowerCase();
@@ -2257,8 +2435,15 @@ async function sendTelegramFile(
 
     form.append(
         'chat_id',
-        String(chatId)
+        target.chatId
     );
+
+    if (target.businessConnectionId) {
+        form.append(
+            'business_connection_id',
+            target.businessConnectionId
+        );
+    }
 
     form.append(
         telegramField,
@@ -3364,7 +3549,8 @@ async function mirrorToAdmin(
 // ============================================================
 
 async function processTelegramClientMessage(
-    message
+    message,
+    options = {}
 ) {
 
     if (
@@ -3374,7 +3560,7 @@ async function processTelegramClientMessage(
     }
 
     const clientId =
-        String(message.chat.id);
+        String(options.clientId || message.chat.id);
 
     const text =
         String(
@@ -3843,13 +4029,15 @@ async function processTelegramCallback(
         const salesAction =
             parts[1];
 
-        const clientId =
-            String(
-                callbackQuery
-                    .message
-                    ?.chat
-                    ?.id
-            );
+        const callbackChatId =
+            String(callbackQuery.message?.chat?.id || '');
+
+        const callbackBusinessConnectionId =
+            String(callbackQuery.message?.business_connection_id || '');
+
+        const clientId = callbackBusinessConnectionId
+            ? `business:${callbackBusinessConnectionId}:${callbackChatId}`
+            : callbackChatId;
 
         if (
             !clientId ||
@@ -4649,7 +4837,9 @@ async function telegramPoll() {
                         allowed_updates:
                             [
                                 'message',
-                                'callback_query'
+                                'callback_query',
+                                'business_connection',
+                                'business_message'
                             ]
                     }
                 );
@@ -4677,6 +4867,22 @@ async function telegramPoll() {
 
                         await processTelegramCallback(
                             update.callback_query
+                        );
+
+                    } else if (
+                        update.business_connection
+                    ) {
+
+                        await processTelegramBusinessConnection(
+                            update.business_connection
+                        );
+
+                    } else if (
+                        update.business_message
+                    ) {
+
+                        await processTelegramBusinessMessage(
+                            update.business_message
                         );
 
                     } else if (
@@ -7157,6 +7363,7 @@ async function startup() {
     // При недоступности Turso не продолжаем работу с потенциально устаревшими токенами.
     log('🗄️ Initializing Turso storage...');
     await initStorage();
+    await restoreTelegramBusinessStorage();
     bitrixAuth = await loadBitrixAuthWithMigration();
 
     log(
