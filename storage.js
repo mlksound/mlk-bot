@@ -93,6 +93,14 @@ async function initStorage() {
                     )
                 `);
 
+                await db.execute(`
+                    CREATE TABLE IF NOT EXISTS client_modes (
+                        client_id TEXT PRIMARY KEY,
+                        mode TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                `);
+
             })();
     }
 
@@ -398,6 +406,50 @@ async function loadTelegramBusinessRoutes() {
 }
 
 
+async function saveClientMode(clientId, mode) {
+
+    const key = String(clientId || '').trim();
+    const normalizedMode = mode === 'MANAGER' ? 'MANAGER' : 'AI';
+
+    if (!key) {
+        throw new Error('Cannot save client mode without clientId');
+    }
+
+    await initStorage();
+    const db = getTursoClient();
+    const updatedAt = new Date().toISOString();
+
+    await db.execute({
+        sql: `
+            INSERT INTO client_modes (client_id, mode, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(client_id)
+            DO UPDATE SET
+                mode = excluded.mode,
+                updated_at = excluded.updated_at
+        `,
+        args: [key, normalizedMode, updatedAt]
+    });
+
+    return true;
+}
+
+async function loadClientModes() {
+
+    await initStorage();
+    const db = getTursoClient();
+    const result = await db.execute(`
+        SELECT client_id, mode
+        FROM client_modes
+    `);
+
+    return (result.rows || []).map(row => ({
+        clientId: String(row.client_id),
+        mode: row.mode === 'MANAGER' ? 'MANAGER' : 'AI'
+    }));
+}
+
+
 // ============================================================
 // CONNECTION TEST
 // ============================================================
@@ -452,6 +504,9 @@ module.exports = {
     saveTelegramBusinessConnection,
     loadTelegramBusinessRoutes,
     saveTelegramBusinessRoute,
+
+    loadClientModes,
+    saveClientMode,
 
     testTursoConnection
 

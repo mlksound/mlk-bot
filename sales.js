@@ -6065,7 +6065,8 @@ async function processStart(
     // Случайный /start не должен стирать собранную заявку.
     if (
         !options.force &&
-        hasApplicationProgress(existing)
+        hasApplicationProgress(existing) &&
+        existing.confirmation?.status !== 'confirmed'
     ) {
 
         const text =
@@ -6101,11 +6102,19 @@ async function processStart(
         };
     }
 
+    const previousHistory = Array.isArray(existing.history)
+        ? existing.history.slice()
+        : [];
+
     const state =
         resetSalesClient(
             clientId,
             clientName
         );
+
+    // Новая заявка получает чистые проектные поля, но история общения
+    // с клиентом сохраняется и остаётся доступной Дмитрию и менеджеру.
+    state.history = previousHistory.slice(-MAX_HISTORY);
 
 
     const text =
@@ -8693,6 +8702,56 @@ function processStartQueued(clientId, clientName = '', options = {}) {
     return runInClientQueue(clientId, () => processStart(clientId, clientName, options));
 }
 
+function processBusinessMessage(clientId, message = {}) {
+    return runInClientQueue(clientId, async () => {
+        const clientName = String(message.clientName || '');
+        const state = await hydrateSalesState(clientId, clientName);
+        ensureStateExtras(state);
+
+        const hasProgress = hasApplicationProgress(state);
+        const isConfirmed = state.confirmation?.status === 'confirmed';
+
+        // Незавершённая заявка: сначала явно спрашиваем, продолжить её или начать новую.
+        if (hasProgress && !isConfirmed && !state.pendingRestart) {
+            const incomingText = String(message.text || message.caption || '').trim();
+            if (incomingText) {
+                addHistory(state, 'user', incomingText, {
+                    source: 'telegram_business',
+                    sender: 'client'
+                });
+            }
+            return await processStart(clientId, clientName);
+        }
+
+        // Завершённая заявка: начинаем новую, сохраняя прежнюю историю.
+        // Приветствие и ответ на первое сообщение объединяются в один ответ.
+        if (hasProgress && isConfirmed) {
+            const startResult = await processStart(clientId, clientName);
+            const result = await processSalesMessageInner(clientId, message);
+            if (startResult?.text) {
+                result.text = `${startResult.text}\n\n${result.text || ''}`.trim();
+            }
+            return result;
+        }
+
+        // Новый клиент или обычное продолжение диалога.
+        return await processSalesMessageInner(clientId, message);
+    });
+}
+
+function recordExternalMessage(clientId, role, content, meta = {}) {
+    return runInClientQueue(clientId, async () => {
+        const state = await hydrateSalesState(clientId, meta.clientName || '');
+        addHistory(state, role === 'user' ? 'user' : 'assistant', content, {
+            source: meta.source || 'external',
+            sender: meta.sender || (role === 'user' ? 'client' : 'manager')
+        });
+        state.updatedAt = new Date().toISOString();
+        await persistSalesState(state);
+        return true;
+    });
+}
+
 
 // ============================================================
 // EXPORTS
@@ -8702,7 +8761,11 @@ module.exports = {
 
     processSalesMessage,
 
+    processBusinessMessage,
+
     processStart: processStartQueued,
+
+    recordExternalMessage,
 
     getSalesState,
 
