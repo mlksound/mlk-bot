@@ -1248,16 +1248,42 @@ async function processTelegramBusinessMessage(message) {
         return;
     }
 
-    // Do not answer messages sent by the business account itself or by this bot.
-    if (
-        message.sender_business_bot ||
-        (connection.user?.id && message.from?.id === connection.user.id)
-    ) {
-        log('↩️ Telegram Business outgoing message skipped');
+    // Messages sent by the connected bot itself must not trigger another AI reply.
+    if (message.sender_business_bot) {
+        log('↩️ Telegram Business bot message skipped');
         return;
     }
 
     const clientId = `business:${connectionId}:${chatId}`;
+
+    // A message sent manually by the Business account owner means that a
+    // specialist has taken over this conversation directly in Telegram.
+    // Switch this client to MANAGER and notify the customer once. The manual
+    // message itself is already delivered by Telegram, so do not send it again.
+    if (
+        connection.user?.id &&
+        String(message.from?.id || '') === String(connection.user.id)
+    ) {
+        const client = getClient(clientId);
+
+        if (client.mode !== 'MANAGER') {
+            setClientMode(clientId, 'MANAGER');
+            log(`👤 Business owner took over conversation: ${clientId}`);
+
+            try {
+                await sendTelegramMessage(
+                    clientId,
+                    'Диалог передан специалисту MLK.'
+                );
+            } catch (e) {
+                error('Business manager takeover notice error:', e.message);
+            }
+        } else {
+            log(`👤 Manual Business message received in MANAGER mode: ${clientId}`);
+        }
+
+        return;
+    }
     const route = {
         clientId,
         connectionId,
@@ -1305,20 +1331,6 @@ async function sendTelegramTyping(
             e.message
         );
     }
-}
-
-function addClientSpeakerSignature(text, mode) {
-
-    const message = String(text || '').trim();
-    if (!message) return message;
-
-    const signature = mode === 'MANAGER'
-        ? 'Специалист MLK'
-        : 'Дмитрий — AI-консультант MLK';
-
-    if (message.endsWith(signature)) return message;
-
-    return `${message}\n\n${signature}`;
 }
 
 async function sendTelegramMessage(
@@ -3759,7 +3771,7 @@ async function processTelegramClientMessage(
 
         await sendTelegramMessage(
             clientId,
-            addClientSpeakerSignature(answer, 'AI'),
+            answer,
             replyMarkup
                 ? {
                     reply_markup: replyMarkup
@@ -3962,7 +3974,7 @@ async function processTelegramAdminMessage(
 
     await sendTelegramMessage(
         clientId,
-        addClientSpeakerSignature(text, 'MANAGER')
+        text
     );
 
     try {
@@ -4309,7 +4321,7 @@ async function processTelegramCallback(
 
                 await sendTelegramMessage(
                     clientId,
-                    addClientSpeakerSignature(result?.text || '', 'AI'),
+                    String(result?.text || '').trim(),
 
                     replyMarkup
                         ? {
@@ -4390,7 +4402,7 @@ async function processTelegramCallback(
 
             await sendTelegramMessage(
                 clientId,
-                addClientSpeakerSignature(result?.text || '', 'AI'),
+                String(result?.text || '').trim(),
 
                 replyMarkup
                     ? {
@@ -4743,7 +4755,7 @@ async function processTelegramCallback(
 
                 await sendTelegramMessage(
                     clientId,
-                    addClientSpeakerSignature(result?.text || '', 'AI'),
+                    String(result?.text || '').trim(),
 
                     replyMarkup
                         ? {
@@ -4814,7 +4826,7 @@ async function processTelegramCallback(
 
             await sendTelegramMessage(
                 clientId,
-                addClientSpeakerSignature(result?.text || '', 'AI'),
+                String(result?.text || '').trim(),
                 replyMarkup
                     ? {
                         reply_markup:
