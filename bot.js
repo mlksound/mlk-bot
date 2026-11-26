@@ -3796,14 +3796,6 @@ async function processTelegramAdminMessage(
     message
 ) {
 
-    if (
-        !ADMIN_CHAT_ID ||
-        String(message.chat.id) !==
-            String(ADMIN_CHAT_ID)
-    ) {
-        return;
-    }
-
     const text =
         String(message.text || '').trim();
 
@@ -3822,10 +3814,10 @@ async function processTelegramAdminMessage(
 
         if (
             !senderId ||
-            senderId !== String(ADMIN_CHAT_ID) ||
-            message.chat?.type !== 'private'
+            message.chat?.type !== 'private' ||
+            String(message.chat?.id || '') !== senderId
         ) {
-            warn('⚠️ Business management link rejected: sender is not the configured admin');
+            warn('⚠️ Business management link rejected: not a private self-chat');
             return;
         }
 
@@ -3843,7 +3835,7 @@ async function processTelegramAdminMessage(
 
         if (!route?.clientId) {
             await sendTelegramMessage(
-                ADMIN_CHAT_ID,
+                message.chat.id,
                 'Не удалось найти активный диалог для управления.\n\nУбедись, что клиент уже писал в Business-чат и что бот подключён к этому чату.'
             );
             return;
@@ -3858,7 +3850,7 @@ async function processTelegramAdminMessage(
             : '🤖 Сейчас отвечает Дмитрий';
 
         await sendTelegramMessage(
-            ADMIN_CHAT_ID,
+            message.chat.id,
             `Управление диалогом\n\nКлиент: ${clientName}\nTelegram ID: ${managedChatId}\n${modeLabel}\n\nВыбери действие:`,
             {
                 reply_markup: {
@@ -3871,6 +3863,14 @@ async function processTelegramAdminMessage(
         );
 
         log('🎛️ Business management panel opened:', route.clientId);
+        return;
+    }
+
+    // Legacy text commands and replies remain restricted to the configured admin chat.
+    if (
+        !ADMIN_CHAT_ID ||
+        String(message.chat.id) !== String(ADMIN_CHAT_ID)
+    ) {
         return;
     }
 
@@ -4803,19 +4803,34 @@ async function processTelegramCallback(
     // ADMIN BUTTONS
     // --------------------------------------------------------
 
-    if (
-        !ADMIN_CHAT_ID ||
-        String(
-            callbackQuery.message?.chat?.id
-        ) !== String(ADMIN_CHAT_ID)
-    ) {
-        return;
-    }
-
     const clientId =
         parts.slice(1).join(':');
 
     if (!clientId) {
+        return;
+    }
+
+    // Management-panel callbacks are authorized against the owner of the
+    // Business connection for this exact client route, not ADMIN_CHAT_ID.
+    const businessRoute = telegramBusinessRoutes.get(clientId);
+    const businessConnection = businessRoute
+        ? telegramBusinessConnections.get(String(businessRoute.connectionId || ''))
+        : null;
+    const callbackSenderId = String(callbackQuery.from?.id || '');
+    const callbackChatId = String(callbackQuery.message?.chat?.id || '');
+    const isBusinessManagerPanel =
+        Boolean(businessRoute) &&
+        Boolean(callbackSenderId) &&
+        callbackChatId === callbackSenderId &&
+        businessConnection?.is_enabled === true &&
+        businessConnection.rights?.can_reply === true &&
+        String(businessConnection.user?.id || '') === callbackSenderId;
+
+    const isLegacyAdminPanel =
+        Boolean(ADMIN_CHAT_ID) && callbackChatId === String(ADMIN_CHAT_ID);
+
+    if (!isBusinessManagerPanel && !isLegacyAdminPanel) {
+        await answerTelegramCallback(callbackQuery.id, 'Нет доступа к управлению этим диалогом');
         return;
     }
 
@@ -4832,7 +4847,7 @@ async function processTelegramCallback(
         );
 
         await sendTelegramMessage(
-            ADMIN_CHAT_ID,
+            callbackChatId,
             `👤 MANAGER для ${clientId}`
         );
 
@@ -4849,7 +4864,7 @@ async function processTelegramCallback(
         );
 
         await sendTelegramMessage(
-            ADMIN_CHAT_ID,
+            callbackChatId,
             `🤖 AI для ${clientId}`
         );
     }
@@ -4955,21 +4970,27 @@ async function telegramPoll() {
                         const msg =
                             update.message;
 
-                        if (
+                        const isBusinessManagementStart =
+                            /^\/start(?:@\w+)?\s+bizChat-?\d+\s*$/i.test(
+                                String(msg.text || '').trim()
+                            );
+
+                        if (isBusinessManagementStart) {
+
+                            // Telegram delivers Manage Bot deep links to the manager's
+                            // private bot chat, which may differ from ADMIN_CHAT_ID.
+                            await processTelegramAdminMessage(msg);
+
+                        } else if (
                             ADMIN_CHAT_ID &&
-                            String(msg.chat.id) ===
-                                String(ADMIN_CHAT_ID)
+                            String(msg.chat.id) === String(ADMIN_CHAT_ID)
                         ) {
 
-                            await processTelegramAdminMessage(
-                                msg
-                            );
+                            await processTelegramAdminMessage(msg);
 
                         } else {
 
-                            await processTelegramClientMessage(
-                                msg
-                            );
+                            await processTelegramClientMessage(msg);
                         }
                     }
 
