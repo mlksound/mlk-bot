@@ -41,7 +41,8 @@ const crypto = require('crypto');
 
 const {
     processSalesMessage,
-    processBusinessMessage
+    processBusinessMessage,
+    recordExternalMessage
 } = require('./sales.js');
 
 const {
@@ -1282,6 +1283,19 @@ async function processTelegramBusinessMessage(message) {
             }
         } else {
             log(`👤 Manual Business message received in MANAGER mode: ${clientId}`);
+        }
+
+        // Сохраняем сообщение специалиста в общей истории Sales Engine.
+        // Само сообщение уже отправлено Telegram Business, повторно не пересылаем.
+        try {
+            await recordExternalMessage(
+                clientId,
+                'assistant',
+                String(message.text || message.caption || '[MEDIA]').trim(),
+                { source: 'telegram_business', sender: 'manager' }
+            );
+        } catch (e) {
+            error('Business manager history save error:', e.message);
         }
 
         return;
@@ -3643,6 +3657,34 @@ async function processTelegramClientMessage(
     const client =
         getClient(clientId);
 
+    // В режиме MANAGER сохраняем входящее сообщение клиента напрямую
+    // в историю Sales Engine, не запуская квалификацию и DeepSeek.
+    // В режиме AI запись выполнит обычный processSalesMessage/processBusinessMessage.
+    if (
+        clientId.startsWith('business:') &&
+        client.mode === 'MANAGER'
+    ) {
+        try {
+            const externalContent = text || (
+                telegramFiles.length
+                    ? `[MEDIA: ${telegramFiles.map(file => file.name || 'file').join(', ')}]`
+                    : '[MEDIA]'
+            );
+            await recordExternalMessage(
+                clientId,
+                'user',
+                externalContent,
+                {
+                    source: 'telegram_business',
+                    sender: 'client',
+                    clientName: message.from?.first_name || ''
+                }
+            );
+        } catch (e) {
+            error('Business client history save error:', e.message);
+        }
+    }
+
     client.name =
         message.from?.first_name || '';
 
@@ -4003,6 +4045,19 @@ async function processTelegramAdminMessage(
         clientId,
         'MANAGER'
     );
+
+    // Сообщение менеджера из административного чата также попадает
+    // в историю Sales Engine, чтобы Дмитрий видел договорённости после возврата AI.
+    try {
+        await recordExternalMessage(
+            clientId,
+            'assistant',
+            text,
+            { source: 'admin_chat', sender: 'manager' }
+        );
+    } catch (e) {
+        error('Admin manager history save error:', e.message);
+    }
 
     await sendTelegramMessage(
         clientId,
