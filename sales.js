@@ -8716,16 +8716,11 @@ function processBusinessMessage(clientId, message = {}) {
         // Явный запрос начать сначала обрабатывается внутри processSalesMessageInner:
         // там выставляется pendingRestart и запрашивается подтверждение.
 
-        // Завершённая заявка: начинаем новую, сохраняя прежнюю историю.
-        // Приветствие и ответ на первое сообщение объединяются в один ответ.
-        if (hasProgress && isConfirmed) {
-            const startResult = await processStart(clientId, clientName);
-            const result = await processSalesMessageInner(clientId, message);
-            if (startResult?.text) {
-                result.text = `${startResult.text}\n\n${result.text || ''}`.trim();
-            }
-            return result;
-        }
+        // Подтверждённая заявка остаётся активным контекстом диалога.
+        // Не запускаем новую заявку автоматически: клиент может обсуждать КП,
+        // задавать вопросы или уточнять уже собранные данные.
+        // Новую заявку/перезапуск начинаем только по явному запросу клиента,
+        // который обрабатывается внутри processSalesMessageInner.
 
         // Новый клиент или обычное продолжение диалога.
         return await processSalesMessageInner(clientId, message);
