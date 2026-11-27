@@ -51,7 +51,9 @@ const {
     loadTelegramBusinessConnections,
     saveTelegramBusinessConnection,
     loadTelegramBusinessRoutes,
-    saveTelegramBusinessRoute
+    saveTelegramBusinessRoute,
+    loadClientModes,
+    saveClientMode
 } = require('./storage.js');
 
 // ============================================================
@@ -2647,12 +2649,42 @@ function setClientMode(
     const client =
         getClient(clientId);
 
-    client.mode =
+    const normalizedMode =
         mode === 'MANAGER'
             ? 'MANAGER'
             : 'AI';
 
+    // Сначала обновляем память синхронно, чтобы текущий обработчик
+    // немедленно увидел новый режим, затем сохраняем его в Turso.
+    client.mode = normalizedMode;
+
+    saveClientMode(clientId, normalizedMode)
+        .catch(e => {
+            error(
+                '❌ Failed to persist client mode:',
+                String(clientId),
+                e.message
+            );
+        });
+
     return client;
+}
+
+async function restoreClientModes() {
+
+    const savedModes = await loadClientModes();
+
+    for (const item of savedModes || []) {
+        if (!item?.clientId) continue;
+
+        const client = getClient(item.clientId);
+        client.mode = item.mode === 'MANAGER' ? 'MANAGER' : 'AI';
+    }
+
+    log('📥 Client modes restored from Turso:', {
+        total: (savedModes || []).length,
+        manager: (savedModes || []).filter(item => item.mode === 'MANAGER').length
+    });
 }
 
 // ============================================================
@@ -7501,6 +7533,7 @@ async function startup() {
     log('🗄️ Initializing Turso storage...');
     await initStorage();
     await restoreTelegramBusinessStorage();
+    await restoreClientModes();
     bitrixAuth = await loadBitrixAuthWithMigration();
 
     log(

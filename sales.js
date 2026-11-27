@@ -8711,17 +8711,10 @@ function processBusinessMessage(clientId, message = {}) {
         const hasProgress = hasApplicationProgress(state);
         const isConfirmed = state.confirmation?.status === 'confirmed';
 
-        // Незавершённая заявка: сначала явно спрашиваем, продолжить её или начать новую.
-        if (hasProgress && !isConfirmed && !state.pendingRestart) {
-            const incomingText = String(message.text || message.caption || '').trim();
-            if (incomingText) {
-                addHistory(state, 'user', incomingText, {
-                    source: 'telegram_business',
-                    sender: 'client'
-                });
-            }
-            return await processStart(clientId, clientName);
-        }
+        // Незавершённую заявку продолжаем без повторного вопроса «продолжить или начать заново».
+        // Обычные вопросы клиента и ответы на текущий шаг обрабатывает Sales Engine.
+        // Явный запрос начать сначала обрабатывается внутри processSalesMessageInner:
+        // там выставляется pendingRestart и запрашивается подтверждение.
 
         // Завершённая заявка: начинаем новую, сохраняя прежнюю историю.
         // Приветствие и ответ на первое сообщение объединяются в один ответ.
