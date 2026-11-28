@@ -1224,8 +1224,17 @@ function inferEventTypeFromText(text) {
     ];
     const found = rules.find(rule => rule.re.test(value));
     if (!found) return null;
+    // Если клиент указал уточнение в скобках, сохраняем именно его,
+    // даже когда всё сообщение длиннее 70 символов.
+    const exhibitionDetail = found.category === 'exhibitions'
+        ? raw.match(/выставк[а-яё]*\s*\(([^)]{1,100})\)/i)
+        : null;
+    if (exhibitionDetail) {
+        return { category: found.category, original: exhibitionDetail[1].trim().slice(0, 120) };
+    }
+
     // Короткий ответ сохраняем дословно (например, «Стенд фирмы Комунарка»).
-    // В длинном сообщении сохраняем только распознанное название формата.
+    // В длинном сообщении сохраняем распознанное название формата.
     let original = raw;
     if (raw.length > 70 || /\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b/i.test(raw)) {
         const matchedTerm = raw.match(found.re);
@@ -5320,7 +5329,7 @@ function buildClientSummary(
     ) {
 
         lines.push(
-            `• Персонал: ${
+            `• Детали работы персонала: ${
                 displayProjectValue(
                     p.personnelDetails
                 )
@@ -7117,11 +7126,14 @@ const EDIT_RE = /^(?:да[,.\s]*)?(?:исправить|исправлю|исп�
 const NEW_APPLICATION_RE = /(?:нов(?:ую|ая)\s+заявк|ещ[её]\s+одн[ауе]?\s+заявк|другую\s+заявк|созда(?:ть|дим)\s+(?:новую|другую|ещ[её]\s+одну)\s+заявк|оформ(?:ить|им)\s+(?:новую|другую|ещ[её]\s+одну)\s+заявк)/i;
 
 // Клиент просит именно перезапустить/сбросить текущую заявку.
-const RESTART_RE = /(?:начать\s+(?:всё\s+|все\s+)?заново|начни(?:те)?\s+заново|начинай(?:те)?\s+заново|начать\s+с\s+(?:самого\s+начала|нуля)|давай(?:те)?\s+(?:вообще\s+)?(?:с\s+самого\s+начала|сначала|заново))/i;
+const RESTART_RE = /(?:начать\s+(?:всё\s+|все\s+)?заново|начни(?:те)?\s+заново|начинай(?:те)?\s+заново|начинаем\s+заново|начать\s+с\s+(?:самого\s+начала|нуля)|давай(?:те)?\s+(?:вообще\s+)?(?:с\s+самого\s+начала|сначала|заново)|давайте\s+начн[её]м\s+(?:сначала|заново))/i;
 
 // Ответ на вопрос «продолжить или начать заново?»: здесь можно трактовать шире.
 const RESTART_ANSWER_RE = /(?<![а-яё])(?:нов[а-яё]*|заново|сначала|с\s+самого\s+начала|с\s+нуля|сброс[а-яё]*|очисти[а-яё]*)/i;
 const CONTINUE_RE = /(?:продолж[а-яё]*|оставь(?:те)?\s+(?:как\s+есть|всё)|не\s+(?:надо|нужно)\s+(?:заново|сбрасывать))/i;
+
+// Просьба восстановить именно предыдущую/старую заявку. Не срабатывает на обычные вопросы по текущей заявке.
+const RESTORE_OLD_APPLICATION_RE = /(?:вернут[а-яё]*\s+(?:к\s+)?(?:стар[а-яё]*|предыдущ[а-яё]*|прошл[а-яё]*)\s+заявк|восстанов[а-яё]*.{0,35}(?:стар[а-яё]*|предыдущ[а-яё]*|прошл[а-яё]*|заявк)|откро[йи]\s+(?:стар[а-яё]*|предыдущ[а-яё]*|прошл[а-яё]*)\s+заявк|продолж[а-яё]*\s+(?:стар[а-яё]*|предыдущ[а-яё]*|прошл[а-яё]*)\s+заявк|найти\s+(?:стар[а-яё]*|предыдущ[а-яё]*|прошл[а-яё]*)\s+заявк|заявк[ауе]?\s+номер\s+[A-ZА-Я0-9/-]+)/i;
 
 // Название блока при исправлении: «дату начала и готовность», «адрес», «монтаж».
 const EDIT_BLOCK_KEYWORDS = [
@@ -7615,6 +7627,30 @@ addHistory(
             userText
         );
 
+        // В текущей архитектуре хранится только одна запись заявки на клиента.
+        // Не изображаем восстановление старой заявки и не отправляем такой запрос
+        // в квалификацию, где он мог бы быть ошибочно принят за новые данные.
+        if (normalized.type !== 'action' && RESTORE_OLD_APPLICATION_RE.test(userText)) {
+            const text = 'К сожалению, я не могу восстановить предыдущую заявку из истории по её номеру: в системе доступна только текущая заявка. Если нужно внести изменения в ранее оформленную заявку, этот вопрос сможет проверить специалист MLK.';
+            addHistory(state, 'assistant', text);
+            state.updatedAt = new Date().toISOString();
+            await persistSalesState(state);
+            return {
+                text,
+                actions: state.pendingRestart ? [makeButtonsAction('restart_confirm', [
+                    { text: 'Продолжить', value: 'continue' },
+                    { text: 'Начать заново', value: 'restart' }
+                ])] : [],
+                project: state.project,
+                missing: calculateMissing(state),
+                stage: state.stage,
+                intent: 'question',
+                readyForManager: false,
+                confirmationStatus: state.confirmation.status,
+                managerSummary: null
+            };
+        }
+
 
         // --------------------------------------------------------
         // AI EXTRACTION
@@ -7659,19 +7695,41 @@ addHistory(
             const wantsRestart = !looksLikeClientQuestion(answerText) && (RESTART_RE.test(answerText) || RESTART_ANSWER_RE.test(answerText));
             const wantsContinue = CONTINUE_RE.test(answerText) && !wantsRestart && !looksLikeClientQuestion(answerText);
 
-            if (!looksLikeClientQuestion(answerText)) state.pendingRestart = false;
-
-            if (wantsRestart && !wantsContinue) {
+            if (wantsRestart) {
+                state.pendingRestart = false;
                 return await processStart(clientId, clientName, { force: true });
             }
 
             if (wantsContinue) {
+                state.pendingRestart = false;
                 const resumed = await handleControlAction(
                     state,
                     { tag: 'restart_confirm', value: 'continue' },
                     initialGreeting
                 );
                 if (resumed) return resumed;
+            }
+
+            // Неизвестный ответ не отменяет ожидающее подтверждение и не попадает
+            // в извлечение полей заявки (например, «добавь звук» не является выбором).
+            if (!looksLikeClientQuestion(answerText)) {
+                const text = 'Пожалуйста, выберите, что сделать с текущей заявкой: продолжить или начать заново.';
+                addHistory(state, 'assistant', text);
+                await persistSalesState(state);
+                return {
+                    text,
+                    actions: [makeButtonsAction('restart_confirm', [
+                        { text: 'Продолжить', value: 'continue' },
+                        { text: 'Начать заново', value: 'restart' }
+                    ])],
+                    project: state.project,
+                    missing: calculateMissing(state),
+                    stage: state.stage,
+                    intent: 'greeting',
+                    readyForManager: false,
+                    confirmationStatus: state.confirmation.status,
+                    managerSummary: null
+                };
             }
         }
 
@@ -8106,6 +8164,18 @@ addHistory(
                         state.confirmationStatus.eventType = 'confirmed';
                         if (state.deferredFields) delete state.deferredFields.eventType;
                     }
+                }
+
+                // Формат «Выставки (Стенд фирмы)» может прийти внутри длинного
+                // сообщения с описанием проекта. Сохраняем уточнение из скобок
+                // независимо от того, какое поле было ожидаемым.
+                const explicitExhibitionFormat = userText.match(/выставк[а-яё]*\s*\(([^)]{1,100})\)/i);
+                if (explicitExhibitionFormat) {
+                    state.project.eventType = 'exhibitions';
+                    state.project.eventTypeOriginal = explicitExhibitionFormat[1].trim();
+                    state.confirmationStatus = state.confirmationStatus || {};
+                    state.confirmationStatus.eventType = 'confirmed';
+                    if (state.deferredFields) delete state.deferredFields.eventType;
                 }
 
                 if (expectedField === 'ledDetails' && explicitlyUnknownDimensions(userText)) {
