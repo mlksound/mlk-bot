@@ -45,7 +45,6 @@ const {
     initStorage,
     loadSalesState,
     saveSalesState,
-    saveClientMessages,
     deleteSalesState
 } = require('./storage.js');
 
@@ -390,25 +389,9 @@ async function persistSalesState(
     try {
 
         refreshApplicationCode(state);
-
-        // Сначала сохраняем основное состояние как и раньше.
-        // Полный архив записываем отдельно: ошибка архива не должна
-        // мешать работе Sales Engine и сохранению текущей заявки.
         await saveSalesState(
             state
         );
-
-        try {
-            await saveClientMessages(
-                state.client.id,
-                Array.isArray(state.history) ? state.history : []
-            );
-        } catch (historyError) {
-            console.warn(
-                '⚠️ Client message archive save error:',
-                historyError.message
-            );
-        }
 
     } catch (error) {
 
@@ -6849,7 +6832,8 @@ function parseReadinessTime(text) {
 }
 
 function parseTimeAnswer(text) {
-    const source = String(text || '').trim().toLowerCase().replace(/ё/g, 'е');
+    // Нормализуем разговорные числительные: «до 2-ух часов ночи» -> «до 2 часов ночи».
+    const source = String(text || '').trim().toLowerCase().replace(/ё/g, 'е').replace(/(\d{1,2})[-‑](?:ух|ых|х)(?=\s|$|[.,!?])/gi, '$1');
     const candidates = [source, normalizeKeyboardLayoutToRussian(source)];
     for (const candidate of candidates) {
         let match = candidate.match(/(?:^|\b)(\d{1,2})[:.]([0-5]\d)(?:\b|$)/);
@@ -7115,6 +7099,27 @@ function applyDirectTimeAnswer(state, expectedField, text) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) && target === 'readyDate') {
         dateOnly = String(state.project.dateStart || state.project.dateEnd || '').slice(0, 10);
     }
+
+    // Однодневное мероприятие может фактически закончиться после полуночи.
+    // Если клиент не называл отдельную дату, а время окончания раньше времени начала,
+    // относим окончание к следующим календарным суткам, не меняя multiDay=false.
+    if (target === 'dateEnd' && state.project.multiDay === false &&
+        !parseRussianDateMentions(text).length) {
+        const startValue = String(state.project.dateStart || '');
+        const startMatch = startValue.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})$/);
+        const startDateOnly = startMatch?.[1];
+        if (startMatch && dateOnly === startDateOnly) {
+            const startMinutes = Number(startMatch[2]) * 60 + Number(startMatch[3]);
+            const endMinutes = Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+            if (endMinutes < startMinutes) {
+                const [year, month, day] = dateOnly.split('-').map(Number);
+                const nextDay = new Date(year, month - 1, day + 1);
+                const pad = value => String(value).padStart(2, '0');
+                dateOnly = `${nextDay.getFullYear()}-${pad(nextDay.getMonth() + 1)}-${pad(nextDay.getDate())}`;
+            }
+        }
+    }
+
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) || !parseIsoDateTime(dateOnly)) return false;
     state.project[target] = `${dateOnly} ${time}`;
     state.project[`${target}Approximate`] = /(?:около|примерно|приблизительно|ориентировочно|где-то|где то|наверное|вероятно|скорее всего|возможно|может(?:\s+быть)?|не уверен(?:а)?)/i.test(String(text || ''));
