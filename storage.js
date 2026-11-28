@@ -101,6 +101,26 @@ async function initStorage() {
                     )
                 `);
 
+                // Полный архив сообщений хранится отдельно от sales_states.
+                // Он не обрезается вместе с оперативной историей Sales Engine.
+                await db.execute(`
+                    CREATE TABLE IF NOT EXISTS client_messages (
+                        message_id TEXT PRIMARY KEY,
+                        client_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        sender TEXT,
+                        source TEXT,
+                        content TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        meta_json TEXT NOT NULL
+                    )
+                `);
+
+                await db.execute(`
+                    CREATE INDEX IF NOT EXISTS idx_client_messages_client_time
+                    ON client_messages (client_id, timestamp)
+                `);
+
             })();
     }
 
@@ -208,6 +228,63 @@ async function saveSalesState(
             updatedAt
         ]
     });
+
+    return true;
+}
+
+
+// ============================================================
+// APPEND FULL CLIENT MESSAGE HISTORY
+// ============================================================
+
+async function saveClientMessages(clientId, messages) {
+
+    const key = String(clientId || '').trim();
+    if (!key || !Array.isArray(messages) || messages.length === 0) {
+        return true;
+    }
+
+    await initStorage();
+
+    const db = getTursoClient();
+    const statements = [];
+
+    for (const message of messages) {
+        if (!message || !message.content) continue;
+
+        const role = message.role === 'user' ? 'user' : 'assistant';
+        const timestamp = String(message.timestamp || new Date().toISOString());
+        const sender = String(
+            message.sender || (role === 'user' ? 'client' : 'dmitry')
+        );
+        const source = String(message.source || 'sales_engine');
+        const content = String(message.content);
+        const metaJson = JSON.stringify(message);
+
+        // Стабильный ключ не требует менять структуру state.history.
+        // Поэтому текущий контекст DeepSeek и логика Sales Engine не меняются.
+        const messageId = require('crypto')
+            .createHash('sha256')
+            .update([key, timestamp, role, sender, source, content].join('\u001f'))
+            .digest('hex');
+
+        statements.push({
+            sql: `
+                INSERT OR IGNORE INTO client_messages (
+                    message_id, client_id, role, sender, source,
+                    content, timestamp, meta_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            args: [
+                messageId, key, role, sender, source,
+                content, timestamp, metaJson
+            ]
+        });
+    }
+
+    if (statements.length > 0) {
+        await db.batch(statements, 'write');
+    }
 
     return true;
 }
@@ -493,6 +570,8 @@ module.exports = {
     loadSalesState,
 
     saveSalesState,
+
+    saveClientMessages,
 
     deleteSalesState,
 

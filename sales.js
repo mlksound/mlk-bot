@@ -45,6 +45,7 @@ const {
     initStorage,
     loadSalesState,
     saveSalesState,
+    saveClientMessages,
     deleteSalesState
 } = require('./storage.js');
 
@@ -389,9 +390,25 @@ async function persistSalesState(
     try {
 
         refreshApplicationCode(state);
+
+        // Сначала сохраняем основное состояние как и раньше.
+        // Полный архив записываем отдельно: ошибка архива не должна
+        // мешать работе Sales Engine и сохранению текущей заявки.
         await saveSalesState(
             state
         );
+
+        try {
+            await saveClientMessages(
+                state.client.id,
+                Array.isArray(state.history) ? state.history : []
+            );
+        } catch (historyError) {
+            console.warn(
+                '⚠️ Client message archive save error:',
+                historyError.message
+            );
+        }
 
     } catch (error) {
 
